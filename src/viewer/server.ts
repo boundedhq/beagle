@@ -1,0 +1,257 @@
+// Viewer server (design §6.8): serves the crown-jewels page, hardened as a
+// unit — loopback bind, one-time bootstrap token → header credential,
+// Origin/Host validation, strict CSP, POST-only mutations, fetch-SSE feed,
+// idle shutdown when the last tab disconnects.
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { createHash, randomBytes } from "node:crypto";
+import { Store } from "../core/store/store";
+
+export interface ViewerOptions {
+  stateDir: string;
+  idleTimeoutMs?: number;
+  /** Mutations ride through the daemon (single writer); absent → 501. */
+  onPurge?: (kind: string) => void;
+}
+
+const STATIC_FILES: Record<string, { path: string; type: string }> = {
+  "/": { path: "index.html", type: "text/html; charset=utf-8" },
+  "/app.js": { path: "app.js", type: "text/javascript; charset=utf-8" },
+  "/style.css": { path: "style.css", type: "text/css; charset=utf-8" },
+  "/vendor/preact.module.js": { path: "vendor/preact.module.js", type: "text/javascript" },
+  "/vendor/preact-hooks.module.js": { path: "vendor/preact-hooks.module.js", type: "text/javascript" },
+  "/vendor/htm.module.js": { path: "vendor/htm.module.js", type: "text/javascript" },
+};
+
+// script-src allows exactly two things: same-origin module files and the
+// inline import map, pinned by its content hash — still nothing external,
+// still no other inline script.
+function buildCsp(): string {
+  const html = readFileSync(join(import.meta.dir, "static", "index.html"), "utf8");
+  const m = html.match(/<script type="importmap">([\s\S]*?)<\/script>/);
+  const importMapHash = m
+    ? `'sha256-${createHash("sha256").update(m[1]!).digest("base64")}'`
+    : "";
+  return [
+    "default-src 'self'",
+    `script-src 'self' ${importMapHash}`.trim(),
+    "style-src 'self'",
+    "connect-src 'self'",
+    "img-src 'self'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+  ].join("; ");
+}
+
+const CSP = buildCsp();
+
+export class ViewerServer {
+  isRunning = false;
+  private server: Server | null = null;
+  private port = 0;
+  private bootToken: string | null = null;
+  private credential: string | null = null;
+  private sseClients = new Set<ServerResponse>();
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(private opts: ViewerOptions) {}
+
+  start(): Promise<string> {
+    this.bootToken = randomBytes(24).toString("hex");
+    return new Promise((resolve) => {
+      this.server = createServer((req, res) => this.route(req, res));
+      this.server.listen(0, "127.0.0.1", () => {
+        this.port = (this.server!.address() as { port: number }).port;
+        this.isRunning = true;
+        this.armIdleTimer();
+        resolve(`http://127.0.0.1:${this.port}/?boot=${this.bootToken}`);
+      });
+    });
+  }
+
+  stop(): void {
+    for (const c of this.sseClients) c.end();
+    this.sseClients.clear();
+    this.server?.close();
+    this.server?.closeAllConnections?.();
+    this.isRunning = false;
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+  }
+
+  /** Push a live event (new exchange, alert) to any open tabs. */
+  broadcast(type: string, data: unknown): void {
+    const frame = `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
+    for (const c of this.sseClients) c.write(frame);
+  }
+
+  // ---- routing ----
+
+  private route(req: IncomingMessage, res: ServerResponse): void {
+    if (!this.checkHostOrigin(req)) {
+      res.writeHead(403).end("forbidden: non-local origin");
+      return;
+    }
+    this.armIdleTimer();
+    let path: string;
+    try {
+      path = decodeURIComponent((req.url ?? "/").split("?")[0]!);
+    } catch {
+      res.writeHead(400).end();
+      return;
+    }
+
+    const staticFile = STATIC_FILES[path];
+    if (staticFile && req.method === "GET") {
+      const body = readFileSync(join(import.meta.dir, "static", staticFile.path));
+      res.writeHead(200, {
+        "content-type": staticFile.type,
+        "content-security-policy": CSP,
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "no-referrer",
+      });
+      res.end(body);
+      return;
+    }
+
+    if (path === "/api/session" && req.method === "POST") {
+      void this.readJson(req).then((body) => {
+        const boot = (body as { boot?: string })?.boot;
+        if (this.bootToken && boot === this.bootToken) {
+          this.bootToken = null; // one-time: invalidated on use
+          this.credential = randomBytes(32).toString("hex");
+          this.json(res, 200, { credential: this.credential });
+        } else {
+          this.json(res, 401, { error: "invalid or already-used bootstrap token" });
+        }
+      });
+      return;
+    }
+
+    if (path.startsWith("/api/")) {
+      const token = req.headers["x-beagle-token"];
+      if (!this.credential || token !== this.credential) {
+        this.json(res, 401, { error: "missing or invalid session credential" });
+        return;
+      }
+      this.apiRoute(path, req, res);
+      return;
+    }
+
+    res.writeHead(404).end();
+  }
+
+  private apiRoute(path: string, req: IncomingMessage, res: ServerResponse): void {
+    const store = this.openStore();
+    if (!store && path !== "/api/purge") {
+      this.json(res, 200, []);
+      return;
+    }
+    try {
+      if (path === "/api/feed" && req.method === "GET") {
+        this.json(res, 200, store!.listExchanges(500));
+      } else if (path.startsWith("/api/exchange/") && req.method === "GET") {
+        const ex = store!.getExchange(path.slice("/api/exchange/".length));
+        if (!ex) return this.json(res, 404, { error: "no such exchange" });
+        const dec = new TextDecoder("utf-8", { fatal: false });
+        this.json(res, 200, {
+          ...ex,
+          requestBody: ex.requestBody ? dec.decode(ex.requestBody) : null,
+          responseBody: ex.responseBody ? dec.decode(ex.responseBody) : null,
+          sseRaw: ex.sseRaw ? dec.decode(ex.sseRaw) : null,
+        });
+      } else if (path === "/api/search" && req.method === "POST") {
+        void this.readJson(req).then((body) => {
+          const term = String((body as { term?: string })?.term ?? "");
+          this.json(res, 200, term ? store!.searchLiteral(term) : []);
+          store!.close();
+        });
+        return; // store closed in the async branch
+      } else if (path === "/api/leaks" && req.method === "GET") {
+        this.json(res, 200, store!.listLeakEvents());
+      } else if (path === "/api/stream" && req.method === "GET") {
+        res.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          connection: "keep-alive",
+        });
+        res.write(": connected\n\n");
+        this.sseClients.add(res);
+        req.on("close", () => {
+          this.sseClients.delete(res);
+          this.armIdleTimer();
+        });
+      } else if (path === "/api/purge" && req.method === "POST") {
+        void this.readJson(req).then((body) => {
+          const kind = String((body as { kind?: string })?.kind ?? "all");
+          if (!this.opts.onPurge) return this.json(res, 501, { error: "purge runs via the daemon" });
+          this.opts.onPurge(kind);
+          this.json(res, 200, { ok: true });
+        });
+      } else {
+        this.json(res, 404, { error: "no such endpoint" });
+      }
+    } finally {
+      if (path !== "/api/search" && path !== "/api/stream") store?.close();
+    }
+  }
+
+  // ---- helpers ----
+
+  private checkHostOrigin(req: IncomingMessage): boolean {
+    const host = req.headers.host ?? "";
+    const localHost =
+      host === `127.0.0.1:${this.port}` || host === `localhost:${this.port}`;
+    if (!localHost) return false;
+    const origin = req.headers.origin;
+    if (origin !== undefined) {
+      const okOrigins = [`http://127.0.0.1:${this.port}`, `http://localhost:${this.port}`];
+      if (!okOrigins.includes(origin)) return false;
+    }
+    return true;
+  }
+
+  private openStore(): Store | null {
+    try {
+      return Store.openReadOnly(this.opts.stateDir);
+    } catch {
+      return null;
+    }
+  }
+
+  private json(res: ServerResponse, status: number, data: unknown): void {
+    res.writeHead(status, {
+      "content-type": "application/json",
+      "content-security-policy": CSP,
+      "x-content-type-options": "nosniff",
+    });
+    res.end(JSON.stringify(data));
+  }
+
+  private readJson(req: IncomingMessage): Promise<unknown> {
+    return new Promise((resolve) => {
+      let buf = "";
+      req.on("data", (d) => (buf += d));
+      req.on("end", () => {
+        try {
+          resolve(JSON.parse(buf));
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+  }
+
+  private armIdleTimer(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    const ms = this.opts.idleTimeoutMs ?? 10 * 60_000;
+    this.idleTimer = setTimeout(() => {
+      // Listen only while someone is looking (R12).
+      if (this.sseClients.size === 0) this.stop();
+      else this.armIdleTimer();
+    }, ms);
+    this.idleTimer.unref?.();
+  }
+}
