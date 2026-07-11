@@ -1,0 +1,76 @@
+// Schema from design §4. Version stamped in PRAGMA user_version; every
+// reader checks it before querying (two binaries share this file).
+export const SCHEMA_VERSION = 1;
+
+export const SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS exchanges (
+  id            TEXT PRIMARY KEY,
+  session_id    TEXT NOT NULL,
+  run_id        TEXT NOT NULL,
+  source        TEXT NOT NULL,
+  agent         TEXT, provider TEXT, model TEXT, endpoint TEXT,
+  ts_request    INTEGER NOT NULL,
+  ts_response   INTEGER,
+  status        INTEGER,
+  tokens_in     INTEGER, tokens_out INTEGER,
+  bytes_req     INTEGER, bytes_resp INTEGER,
+  summary       TEXT,
+  scan_state    TEXT NOT NULL DEFAULT 'ok',
+  capture_state TEXT NOT NULL DEFAULT 'ok',
+  session_tier  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_exch_session ON exchanges(session_id);
+CREATE INDEX IF NOT EXISTS ix_exch_ts ON exchanges(ts_request);
+
+CREATE TABLE IF NOT EXISTS payloads (
+  exchange_id   TEXT PRIMARY KEY REFERENCES exchanges(id) ON DELETE CASCADE,
+  request_body  BLOB,
+  request_headers  TEXT,
+  response_body BLOB,
+  response_headers TEXT,
+  sse_raw       BLOB
+);
+
+CREATE TABLE IF NOT EXISTS leak_events (
+  id              TEXT PRIMARY KEY,
+  fingerprint     TEXT NOT NULL,
+  session_id      TEXT NOT NULL,
+  detector        TEXT NOT NULL,
+  secret_type     TEXT NOT NULL,
+  severity        TEXT NOT NULL,
+  confidence_tier TEXT NOT NULL,
+  destination     TEXT NOT NULL,
+  occurrences     INTEGER NOT NULL DEFAULT 1,
+  first_ts        INTEGER NOT NULL, last_ts INTEGER NOT NULL,
+  first_exchange  TEXT REFERENCES exchanges(id) ON DELETE SET NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_leak_fp ON leak_events(fingerprint, destination, session_id);
+
+CREATE TABLE IF NOT EXISTS leak_occurrences (
+  event_id      TEXT REFERENCES leak_events(id) ON DELETE CASCADE,
+  exchange_id   TEXT REFERENCES exchanges(id) ON DELETE CASCADE,
+  PRIMARY KEY (event_id, exchange_id)
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  id              TEXT PRIMARY KEY,
+  agent TEXT, provider TEXT,
+  first_ts INTEGER, last_ts INTEGER,
+  conv_id         TEXT,
+  head_hash       TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_sess_conv ON sessions(conv_id);
+CREATE INDEX IF NOT EXISTS ix_sess_head ON sessions(head_hash);
+
+CREATE TABLE IF NOT EXISTS runs (
+  id            TEXT PRIMARY KEY,
+  agent TEXT, provider TEXT,
+  upstream      TEXT NOT NULL,
+  auth_location TEXT,
+  created_ts    INTEGER NOT NULL
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(
+  content, exchange_id UNINDEXED, tokenize='trigram'
+);
+`;
