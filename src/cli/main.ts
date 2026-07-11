@@ -1,18 +1,81 @@
-// CLI entry point (non-core). Real commands land in PR 7; this is the
-// compile target that proves the single-binary build path.
+// CLI entry point (non-core). Headless loop per R12: run, status, search,
+// leaks, show, purge — the whole product without the viewer.
+import { cmdLeaks, cmdPurge, cmdRun, cmdSearch, cmdShow, cmdStatus, defaultStateDir } from "./commands";
+
 export const VERSION = "0.1.0";
 
-export function run(argv: string[]): number {
-  const arg = argv[0];
-  if (arg === "--version" || arg === "-v") {
-    console.log(`beagle ${VERSION}`);
-    return 0;
+const HELP = `beagle ${VERSION} — a local transparency proxy for AI agents
+
+usage:
+  beagle run <agent> [args...]   watch one agent run (claude, codex)
+  beagle status                  trust strip: coverage, store, retention
+  beagle search <string>         was this ever sent? definitive answer
+  beagle leaks                   the leak log
+  beagle show <id-prefix>        one exchange, summarized
+  beagle purge [all|panic]       erase captured data
+  beagle daemon                  run the daemon in the foreground
+`;
+
+export async function run(argv: string[]): Promise<number> {
+  const [cmd, ...rest] = argv;
+  const stateDir = defaultStateDir();
+  switch (cmd) {
+    case "--version":
+    case "-v":
+      console.log(`beagle ${VERSION}`);
+      return 0;
+    case "run": {
+      const [agent, ...agentArgs] = rest;
+      if (!agent) { console.error("usage: beagle run <agent> [args...]"); return 2; }
+      return cmdRun(stateDir, agent, agentArgs);
+    }
+    case "status": {
+      const { controlRequest } = await import("../daemon/control");
+      const { readFileSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      let info = null;
+      try {
+        const raw = JSON.parse(readFileSync(join(stateDir, "daemon.json"), "utf8"));
+        const r = await controlRequest(raw.socketPath, { cmd: "ping" }, 800);
+        if (r.ok) info = raw;
+      } catch { /* not running */ }
+      console.log(cmdStatus(stateDir, info));
+      return 0;
+    }
+    case "search": {
+      const term = rest.join(" ");
+      if (!term) { console.error("usage: beagle search <string>"); return 2; }
+      console.log(cmdSearch(stateDir, term));
+      return 0;
+    }
+    case "leaks":
+      console.log(cmdLeaks(stateDir));
+      return 0;
+    case "show": {
+      if (!rest[0]) { console.error("usage: beagle show <exchange-id-prefix>"); return 2; }
+      console.log(cmdShow(stateDir, rest[0]));
+      return 0;
+    }
+    case "purge": {
+      console.log(await cmdPurge(stateDir, rest[0] ?? "all"));
+      return 0;
+    }
+    case "daemon": {
+      const { Daemon } = await import("../daemon/daemon");
+      const daemon = await Daemon.start({ stateDir });
+      console.log(`beagled: proxy on 127.0.0.1:${daemon.proxyPort}, control at ${daemon.socketPath}`);
+      const shutdown = () => void daemon.stop().then(() => process.exit(0));
+      process.on("SIGINT", shutdown);
+      process.on("SIGTERM", shutdown);
+      await new Promise(() => {}); // run until signaled
+      return 0;
+    }
+    default:
+      console.log(HELP);
+      return cmd ? 2 : 0;
   }
-  console.log(`beagle ${VERSION} — a local transparency proxy for AI agents`);
-  console.log("Commands arrive in upcoming PRs: run, watch, status, search, leaks, show, purge, ui");
-  return 0;
 }
 
 if (import.meta.main) {
-  process.exit(run(process.argv.slice(2)));
+  process.exit(await run(process.argv.slice(2)));
 }

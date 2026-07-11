@@ -209,6 +209,18 @@ export class Store {
     return { fresh, eventId };
   }
 
+  countExchanges(): number {
+    return this.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM exchanges`)?.n ?? 0;
+  }
+
+  countLeakEvents(): number {
+    return this.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM leak_events`)?.n ?? 0;
+  }
+
+  updateExchangeScanState(id: string, state: "ok" | "incomplete"): void {
+    this.db.run(`UPDATE exchanges SET scan_state=? WHERE id=?`, [state, id]);
+  }
+
   fingerprintKnown(fingerprint: string): boolean {
     return (
       this.db.get<{ n: number }>(
@@ -346,6 +358,12 @@ export class Store {
     }
     if (Number.isFinite(policy.eventWindowMs)) {
       this.db.run(`DELETE FROM leak_events WHERE last_ts < ?`, [now - policy.eventWindowMs]);
+    }
+    if (Number.isFinite(policy.payloadWindowMs)) {
+      // sessions and runs follow the payload window (design §4)
+      const cutoff = now - policy.payloadWindowMs;
+      this.db.run(`DELETE FROM sessions WHERE last_ts < ?`, [cutoff]);
+      this.db.run(`DELETE FROM runs WHERE created_ts < ?`, [cutoff]);
     }
     this.db.exec("PRAGMA incremental_vacuum");
   }

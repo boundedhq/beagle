@@ -14,6 +14,10 @@ import {
 import type { RunRegistry, ResolvedRun } from "./registry";
 
 export interface ScanContext {
+  /** Assigned at request start so alerts can reference the exchange before
+   *  the response completes; onExchange delivers the same id. */
+  exchangeId: string;
+  endpoint: string;
   runId: string;
   provider: string;
   agent?: string;
@@ -104,6 +108,7 @@ export class ProxyServer {
     }
     const upstreamPath = m[2]!;
     const tsRequest = Date.now();
+    const exchangeId = ulid(tsRequest);
 
     // Rewrite authority; preserve everything else byte-for-byte, in order.
     const headers: HeaderList = req.headers.map(([n, v]) =>
@@ -121,6 +126,8 @@ export class ProxyServer {
     )?.[1];
     this.opts
       .scan(new Uint8Array(req.body), {
+        exchangeId,
+        endpoint: upstreamPath,
         runId: run.id,
         provider: run.provider,
         agent: run.agent,
@@ -213,7 +220,7 @@ export class ProxyServer {
     // ---- capture branch (off the relay path) ----
     const responseRaw = Buffer.concat(captured);
     const ex: CapturedExchange = {
-      id: ulid(tsRequest),
+      id: exchangeId,
       runId: run.id,
       source: "wire",
       agent: run.agent,
@@ -225,6 +232,7 @@ export class ProxyServer {
       },
       response: {
         status: reader.status,
+        headers: reader.headers,
         bodyBytes: decodeBody(new Uint8Array(responseRaw), reader.headerValue("content-encoding")),
       },
       meta: {

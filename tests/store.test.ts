@@ -195,6 +195,21 @@ describe("Retention & purge", () => {
     store.close();
   });
 
+  test("sweep ages out sessions and runs on the payload window (R11)", () => {
+    const store = Store.open(dir);
+    const old = Date.now() - 8 * 24 * 3600_000;
+    store.insertSession({ id: "old-s", agent: "a", provider: "p", firstTs: old, lastTs: old });
+    store.insertSession({ id: "new-s", agent: "a", provider: "p", firstTs: Date.now(), lastTs: Date.now() });
+    store.insertRun({ id: "old-r", agent: "a", provider: "p", upstream: "http://x", authLocation: null, extraHeaders: null, createdTs: old });
+    store.sweep({ payloadWindowMs: 7 * 24 * 3600_000, eventWindowMs: Infinity, sizeCapBytes: Infinity });
+    expect(store.findSessionBy("run_id", ["old-r"], { agent: "a", provider: "p" })).toBeNull();
+    expect(store.listRuns().find((r) => r.id === "old-r")).toBeUndefined();
+    expect(
+      store.findSessionBy("head_hash", ["nope"], { agent: "a", provider: "p" }),
+    ).toBeNull();
+    store.close();
+  });
+
   test("purge by session removes that session only", () => {
     const store = Store.open(dir);
     const a = fakeExchange({ sessionId: "s1" });
