@@ -82,7 +82,8 @@ describe("CLI commands (headless loop, R12)", () => {
       responseHeaders: null, sseRaw: null, searchText: "x",
     });
     store.close();
-    const out = cmdShow(stateDir, id.slice(0, 8));
+    // full id: two same-millisecond ULIDs share an 8-char prefix
+    const out = cmdShow(stateDir, id);
     expect(out).not.toContain("\x1b");
     expect(out).toContain("wipe-your-screen");
   });
