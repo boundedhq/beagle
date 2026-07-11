@@ -6,6 +6,9 @@ export interface RuleSpec {
   id: string;
   description: string;
   regex: string;
+  /** Regex flags; defaults to "g". Case-insensitivity is opt-in — structured
+   *  detectors are case-exact by design (an AKIA prefix is uppercase). */
+  flags?: string;
   keywords: string[];
   secretGroup: number;
   severity: "high" | "medium" | "low";
@@ -28,6 +31,11 @@ export function loadRuleFile(json: string, sha256Pin?: string): RuleSpec[] {
   for (const r of parsed.rules) {
     if (!r.id || !r.regex || !Array.isArray(r.keywords)) {
       throw new Error(`malformed rule: ${JSON.stringify(r).slice(0, 120)}`);
+    }
+    try {
+      new RegExp(r.regex, r.flags ?? "g");
+    } catch (e) {
+      throw new Error(`rule '${r.id}' has an invalid regex: ${(e as Error).message}`);
     }
   }
   return parsed.rules;

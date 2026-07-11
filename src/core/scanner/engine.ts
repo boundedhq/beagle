@@ -30,9 +30,11 @@ export interface ScanCtx {
 // the main FP source on coding-agent traffic (R5).
 const STOPWORDS = ["example", "sample", "placeholder", "dummy", "xxxxxx", "changeme"];
 
+const MAX_FINDINGS_PER_RULE = 500;
+
 export function compileRules(specs: RuleSpec[], hmacKey: Uint8Array): CompiledRules {
   return {
-    rules: specs.map((spec) => ({ spec, re: new RegExp(spec.regex, "gi") })),
+    rules: specs.map((spec) => ({ spec, re: new RegExp(spec.regex, spec.flags ?? "g") })),
     hmacKey,
   };
 }
@@ -48,8 +50,9 @@ export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): 
     // their regex — the lever that keeps scan time flat as rules grow.
     if (!spec.keywords.some((k) => lower.includes(k))) continue;
     re.lastIndex = 0;
+    let ruleFindings = 0;
     let m: RegExpExecArray | null;
-    while ((m = re.exec(text)) !== null) {
+    while (ruleFindings < MAX_FINDINGS_PER_RULE && (m = re.exec(text)) !== null) {
       if (m[0].length === 0) { re.lastIndex++; continue; } // zero-width guard
       const secretRaw = m[spec.secretGroup] ?? m[0];
       const secret = normalize(secretRaw);
@@ -59,6 +62,7 @@ export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): 
       if (spec.entropy !== undefined && shannonEntropy(secret) < spec.entropy) continue;
       if (spec.validators?.includes("luhn") && !luhnValid(secret)) continue;
       const start = m.index;
+      ruleFindings++;
       findings.push({
         detector: spec.id,
         secretType: spec.id,
@@ -90,7 +94,11 @@ export function normalize(s: string): string {
 }
 
 export function fingerprint(normalizedSecret: string, hmacKey: Uint8Array): string {
-  return createHmac("sha256", hmacKey).update(normalizedSecret).digest("hex");
+  // All whitespace stripped: the same PEM block re-sent with different line
+  // wrapping must fingerprint identically or R6 dedup re-alerts on it.
+  return createHmac("sha256", hmacKey)
+    .update(normalizedSecret.replace(/\s+/g, ""))
+    .digest("hex");
 }
 
 export function shannonEntropy(s: string): number {

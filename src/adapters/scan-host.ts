@@ -34,7 +34,8 @@ export class ScanHost {
     if (this.closed) return Promise.resolve({ state: "incomplete", findings: [] });
     const worker = this.ensureWorker();
     const id = this.nextId++;
-    // Copy into a transferable buffer: zero-copy handoff to the worker.
+    // Stage into a fresh buffer (the caller's may be a shared view), then
+    // hand it to the worker as a transferable — the transfer itself is free.
     const buf = new ArrayBuffer(bytes.byteLength);
     new Uint8Array(buf).set(bytes);
     return new Promise((resolve) => {
@@ -79,14 +80,14 @@ export class ScanHost {
   }
 
   private onDeadline(id: number): void {
+    void id; // the breaching scan fails with the rest of the batch
     // A stuck regex can't be interrupted in-thread; kill the whole worker.
     this.worker?.terminate();
     this.worker = null; // respawned lazily on the next scan
-    this.failAll(id);
+    this.failAll();
   }
 
-  private failAll(deadlineId?: number): void {
-    void deadlineId;
+  private failAll(): void {
     for (const [id, p] of this.pending) {
       clearTimeout(p.timer);
       p.resolve({ state: "incomplete", findings: [] });

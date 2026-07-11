@@ -131,6 +131,29 @@ describe("fingerprinting", () => {
   });
 });
 
+describe("case sensitivity (precision)", () => {
+  test("lowercase AKIA lookalike is not flagged by the structured rule", () => {
+    const f = scanText('x = "akiazq3drstuvwxy2345"');
+    expect(f.find((x) => x.secretType === "aws-access-key-id")).toBeUndefined();
+  });
+
+  test("uppercase env-var style still matches the case-insensitive rules", () => {
+    const f = scanText('AWS_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYZZZZZKEY42"');
+    expect(f.find((x) => x.secretType === "aws-secret-access-key")).toBeDefined();
+  });
+});
+
+describe("fingerprint whitespace stability", () => {
+  test("re-wrapped PEM block fingerprints identically", () => {
+    const body = "MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn";
+    const pem1 = `-----BEGIN RSA PRIVATE KEY-----\n${body}\n-----END RSA PRIVATE KEY-----`;
+    const pem2 = `-----BEGIN RSA PRIVATE KEY-----\n${body.slice(0, 16)}\n${body.slice(16)}\n-----END RSA PRIVATE KEY-----`;
+    const f1 = scanText(pem1).find((x) => x.secretType === "private-key")!;
+    const f2 = scanText(pem2).find((x) => x.secretType === "private-key")!;
+    expect(f1.fingerprint).toBe(f2.fingerprint);
+  });
+});
+
 describe("rule file integrity", () => {
   test("loader rejects a tampered rule file when a pin is given", () => {
     const raw = readFileSync("rules/beagle-rules.json", "utf8");
