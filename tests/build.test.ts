@@ -65,14 +65,18 @@ describe("compiled binary", () => {
           method: "POST",
           body: '{"messages":[{"role":"user","content":"key AKIAZQ3DRSTUVWXY2345"}]}',
         });
-        await Bun.sleep(600);
 
-        // the embedded scanner must have recorded the leak
-        const leaks = Bun.spawnSync([out, "leaks"], {
-          cwd: dir,
-          env: { ...process.env, BEAGLE_STATE_DIR: stateDir },
-        });
-        expect(leaks.stdout.toString()).toContain("aws-access-key-id");
+        // the embedded scanner must record the leak — poll, don't guess a
+        // fixed delay (slow CI runners)
+        let leaksOut = "";
+        for (let i = 0; i < 40 && !leaksOut.includes("aws-access-key-id"); i++) {
+          await Bun.sleep(150);
+          leaksOut = Bun.spawnSync([out, "leaks"], {
+            cwd: dir,
+            env: { ...process.env, BEAGLE_STATE_DIR: stateDir },
+          }).stdout.toString();
+        }
+        expect(leaksOut).toContain("aws-access-key-id");
       } finally {
         daemon.kill();
         upstream.close();

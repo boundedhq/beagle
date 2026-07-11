@@ -303,6 +303,29 @@ export async function cmdUi(stateDir: string): Promise<string> {
   return `dashboard: ${url}\n(the link is one-time; run \`beagle ui\` again for a fresh one)`;
 }
 
+// Parses `beagle run` arguments. Beagle's own flags (--telemetry, --real)
+// are recognized only BEFORE the `--` separator; everything after it belongs
+// to the agent verbatim. The shim invokes: beagle run <agent> --real <path> -- <args...>
+export function parseRunArgs(rawArgs: string[]): {
+  telemetry: boolean;
+  realBinary: string | null;
+  agentArgs: string[];
+} {
+  const sepIdx = rawArgs.indexOf("--");
+  const beagleArgs = sepIdx === -1 ? rawArgs : rawArgs.slice(0, sepIdx);
+  const realIdx = beagleArgs.indexOf("--real");
+  return {
+    telemetry: beagleArgs.includes("--telemetry"),
+    realBinary: realIdx !== -1 ? (beagleArgs[realIdx + 1] ?? null) : null,
+    agentArgs:
+      sepIdx !== -1
+        ? rawArgs.slice(sepIdx + 1)
+        : rawArgs.filter(
+            (a, i) => a !== "--telemetry" && a !== "--real" && rawArgs[i - 1] !== "--real",
+          ),
+  };
+}
+
 export async function cmdRun(stateDir: string, agentName: string, rawArgs: string[]): Promise<number> {
   const spec = AGENTS[agentName];
   if (!spec) {
@@ -312,7 +335,7 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
   // Mode B (R2): --telemetry watches via the agent's own OTel export instead
   // of the wire — for Claude Code on a Claude.ai subscription, where putting
   // a proxy on the wire is off-limits. Capture is labeled agent-reported.
-  const telemetry = rawArgs.includes("--telemetry");
+  const { telemetry, realBinary: realOverride, agentArgs } = parseRunArgs(rawArgs);
   if (telemetry && agentName !== "claude") {
     console.error("--telemetry (agent self-report capture) is supported for claude only in v1.");
     return 2;
@@ -323,15 +346,7 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
     );
     return 2;
   }
-  // The shim invokes: beagle run <agent> --real <path> -- <args...>
-  let realBinary = spec.command;
-  let agentArgs = rawArgs.filter((a) => a !== "--telemetry");
-  const realIdx = agentArgs.indexOf("--real");
-  if (realIdx !== -1 && agentArgs[realIdx + 1]) {
-    realBinary = agentArgs[realIdx + 1]!;
-    const sep = agentArgs.indexOf("--", realIdx);
-    agentArgs = sep !== -1 ? agentArgs.slice(sep + 1) : agentArgs.slice(realIdx + 2);
-  }
+  const realBinary = realOverride ?? spec.command;
 
   const daemon = await ensureDaemon(stateDir);
   if (!daemon) {
@@ -348,7 +363,11 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
     // Nothing goes on the wire: point the agent's own OTel exporter at the
     // daemon's loopback receiver, authed by the per-session run token.
     const status = await controlRequest(daemon.socketPath, { cmd: "status" });
-    const data = status.data as { otlpPort: number; otlpToken: string };
+    const data = status.data as { otlpPort?: number; otlpToken?: string } | undefined;
+    if (!status.ok || !data?.otlpPort || !data.otlpToken) {
+      console.error("could not read the telemetry receiver from the daemon — try `beagle status`.");
+      return 1;
+    }
     modeEnv = buildOtelEnv(`http://127.0.0.1:${data.otlpPort}`, data.otlpToken);
   } else {
     const runId = randomUUID();
