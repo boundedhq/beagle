@@ -12,6 +12,7 @@ import { RunRegistry, type RunRegistration } from "../core/proxy/registry";
 import { SessionResolver, type Resolution } from "../core/session/resolver";
 import { Store } from "../core/store/store";
 import { ScanHost } from "../adapters/scan-host";
+import { scrubAuthHeaders } from "../core/normalize/normalize";
 import { Notifier } from "../notifier/notifier";
 import { detectFormat, parseRequest, parseResponse, type Format, type ParsedRequest } from "../parsers/parsers";
 import { startControlServer, type ControlRequest, type ControlResponse } from "./control";
@@ -29,7 +30,12 @@ interface PendingExchange {
   parsed: ParsedRequest | null;
   format: Format;
   scanState: "ok" | "incomplete";
+  createdTs: number;
 }
+
+// Pending entries whose capture never arrived (failed forward, abort before
+// response) are dropped after this — the map must not grow unboundedly.
+const PENDING_TTL_MS = 10 * 60_000;
 
 const SWEEP_INTERVAL_MS = 15 * 60_000;
 
@@ -56,6 +62,13 @@ export class Daemon {
 
   static async start(opts: DaemonOptions): Promise<Daemon> {
     const d = new Daemon(opts);
+    // One writer only: if a live daemon already owns this state dir, yield.
+    const existing = await aliveDaemon(opts.stateDir);
+    if (existing) {
+      throw new Error(
+        `a beagle daemon is already running (pid ${existing.pid}) — refusing to start a second writer`,
+      );
+    }
     d.store = Store.open(opts.stateDir);
     d.config = loadConfig(opts.stateDir);
     const installKey = loadOrCreateInstallKey(opts.stateDir);
@@ -118,7 +131,9 @@ export class Daemon {
       messages: parsed?.messages,
       systemPrompt: parsed?.system,
     });
-    const entry: PendingExchange = { resolution, parsed, format, scanState: "ok" };
+    const entry: PendingExchange = {
+      resolution, parsed, format, scanState: "ok", createdTs: Date.now(),
+    };
     this.pending.set(ctx.exchangeId, entry);
 
     const result = await this.scanHost.scan(bytes, { authValue: ctx.authValue });
@@ -188,7 +203,9 @@ export class Daemon {
       requestBody: ex.request.bodyBytes,
       requestHeaders: ex.request.headers ?? null,
       responseBody: ex.response.bodyBytes ?? null,
-      responseHeaders: null,
+      responseHeaders: ex.response.headers
+        ? scrubAuthHeaders(ex.response.headers, undefined, ex.provider)
+        : null,
       sseRaw: null,
       searchText: buildSearchText(parsed, respParsed?.text, ex),
     });
@@ -209,6 +226,10 @@ export class Daemon {
       eventWindowMs: this.config.eventWindowDays * 24 * 3600_000,
       sizeCapBytes: this.config.sizeCapMB * (1 << 20),
     });
+    const cutoff = Date.now() - PENDING_TTL_MS;
+    for (const [id, entry] of this.pending) {
+      if (entry.createdTs < cutoff) this.pending.delete(id);
+    }
   }
 
   // ---- control ----
@@ -254,6 +275,19 @@ export class Daemon {
       default:
         return { ok: false, error: `unknown command: ${req.cmd}` };
     }
+  }
+}
+
+async function aliveDaemon(stateDir: string): Promise<{ pid: number } | null> {
+  try {
+    const info = JSON.parse(
+      readFileSync(join(stateDir, "daemon.json"), "utf8"),
+    ) as { pid: number; socketPath: string };
+    const { controlRequest } = await import("./control");
+    const r = await controlRequest(info.socketPath, { cmd: "ping" }, 500);
+    return r.ok ? { pid: info.pid } : null;
+  } catch {
+    return null;
   }
 }
 

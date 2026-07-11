@@ -24,6 +24,7 @@ export interface Exchange {
   };
   response: {
     status?: number;
+    headers?: Array<[string, string]>;
     bodyBytes?: Uint8Array;
     text?: string;
   };

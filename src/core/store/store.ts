@@ -359,6 +359,12 @@ export class Store {
     if (Number.isFinite(policy.eventWindowMs)) {
       this.db.run(`DELETE FROM leak_events WHERE last_ts < ?`, [now - policy.eventWindowMs]);
     }
+    if (Number.isFinite(policy.payloadWindowMs)) {
+      // sessions and runs follow the payload window (design §4)
+      const cutoff = now - policy.payloadWindowMs;
+      this.db.run(`DELETE FROM sessions WHERE last_ts < ?`, [cutoff]);
+      this.db.run(`DELETE FROM runs WHERE created_ts < ?`, [cutoff]);
+    }
     this.db.exec("PRAGMA incremental_vacuum");
   }
 

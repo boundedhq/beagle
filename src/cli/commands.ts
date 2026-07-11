@@ -7,7 +7,13 @@ import { randomUUID } from "node:crypto";
 import { Store, StoreVersionError } from "../core/store/store";
 import { loadConfig } from "../core/config/config";
 import { controlRequest } from "../daemon/control";
+import { stripControlChars } from "../notifier/notifier";
 import { AGENTS, buildRunEnv } from "./agents";
+
+// Everything printed by these commands can embed traffic-derived text
+// (summaries, session ids from parsed content) — sanitize at the boundary,
+// the terminal-escape-injection rule from design §6.10.
+const clean = stripControlChars;
 
 export function defaultStateDir(): string {
   if (process.env.BEAGLE_STATE_DIR) return process.env.BEAGLE_STATE_DIR;
@@ -86,7 +92,7 @@ export function cmdSearch(stateDir: string, term: string): string {
     `found in ${hits.length} exchange${hits.length === 1 ? "" : "s"} across ${sessions.size} session${sessions.size === 1 ? "" : "s"}:`,
   ];
   for (const h of hits) {
-    lines.push(`  ${h.exchangeId.slice(0, 8)}  ${new Date(h.tsRequest).toISOString()}  session ${h.sessionId.slice(0, 8)}`);
+    lines.push(`  ${h.exchangeId.slice(0, 8)}  ${new Date(h.tsRequest).toISOString()}  session ${clean(h.sessionId).slice(0, 8)}`);
   }
   return lines.join("\n");
 }
@@ -101,7 +107,7 @@ export function cmdLeaks(stateDir: string): string {
   for (const e of events) {
     const tier = e.confidenceTier === "structured" ? "" : " (possible)";
     lines.push(
-      `  ${new Date(e.firstTs).toISOString()}  ${e.secretType}${tier} → ${e.destination}` +
+      `  ${new Date(e.firstTs).toISOString()}  ${clean(e.secretType)}${tier} → ${clean(e.destination)}` +
         `  ×${e.occurrences}${e.firstExchange ? `  first: ${e.firstExchange.slice(0, 8)}` : ""}`,
     );
   }
@@ -115,10 +121,10 @@ export function cmdShow(stateDir: string, idPrefix: string): string {
   if (!ex) return `no exchange matches '${idPrefix}' (prefix may be ambiguous or unknown).`;
   const lines = [
     `exchange ${ex.id}`,
-    `  ${ex.agent ?? "?"} → ${ex.provider ?? "?"}${ex.model ? `/${ex.model}` : ""}  ${ex.endpoint ?? ""}`,
+    `  ${clean(ex.agent ?? "?")} → ${clean(ex.provider ?? "?")}${ex.model ? `/${clean(ex.model)}` : ""}  ${clean(ex.endpoint ?? "")}`,
     `  at ${new Date(ex.tsRequest).toISOString()}  status ${ex.status ?? "?"}  tokens ${ex.tokensIn ?? "?"}→${ex.tokensOut ?? "?"}`,
-    `  session ${ex.sessionId.slice(0, 8)} (keyed by ${ex.sessionTier})  run ${ex.runId}`,
-    `  summary: ${ex.summary ?? "—"}`,
+    `  session ${ex.sessionId.slice(0, 8)} (keyed by ${ex.sessionTier})  run ${clean(ex.runId)}`,
+    `  summary: ${clean(ex.summary ?? "—")}`,
   ];
   if (ex.scanState !== "ok") {
     lines.push("  ⚠ scan timed out — treated as unverified, not clean");
@@ -132,7 +138,8 @@ export function cmdShow(stateDir: string, idPrefix: string): string {
 export async function cmdPurge(stateDir: string, kind: string): Promise<string> {
   const daemon = await pingDaemon(stateDir);
   if (daemon) {
-    const r = await controlRequest(daemon.socketPath, { cmd: "purge", args: { kind } });
+    // Panic purge VACUUMs the whole file — allow it time.
+    const r = await controlRequest(daemon.socketPath, { cmd: "purge", args: { kind } }, 60_000);
     return r.ok ? `purged (${kind}).` : `purge failed: ${r.error}`;
   }
   if (!existsSync(join(stateDir, "beagle.db"))) return "nothing to purge.";
@@ -157,7 +164,14 @@ export async function cmdRun(stateDir: string, agentName: string, agentArgs: str
   }
   let daemon = await pingDaemon(stateDir);
   if (!daemon) {
-    const child = Bun.spawn([process.execPath, process.argv[1] ?? "", "daemon"], {
+    // Compiled binary: argv[1] is not a script path — invoke ourselves
+    // directly. Dev (bun run): re-run the entry script.
+    const script = process.argv[1];
+    const argv =
+      script && /\.(ts|js|mjs)$/.test(script)
+        ? [process.execPath, script, "daemon"]
+        : [process.execPath, "daemon"];
+    const child = Bun.spawn(argv, {
       env: { ...process.env, BEAGLE_STATE_DIR: stateDir },
       stdio: ["ignore", "ignore", "ignore"],
     });

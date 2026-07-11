@@ -70,6 +70,23 @@ describe("CLI commands (headless loop, R12)", () => {
     expect(out.toLowerCase()).toContain("no exchange");
   });
 
+  test("show: traffic-derived text is stripped of terminal escapes", () => {
+    const store = Store.open(stateDir);
+    const id = ulid();
+    store.insertExchange({
+      id, sessionId: "s2", runId: "r1", source: "wire", agent: "claude-code",
+      provider: "anthropic", model: "m", endpoint: "/v1/messages",
+      tsRequest: Date.now(), scanState: "ok", captureState: "ok", sessionTier: "run",
+      summary: "evil \x1b[2J\x1b[31m wipe-your-screen summary",
+      requestBody: null, requestHeaders: null, responseBody: null,
+      responseHeaders: null, sseRaw: null, searchText: "x",
+    });
+    store.close();
+    const out = cmdShow(stateDir, id.slice(0, 8));
+    expect(out).not.toContain("\x1b");
+    expect(out).toContain("wipe-your-screen");
+  });
+
   test("status: trust-strip text works with no daemon running", () => {
     const out = cmdStatus(stateDir);
     expect(out.toLowerCase()).toContain("daemon: not running");

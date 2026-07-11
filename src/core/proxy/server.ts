@@ -232,6 +232,7 @@ export class ProxyServer {
       },
       response: {
         status: reader.status,
+        headers: reader.headers,
         bodyBytes: decodeBody(new Uint8Array(responseRaw), reader.headerValue("content-encoding")),
       },
       meta: {
