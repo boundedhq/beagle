@@ -239,6 +239,54 @@ export class Store {
     }));
   }
 
+  insertSession(s: {
+    id: string; agent?: string; provider?: string; firstTs: number; lastTs: number;
+    convId?: string; headHash?: string; fuzzyHash?: string; runId?: string;
+  }): void {
+    this.db.run(
+      `INSERT INTO sessions (id, agent, provider, first_ts, last_ts, conv_id, head_hash, fuzzy_hash, run_id)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
+      [s.id, s.agent ?? null, s.provider ?? null, s.firstTs, s.lastTs,
+       s.convId ?? null, s.headHash ?? null, s.fuzzyHash ?? null, s.runId ?? null],
+    );
+  }
+
+  updateSession(
+    id: string,
+    fields: { lastTs?: number; convId?: string; headHash?: string },
+  ): void {
+    if (fields.lastTs !== undefined)
+      this.db.run(`UPDATE sessions SET last_ts=? WHERE id=?`, [fields.lastTs, id]);
+    if (fields.convId !== undefined)
+      this.db.run(`UPDATE sessions SET conv_id=? WHERE id=?`, [fields.convId, id]);
+    if (fields.headHash !== undefined)
+      this.db.run(`UPDATE sessions SET head_hash=? WHERE id=?`, [fields.headHash, id]);
+  }
+
+  findSessionBy(
+    column: "conv_id" | "head_hash" | "fuzzy_hash" | "run_id",
+    values: string[],
+  ): string | null {
+    if (values.length === 0) return null;
+    const qs = values.map(() => "?").join(",");
+    return (
+      this.db.get<{ id: string }>(
+        `SELECT id FROM sessions WHERE ${column} IN (${qs}) ORDER BY last_ts DESC LIMIT 1`,
+        values,
+      )?.id ?? null
+    );
+  }
+
+  findRecentSession(agent: string, provider: string, sinceTs: number): string | null {
+    return (
+      this.db.get<{ id: string }>(
+        `SELECT id FROM sessions WHERE agent=? AND provider=? AND run_id IS NULL AND last_ts>=?
+         ORDER BY last_ts DESC LIMIT 1`,
+        [agent, provider, sinceTs],
+      )?.id ?? null
+    );
+  }
+
   insertRun(run: {
     id: string; agent: string | null; provider: string | null; upstream: string;
     authLocation: string | null; extraHeaders: Array<[string, string]> | null; createdTs: number;

@@ -59,10 +59,14 @@ CREATE TABLE IF NOT EXISTS sessions (
   agent TEXT, provider TEXT,
   first_ts INTEGER, last_ts INTEGER,
   conv_id         TEXT,
-  head_hash       TEXT
+  head_hash       TEXT,
+  fuzzy_hash      TEXT,   -- hash(system prompt + first user msg): compaction link
+  run_id          TEXT    -- tier-3 floor: session keyed by process run
 );
 CREATE INDEX IF NOT EXISTS ix_sess_conv ON sessions(conv_id);
 CREATE INDEX IF NOT EXISTS ix_sess_head ON sessions(head_hash);
+CREATE INDEX IF NOT EXISTS ix_sess_fuzzy ON sessions(fuzzy_hash);
+CREATE INDEX IF NOT EXISTS ix_sess_run ON sessions(run_id);
 
 CREATE TABLE IF NOT EXISTS runs (
   id            TEXT PRIMARY KEY,
