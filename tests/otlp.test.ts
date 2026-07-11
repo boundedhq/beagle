@@ -130,4 +130,19 @@ describe("OtlpReceiver HTTP endpoint", () => {
   test("binds loopback only", () => {
     expect(receiver.boundAddress).toBe("127.0.0.1");
   });
+
+  test("multi-byte UTF-8 content survives chunked bodies intact", async () => {
+    // A prompt with characters whose UTF-8 encoding is likely to straddle a
+    // chunk boundary; a naive per-chunk string coercion would corrupt it.
+    const prompt = "日本語のプロンプト — café — 🐕".repeat(2000);
+    const r = await fetch(`http://127.0.0.1:${port}/v1/logs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-beagle-run": "secret-run-token" },
+      body: JSON.stringify(otlpLogsBody("secret-run-token", { prompt })),
+    });
+    expect(r.status).toBe(200);
+    expect(got.length).toBe(1);
+    const ex = got[0] as { request: { bodyBytes: Uint8Array } };
+    expect(new TextDecoder().decode(ex.request.bodyBytes)).toBe(prompt);
+  });
 });

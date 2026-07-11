@@ -265,6 +265,18 @@ export class Daemon {
         messages: ex.request.messages,
       });
       const scanResult = await this.scanHost.scan(ex.request.bodyBytes, {});
+      // Keep session chaining state current, same as the wire path — so a
+      // Mode B session without an explicit id still chains across turns.
+      if (ex.request.messages?.length || ex.response.text) {
+        this.resolver.recordResponse({
+          sessionId: resolution.sessionId,
+          messages: [
+            ...(ex.request.messages ?? []),
+            ...(ex.response.text ? [{ role: "assistant", content: ex.response.text }] : []),
+          ],
+          responseId: ex.convId,
+        });
+      }
       this.store.insertExchange({
         id: ex.id,
         sessionId: resolution.sessionId,

@@ -51,22 +51,27 @@ export class OtlpReceiver {
       return;
     }
     const cap = this.opts.maxBodyBytes ?? 32 << 20;
-    let buf = "";
+    const chunks: Buffer[] = [];
+    let size = 0;
     let over = false;
-    req.on("data", (d) => {
+    req.on("data", (d: Buffer) => {
       if (over) return;
-      buf += d;
-      if (buf.length > cap) {
+      size += d.length;
+      if (size > cap) {
         over = true;
         res.writeHead(413).end();
         req.destroy();
+        return;
       }
+      chunks.push(d);
     });
     req.on("end", () => {
       if (over) return;
       let payload: unknown;
       try {
-        payload = JSON.parse(buf);
+        // Decode once from the assembled bytes — never coerce per chunk, which
+        // would split multi-byte UTF-8 across boundaries and corrupt content.
+        payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       } catch {
         res.writeHead(400).end("invalid json");
         return;
