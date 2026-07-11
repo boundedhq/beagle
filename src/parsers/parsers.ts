@@ -1,0 +1,188 @@
+// Format parsers (non-core, R3): they drive the readable view and tier-2
+// session keying, never the security path. Malformed input degrades to null
+// — capture and detection don't depend on these.
+import type { Message } from "../core/exchange";
+
+export type Format = "anthropic-messages" | "openai-chat" | "openai-responses" | "unknown";
+
+export interface ParsedRequest {
+  model?: string;
+  system?: string;
+  messages: Message[];
+  convId?: string;
+  prevResponseId?: string;
+}
+
+export interface ParsedResponse {
+  model?: string;
+  text?: string;
+  tokensIn?: number;
+  tokensOut?: number;
+  responseId?: string;
+}
+
+export function detectFormat(endpoint: string): Format {
+  const path = endpoint.split("?")[0] ?? endpoint;
+  if (path.endsWith("/messages")) return "anthropic-messages";
+  if (path.endsWith("/chat/completions")) return "openai-chat";
+  if (path.endsWith("/responses")) return "openai-responses";
+  return "unknown";
+}
+
+export function parseRequest(format: Format, bytes: Uint8Array): ParsedRequest | null {
+  try {
+    const body = JSON.parse(new TextDecoder().decode(bytes));
+    if (format === "anthropic-messages") {
+      return {
+        model: body.model,
+        system: flattenContent(body.system),
+        messages: (body.messages ?? []).map(toMessage),
+        convId: body.metadata?.conversation_id,
+      };
+    }
+    if (format === "openai-chat") {
+      const messages: Message[] = (body.messages ?? []).map(toMessage);
+      return {
+        model: body.model,
+        system: messages.find((m) => m.role === "system" || m.role === "developer")?.content,
+        messages,
+      };
+    }
+    if (format === "openai-responses") {
+      const input = body.input;
+      const messages: Message[] =
+        typeof input === "string"
+          ? [{ role: "user", content: input }]
+          : (input ?? []).map(toMessage);
+      return {
+        model: body.model,
+        system: flattenContent(body.instructions),
+        messages,
+        prevResponseId: body.previous_response_id,
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function parseResponse(format: Format, bytes: Uint8Array): ParsedResponse | null {
+  try {
+    const text = new TextDecoder().decode(bytes);
+    // JSON first: a JSON body can legitimately contain "data:" (data-URIs);
+    // a real SSE stream never parses as JSON.
+    let body: Record<string, any>;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      return parseSse(format, text);
+    }
+    if (format === "anthropic-messages") {
+      return {
+        model: body.model,
+        text: flattenContent(body.content),
+        tokensIn: body.usage?.input_tokens,
+        tokensOut: body.usage?.output_tokens,
+      };
+    }
+    if (format === "openai-chat") {
+      return {
+        model: body.model,
+        text: body.choices?.[0]?.message?.content ?? undefined,
+        tokensIn: body.usage?.prompt_tokens,
+        tokensOut: body.usage?.completion_tokens,
+      };
+    }
+    if (format === "openai-responses") {
+      const texts: string[] = [];
+      for (const item of body.output ?? []) {
+        if (item.type === "message") {
+          for (const c of item.content ?? []) {
+            if (typeof c.text === "string") texts.push(c.text);
+          }
+        }
+      }
+      return {
+        model: body.model,
+        responseId: body.id,
+        text: texts.join("") || undefined,
+        tokensIn: body.usage?.input_tokens,
+        tokensOut: body.usage?.output_tokens,
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function parseSse(format: Format, raw: string): ParsedResponse | null {
+  const out: ParsedResponse = {};
+  const parts: string[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.startsWith("data:")) continue;
+    const payload = line.slice(5).trim();
+    if (payload === "" || payload === "[DONE]") continue;
+    let ev: Record<string, any>;
+    try {
+      ev = JSON.parse(payload);
+    } catch {
+      continue;
+    }
+    if (format === "anthropic-messages") {
+      if (ev.type === "message_start") {
+        out.model = ev.message?.model ?? out.model;
+        out.tokensIn = ev.message?.usage?.input_tokens ?? out.tokensIn;
+      } else if (ev.type === "content_block_delta" && ev.delta?.type === "text_delta") {
+        parts.push(ev.delta.text ?? "");
+      } else if (ev.type === "message_delta") {
+        out.tokensOut = ev.usage?.output_tokens ?? out.tokensOut;
+      }
+    } else if (format === "openai-chat") {
+      out.model = ev.model ?? out.model;
+      const delta = ev.choices?.[0]?.delta?.content;
+      if (typeof delta === "string") parts.push(delta);
+      if (ev.usage) {
+        out.tokensIn = ev.usage.prompt_tokens ?? out.tokensIn;
+        out.tokensOut = ev.usage.completion_tokens ?? out.tokensOut;
+      }
+    } else if (format === "openai-responses") {
+      out.model = ev.model ?? out.model;
+      if (ev.type === "response.output_text.delta" && typeof ev.delta === "string") {
+        parts.push(ev.delta);
+      }
+      if (ev.type === "response.completed") {
+        out.responseId = ev.response?.id ?? out.responseId;
+        out.tokensIn = ev.response?.usage?.input_tokens ?? out.tokensIn;
+        out.tokensOut = ev.response?.usage?.output_tokens ?? out.tokensOut;
+      }
+    }
+  }
+  if (parts.length > 0) out.text = parts.join("");
+  return out.text || out.model || out.responseId ? out : null;
+}
+
+function toMessage(m: Record<string, unknown>): Message {
+  return {
+    role: String(m.role ?? "unknown"),
+    content: flattenContent(m.content) ?? "",
+  };
+}
+
+function flattenContent(content: unknown): string | undefined {
+  if (content == null) return undefined;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((block: Record<string, unknown>) => {
+        if (typeof block === "string") return block;
+        if (typeof block.text === "string") return block.text;
+        if (block.type === "tool_result") return flattenContent(block.content) ?? "";
+        if (typeof block.content === "string") return block.content;
+        return "";
+      })
+      .join("");
+  }
+  return undefined;
+}
