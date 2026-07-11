@@ -1,6 +1,9 @@
 // CLI entry point (non-core). Headless loop per R12: run, status, search,
 // leaks, show, purge — the whole product without the viewer.
-import { cmdLeaks, cmdPurge, cmdRun, cmdSearch, cmdShow, cmdStatus, defaultStateDir } from "./commands";
+import {
+  cmdDetect, cmdLeaks, cmdPurge, cmdRun, cmdSearch, cmdShow, cmdStatus,
+  cmdUnwatch, cmdWatch, defaultStateDir,
+} from "./commands";
 
 export const VERSION = "0.1.0";
 
@@ -8,6 +11,8 @@ const HELP = `beagle ${VERSION} — a local transparency proxy for AI agents
 
 usage:
   beagle run <agent> [args...]   watch one agent run (claude, codex)
+  beagle watch <agent> [--yes]   watch an agent automatically (PATH shim)
+  beagle unwatch <agent>         stop watching, restore your setup
   beagle status                  trust strip: coverage, store, retention
   beagle search <string>         was this ever sent? definitive answer
   beagle leaks                   the leak log
@@ -30,6 +35,20 @@ export async function run(argv: string[]): Promise<number> {
       if (!agent) { console.error("usage: beagle run <agent> [args...]"); return 2; }
       return cmdRun(stateDir, agent, agentArgs);
     }
+    case "watch": {
+      const agent = rest.find((a) => !a.startsWith("--"));
+      if (!agent) { console.error("usage: beagle watch <agent> [--yes]"); return 2; }
+      console.log(cmdWatch(stateDir, agent, rest.includes("--yes")));
+      return 0;
+    }
+    case "unwatch": {
+      if (!rest[0]) { console.error("usage: beagle unwatch <agent>"); return 2; }
+      console.log(cmdUnwatch(stateDir, rest[0]));
+      return 0;
+    }
+    case "detect":
+      console.log(cmdDetect());
+      return 0;
     case "status": {
       const { controlRequest } = await import("../daemon/control");
       const { readFileSync } = await import("node:fs");

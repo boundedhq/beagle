@@ -7,7 +7,11 @@ import { randomUUID } from "node:crypto";
 import { Store, StoreVersionError } from "../core/store/store";
 import { loadConfig } from "../core/config/config";
 import { controlRequest } from "../daemon/control";
-import { stripControlChars } from "../notifier/notifier";
+import { Notifier, stripControlChars } from "../notifier/notifier";
+import { GraduationTracker } from "../install/graduation";
+import { detectAgents, knownExtraLocations, pathDirsFromEnv } from "../install/detect";
+import { watchAgent, unwatchAgent, type WatchEnv } from "../install/watch";
+import { ChangeManifest } from "../install/manifest";
 import { AGENTS, buildRunEnv } from "./agents";
 
 // Everything printed by these commands can embed traffic-derived text
@@ -75,6 +79,8 @@ export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null):
   lines.push(
     `retention: ${cfg.payloadWindowDays}d / ${cfg.sizeCapMB} MB payloads · ${cfg.eventWindowDays}d leak events`,
   );
+  const manifest = new ChangeManifest(stateDir);
+  lines.push(manifest.summary() + (manifest.list().length ? " (beagle unwatch <agent> to revert)" : ""));
   lines.push(
     "local only · outbound connections: only your model providers · telemetry: none · viewer: off until requested",
   );
@@ -150,6 +156,76 @@ export async function cmdPurge(stateDir: string, kind: string): Promise<string> 
   return `purged (${kind}).`;
 }
 
+export function cmdDetect(): string {
+  const found = detectAgents({
+    pathDirs: pathDirsFromEnv(process.env.PATH),
+    extraLocations: knownExtraLocations(homedir()),
+  });
+  if (found.length === 0) {
+    return (
+      "No supported agents found on your PATH.\n" +
+      `Beagle looked for: ${Object.keys(AGENTS).join(", ")} (and ~/.claude/local for Claude Code).\n` +
+      "To point one manually, set its base URL to Beagle's proxy — see the README."
+    );
+  }
+  const names = found.map((f) => f.agent).join(" and ");
+  const first = found[0]!;
+  return `Found ${names}. Try: ${first.runCommand}`;
+}
+
+function buildWatchEnv(stateDir: string, yes: boolean): WatchEnv {
+  return {
+    stateDir,
+    shimDir: join(stateDir, "shims"),
+    beagleBinary: process.execPath,
+    shell: process.env.SHELL ?? "/bin/sh",
+    resolveReal: (agent) => {
+      const found = detectAgents({
+        pathDirs: pathDirsFromEnv(process.env.PATH),
+        extraLocations: knownExtraLocations(homedir()),
+      });
+      return found.find((f) => f.agent === agent)?.path ?? null;
+    },
+    runType: (agent) => {
+      try {
+        const shell = process.env.SHELL ?? "/bin/sh";
+        const r = Bun.spawnSync([shell, "-ic", `type ${agent}`]);
+        return r.stdout.toString().trim() || r.stderr.toString().trim();
+      } catch {
+        return "";
+      }
+    },
+    confirm: (diff) => {
+      process.stdout.write(diff + "\n");
+      if (yes) return true;
+      process.stdout.write("Proceed? [y/N] ");
+      const line = readLineSync();
+      return /^y(es)?$/i.test(line.trim());
+    },
+  };
+}
+
+export function cmdWatch(stateDir: string, agent: string, yes: boolean): string {
+  const env = buildWatchEnv(stateDir, yes);
+  const r = watchAgent(agent, env);
+  if (r.applied) new GraduationTracker(stateDir).markWatched(agent);
+  return r.message;
+}
+
+export function cmdUnwatch(stateDir: string, agent: string): string {
+  return unwatchAgent(agent, buildWatchEnv(stateDir, true)).message;
+}
+
+function readLineSync(): string {
+  try {
+    const buf = new Uint8Array(256);
+    const n = require("node:fs").readSync(0, buf, 0, 256, null) as number;
+    return new TextDecoder().decode(buf.subarray(0, n));
+  } catch {
+    return "";
+  }
+}
+
 export async function cmdUi(stateDir: string): Promise<string> {
   const daemon = await pingDaemon(stateDir);
   if (!daemon) return "the beagle daemon isn't running — start an agent with `beagle run <agent>` first.";
@@ -165,7 +241,7 @@ export async function cmdUi(stateDir: string): Promise<string> {
   return `dashboard: ${url}\n(the link is one-time; run \`beagle ui\` again for a fresh one)`;
 }
 
-export async function cmdRun(stateDir: string, agentName: string, agentArgs: string[]): Promise<number> {
+export async function cmdRun(stateDir: string, agentName: string, rawArgs: string[]): Promise<number> {
   const spec = AGENTS[agentName];
   if (!spec) {
     console.error(`unknown agent '${agentName}' — supported: ${Object.keys(AGENTS).join(", ")}`);
@@ -177,10 +253,18 @@ export async function cmdRun(stateDir: string, agentName: string, agentArgs: str
     );
     return 2;
   }
+  // The shim invokes: beagle run <agent> --real <path> -- <args...>
+  let realBinary = spec.command;
+  let agentArgs = rawArgs;
+  const realIdx = rawArgs.indexOf("--real");
+  if (realIdx !== -1 && rawArgs[realIdx + 1]) {
+    realBinary = rawArgs[realIdx + 1]!;
+    const sep = rawArgs.indexOf("--", realIdx);
+    agentArgs = sep !== -1 ? rawArgs.slice(sep + 1) : rawArgs.slice(realIdx + 2);
+  }
+
   let daemon = await pingDaemon(stateDir);
   if (!daemon) {
-    // Compiled binary: argv[1] is not a script path — invoke ourselves
-    // directly. Dev (bun run): re-run the entry script.
     const script = process.argv[1];
     const argv =
       script && /\.(ts|js|mjs)$/.test(script)
@@ -195,11 +279,17 @@ export async function cmdRun(stateDir: string, agentName: string, agentArgs: str
       await Bun.sleep(100);
       daemon = await pingDaemon(stateDir);
     }
-    if (!daemon) {
-      console.error("could not start the beagle daemon");
-      return 1;
-    }
   }
+
+  if (!daemon) {
+    // Proxy-down: v1 fails OPEN (observe-only, nothing to protect) but says so
+    // unmissably via an OS notification — a printed line dies with the first
+    // alternate-screen redraw of a TUI (R2, §8 failure table).
+    notifyProxyDown(agentName);
+    const direct = Bun.spawn([realBinary, ...agentArgs], { stdio: ["inherit", "inherit", "inherit"] });
+    return await direct.exited;
+  }
+
   const runId = randomUUID();
   await controlRequest(daemon.socketPath, {
     cmd: "register-run",
@@ -212,7 +302,27 @@ export async function cmdRun(stateDir: string, agentName: string, agentArgs: str
       extraHeaders: spec.extraHeaders,
     },
   });
+
+  // Graduation nudge after the 3rd wrapper run (R2) — never applies anything.
+  const grad = new GraduationTracker(stateDir);
+  if (grad.recordRunAndCheck(agentName)) {
+    process.stderr.write(
+      `\nbeagle: you've run ${agentName} under Beagle a few times.\n` +
+        `  Watch it automatically so you never have to prefix again? Run: beagle watch ${agentName}\n` +
+        `  (one-time nudge; it won't ask again)\n\n`,
+    );
+  }
+
   const env = { ...process.env, ...buildRunEnv(agentName, daemon.proxyPort, runId) };
-  const child = Bun.spawn([spec.command, ...agentArgs], { env, stdio: ["inherit", "inherit", "inherit"] });
+  const child = Bun.spawn([realBinary, ...agentArgs], { env, stdio: ["inherit", "inherit", "inherit"] });
   return await child.exited;
+}
+
+function notifyProxyDown(agent: string): void {
+  const notifier = new Notifier();
+  notifier.notify({
+    title: "Beagle isn't running",
+    body: `${agent} is NOT being monitored — its traffic is going direct to the provider.`,
+  });
+  process.stderr.write(`beagle ▲ not running — ${agent} is NOT being monitored (traffic goes direct).\n`);
 }
