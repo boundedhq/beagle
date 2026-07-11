@@ -110,6 +110,7 @@ export class Store {
   }
 
   pragma(name: string): number | string {
+    if (!/^[a-z_]+$/.test(name)) throw new Error(`invalid pragma name: ${name}`);
     const row = this.db.get<Record<string, number | string>>(`PRAGMA ${name}`);
     return row ? Object.values(row)[0]! : 0;
   }
@@ -118,9 +119,20 @@ export class Store {
     this.db.exec(`PRAGMA user_version=${v}`);
   }
 
-  insertExchange(ex: ExchangeRecord): void {
+  private inTx<T>(fn: () => T): T {
     this.db.exec("BEGIN");
     try {
+      const r = fn();
+      this.db.exec("COMMIT");
+      return r;
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
+  insertExchange(ex: ExchangeRecord): void {
+    this.inTx(() => {
       this.db.run(
         `INSERT INTO exchanges (id, session_id, run_id, source, agent, provider, model,
            endpoint, ts_request, ts_response, status, tokens_in, tokens_out,
@@ -139,11 +151,7 @@ export class Store {
       );
       this.db.run(`INSERT INTO exchanges_fts (content, exchange_id) VALUES (?,?)`,
         [ex.searchText, ex.id]);
-      this.db.exec("COMMIT");
-    } catch (e) {
-      this.db.exec("ROLLBACK");
-      throw e;
-    }
+    });
   }
 
   getExchange(idOrPrefix: string): ExchangeRecord | null {
@@ -170,6 +178,10 @@ export class Store {
   }
 
   upsertLeakEvent(input: LeakEventInput): { fresh: boolean; eventId: string } {
+    return this.inTx(() => this.upsertLeakEventInner(input));
+  }
+
+  private upsertLeakEventInner(input: LeakEventInput): { fresh: boolean; eventId: string } {
     const existing = this.db.get<{ id: string }>(
       `SELECT id FROM leak_events WHERE fingerprint=? AND destination=? AND session_id=?`,
       [input.fingerprint, input.destination, input.sessionId],
@@ -275,6 +287,10 @@ export class Store {
   }
 
   private deleteExchangesWhere(where: string, params: unknown[]): void {
+    this.inTx(() => this.deleteExchangesWhereInner(where, params));
+  }
+
+  private deleteExchangesWhereInner(where: string, params: unknown[]): void {
     this.db.run(
       `DELETE FROM exchanges_fts WHERE exchange_id IN (SELECT id FROM exchanges WHERE ${where})`,
       params,
