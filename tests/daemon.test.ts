@@ -1,0 +1,206 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { connect } from "node:net";
+import { Daemon } from "../src/daemon/daemon";
+import { controlRequest } from "../src/daemon/control";
+import { Store } from "../src/core/store/store";
+import type { AlertEvent } from "../src/core/alert/engine";
+import { createServer, type Server } from "node:net";
+
+// fake upstream that replies with a fixed Anthropic-ish JSON body
+function fakeUpstream(): Promise<{ server: Server; port: number; seen: string[] }> {
+  const seen: string[] = [];
+  const server = createServer((sock) => {
+    let buf = "";
+    sock.on("data", (d) => {
+      buf += d.toString("latin1");
+      const i = buf.indexOf("\r\n\r\n");
+      if (i === -1) return;
+      const m = buf.match(/content-length:\s*(\d+)/i);
+      const need = i + 4 + (m ? Number(m[1]) : 0);
+      if (buf.length < need) return;
+      seen.push(buf.slice(0, need));
+      buf = "";
+      const body = JSON.stringify({
+        model: "claude-sonnet-5",
+        content: [{ type: "text", text: "done!" }],
+        usage: { input_tokens: 9, output_tokens: 3 },
+      });
+      sock.write(`HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: ${body.length}\r\n\r\n${body}`);
+    });
+    sock.on("error", () => {});
+  });
+  return new Promise((resolve) =>
+    server.listen(0, "127.0.0.1", () =>
+      resolve({ server, port: (server.address() as { port: number }).port, seen }),
+    ),
+  );
+}
+
+function sendThroughProxy(port: number, runId: string, body: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const raw =
+      `POST /run/${runId}/v1/messages HTTP/1.1\r\nHost: x\r\n` +
+      `x-api-key: sk-ant-realkey000000000000000000\r\ncontent-type: application/json\r\n` +
+      `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
+    const sock = connect(port, "127.0.0.1", () => sock.write(raw));
+    let got = "";
+    let quiet: ReturnType<typeof setTimeout> | null = null;
+    sock.on("data", (d) => {
+      got += d.toString();
+      if (quiet) clearTimeout(quiet);
+      quiet = setTimeout(() => sock.end(), 100);
+    });
+    sock.on("close", () => resolve(got));
+    sock.on("error", reject);
+  });
+}
+
+describe("Daemon end-to-end", () => {
+  let stateDir: string;
+  let daemon: Daemon;
+  let upstream: Awaited<ReturnType<typeof fakeUpstream>>;
+  let alerts: AlertEvent[];
+
+  beforeEach(async () => {
+    stateDir = mkdtempSync(join(tmpdir(), "beagle-daemon-"));
+    upstream = await fakeUpstream();
+    alerts = [];
+    daemon = await Daemon.start({
+      stateDir,
+      alertSinkForTest: (a) => alerts.push(a),
+    });
+    await controlRequest(daemon.socketPath, {
+      cmd: "register-run",
+      args: {
+        id: "run-e2e",
+        agent: "claude-code",
+        provider: "anthropic",
+        upstream: `http://127.0.0.1:${upstream.port}`,
+        authLocation: "x-api-key",
+      },
+    });
+  });
+
+  afterEach(async () => {
+    await daemon.stop();
+    upstream.server.close();
+  });
+
+  const requestBody = (content: string) =>
+    JSON.stringify({
+      model: "claude-sonnet-5",
+      system: "You are Claude Code.",
+      messages: [{ role: "user", content }],
+    });
+
+  test("captures a full exchange: session, parse, summary, search text", async () => {
+    const resp = await sendThroughProxy(daemon.proxyPort, "run-e2e", requestBody("read main.ts"));
+    expect(resp).toContain("done!");
+    await Bun.sleep(150);
+
+    const store = Store.openReadOnly(stateDir);
+    const hits = store.searchLiteral("read main.ts");
+    expect(hits.length).toBe(1);
+    const ex = store.getExchange(hits[0]!.exchangeId)!;
+    expect(ex.provider).toBe("anthropic");
+    expect(ex.model).toBe("claude-sonnet-5");
+    expect(ex.sessionTier).toBe("prefix");
+    expect(ex.tokensOut).toBe(3);
+    expect(ex.scanState).toBe("ok");
+    // response text also searchable
+    expect(store.searchLiteral("done!").length).toBe(1);
+    store.close();
+  });
+
+  test("leak in request body alerts in real time and records the event", async () => {
+    await sendThroughProxy(
+      daemon.proxyPort, "run-e2e",
+      requestBody('here is my key: AKIAZQ3DRSTUVWXY2345'),
+    );
+    await Bun.sleep(150);
+    expect(alerts.length).toBe(1);
+    expect(alerts[0]!.title).toContain("aws-access-key-id");
+
+    const store = Store.openReadOnly(stateDir);
+    const events = store.listLeakEvents();
+    expect(events.length).toBe(1);
+    expect(events[0]!.destination).toBe("anthropic");
+    store.close();
+  });
+
+  test("multi-turn conversation stays one session; re-sent secret alerts once", async () => {
+    const secret = 'key AKIAZQ3DRSTUVWXY2345';
+    const turn1 = JSON.stringify({
+      model: "m", system: "s",
+      messages: [{ role: "user", content: secret }],
+    });
+    const turn2 = JSON.stringify({
+      model: "m", system: "s",
+      messages: [
+        { role: "user", content: secret },
+        { role: "assistant", content: "done!" },
+        { role: "user", content: "next" },
+      ],
+    });
+    await sendThroughProxy(daemon.proxyPort, "run-e2e", turn1);
+    await Bun.sleep(100);
+    await sendThroughProxy(daemon.proxyPort, "run-e2e", turn2);
+    await Bun.sleep(150);
+
+    expect(alerts.length).toBe(1); // deduped
+    const store = Store.openReadOnly(stateDir);
+    const events = store.listLeakEvents();
+    expect(events.length).toBe(1);
+    expect(events[0]!.occurrences).toBe(2); // both exchanges marked
+    const sessions = new Set(store.searchLiteral("AKIAZQ3DRSTUVWXY2345").map((h) => h.sessionId));
+    expect(sessions.size).toBe(1);
+    store.close();
+  });
+
+  test("auth header is scrubbed in the persisted exchange", async () => {
+    await sendThroughProxy(daemon.proxyPort, "run-e2e", requestBody("hello"));
+    await Bun.sleep(150);
+    const store = Store.openReadOnly(stateDir);
+    const ex = store.getExchange(store.searchLiteral("hello")[0]!.exchangeId)!;
+    const persisted = JSON.stringify(ex.requestHeaders);
+    expect(persisted).not.toContain("sk-ant-realkey");
+    expect(persisted).toContain("[AUTH:anthropic:");
+    store.close();
+  });
+
+  test("control socket: ping, status, pause/resume", async () => {
+    const pong = await controlRequest(daemon.socketPath, { cmd: "ping" });
+    expect(pong.ok).toBe(true);
+
+    await controlRequest(daemon.socketPath, { cmd: "pause" });
+    await sendThroughProxy(daemon.proxyPort, "run-e2e", requestBody("while paused"));
+    await Bun.sleep(150);
+    let store = Store.openReadOnly(stateDir);
+    expect(store.searchLiteral("while paused")).toEqual([]); // forwarded, not captured
+    store.close();
+
+    await controlRequest(daemon.socketPath, { cmd: "resume" });
+    await sendThroughProxy(daemon.proxyPort, "run-e2e", requestBody("after resume"));
+    await Bun.sleep(150);
+    store = Store.openReadOnly(stateDir);
+    expect(store.searchLiteral("after resume").length).toBe(1);
+
+    const status = await controlRequest(daemon.socketPath, { cmd: "status" });
+    expect(status.ok).toBe(true);
+    expect((status.data as { exchanges: number }).exchanges).toBeGreaterThan(0);
+    store.close();
+  });
+
+  test("purge via socket wipes captures", async () => {
+    await sendThroughProxy(daemon.proxyPort, "run-e2e", requestBody("sensitive thing"));
+    await Bun.sleep(150);
+    const r = await controlRequest(daemon.socketPath, { cmd: "purge", args: { kind: "all" } });
+    expect(r.ok).toBe(true);
+    const store = Store.openReadOnly(stateDir);
+    expect(store.searchLiteral("sensitive thing")).toEqual([]);
+    store.close();
+  });
+});

@@ -209,6 +209,18 @@ export class Store {
     return { fresh, eventId };
   }
 
+  countExchanges(): number {
+    return this.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM exchanges`)?.n ?? 0;
+  }
+
+  countLeakEvents(): number {
+    return this.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM leak_events`)?.n ?? 0;
+  }
+
+  updateExchangeScanState(id: string, state: "ok" | "incomplete"): void {
+    this.db.run(`UPDATE exchanges SET scan_state=? WHERE id=?`, [state, id]);
+  }
+
   fingerprintKnown(fingerprint: string): boolean {
     return (
       this.db.get<{ n: number }>(
