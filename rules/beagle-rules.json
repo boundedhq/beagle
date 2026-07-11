@@ -1,0 +1,126 @@
+{
+  "version": 1,
+  "notice": "Rule corpus derived from the MIT-licensed gitleaks ruleset (see THIRD-PARTY-NOTICES.md). Rules are data, not code (R5).",
+  "rules": [
+    {
+      "id": "aws-access-key-id",
+      "description": "AWS access key ID",
+      "regex": "\\b((?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16})\\b",
+      "keywords": ["akia", "asia", "abia", "acca"],
+      "secretGroup": 1,
+      "severity": "high",
+      "tier": "structured"
+    },
+    {
+      "id": "aws-secret-access-key",
+      "description": "AWS secret access key",
+      "regex": "(?:aws|secret[_-]?access)[a-zA-Z_ ]{0,20}[\"':=\\s]{1,5}([A-Za-z0-9/+=]{40})\\b",
+      "keywords": ["aws", "secret_access", "secret-access"],
+      "secretGroup": 1,
+      "severity": "high",
+      "tier": "structured",
+      "entropy": 3.0
+    },
+    {
+      "id": "github-pat",
+      "description": "GitHub personal access token",
+      "regex": "\\b(gh[pousr]_[A-Za-z0-9_]{36,251})\\b",
+      "keywords": ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"],
+      "secretGroup": 1,
+      "severity": "high",
+      "tier": "structured"
+    },
+    {
+      "id": "anthropic-api-key",
+      "description": "Anthropic API key",
+      "regex": "\\b(sk-ant-[A-Za-z0-9\\-_]{20,})",
+      "keywords": ["sk-ant-"],
+      "secretGroup": 1,
+      "severity": "high",
+      "tier": "structured"
+    },
+    {
+      "id": "openai-api-key",
+      "description": "OpenAI API key",
+      "regex": "\\b(sk-(?!ant-)(?:proj-[A-Za-z0-9\\-_]{20,}|[A-Za-z0-9]{40,}))",
+      "keywords": ["sk-"],
+      "secretGroup": 1,
+      "severity": "high",
+      "tier": "structured"
+    },
+    {
+      "id": "stripe-live-key",
+      "description": "Stripe live secret key",
+      "regex": "\\b((?:sk|rk)_live_[A-Za-z0-9]{20,})\\b",
+      "keywords": ["_live_"],
+      "secretGroup": 1,
+      "severity": "high",
+      "tier": "structured"
+    },
+    {
+      "id": "slack-token",
+      "description": "Slack token",
+      "regex": "\\b(xox[baprs]-[A-Za-z0-9\\-]{10,})\\b",
+      "keywords": ["xoxb", "xoxa", "xoxp", "xoxr", "xoxs"],
+      "secretGroup": 1,
+      "severity": "medium",
+      "tier": "structured"
+    },
+    {
+      "id": "google-api-key",
+      "description": "Google API key",
+      "regex": "\\b(AIza[A-Za-z0-9\\-_]{35})\\b",
+      "keywords": ["aiza"],
+      "secretGroup": 1,
+      "severity": "medium",
+      "tier": "structured"
+    },
+    {
+      "id": "private-key",
+      "description": "Private key block (SSH/TLS/PGP)",
+      "regex": "(-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----[\\s\\S]{0,4096}?-----END (?:RSA |EC |OPENSSH |DSA |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----)",
+      "keywords": ["private key"],
+      "secretGroup": 1,
+      "severity": "high",
+      "tier": "structured"
+    },
+    {
+      "id": "connection-string",
+      "description": "Database/queue connection string with embedded password",
+      "regex": "\\b((?:postgres(?:ql)?|mysql|mongodb(?:\\+srv)?|redis|amqps?):\\/\\/[^\\s:@\\/]+:([^\\s@\\/]{4,})@[^\\s\\/]+)",
+      "keywords": ["://"],
+      "secretGroup": 2,
+      "severity": "high",
+      "tier": "structured"
+    },
+    {
+      "id": "credit-card",
+      "description": "Payment card number (Luhn-validated)",
+      "regex": "\\b(\\d{13,16})\\b",
+      "keywords": ["card", "visa", "mastercard", "amex", "pan"],
+      "secretGroup": 1,
+      "severity": "high",
+      "tier": "structured",
+      "validators": ["luhn"]
+    },
+    {
+      "id": "jwt",
+      "description": "JSON Web Token",
+      "regex": "\\b(eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{5,})\\b",
+      "keywords": ["eyj"],
+      "secretGroup": 1,
+      "severity": "medium",
+      "tier": "structured"
+    },
+    {
+      "id": "generic-api-key",
+      "description": "Generic secret assignment (entropy-gated; quiet tier only)",
+      "regex": "(?:api[_-]?key|apikey|key|secret|token|password|passwd|pwd)[\"':=\\s]{1,5}([A-Za-z0-9+/_\\-.=]{16,64})",
+      "keywords": ["key", "secret", "token", "password", "passwd", "pwd"],
+      "secretGroup": 1,
+      "severity": "medium",
+      "tier": "possible",
+      "entropy": 3.5
+    }
+  ]
+}
