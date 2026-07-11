@@ -21,9 +21,17 @@ export function escapeAppleScript(s: string): string {
   return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
+// macOS silently truncates long notification bodies; trim from the middle so
+// the trailing `beagle show <id>` reference survives.
+export function trimBody(s: string, max = 200): string {
+  if (s.length <= max) return s;
+  const keepTail = 60;
+  return s.slice(0, max - keepTail - 1) + "…" + s.slice(s.length - keepTail);
+}
+
 export function osascriptArgs(msg: AlertMessage): string[] {
   const title = escapeAppleScript(stripControlChars(msg.title));
-  const body = escapeAppleScript(stripControlChars(msg.body));
+  const body = escapeAppleScript(trimBody(stripControlChars(msg.body)));
   return ["osascript", "-e", `display notification "${body}" with title "${title}"`];
 }
 

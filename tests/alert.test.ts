@@ -82,6 +82,15 @@ describe("AlertEngine", () => {
     expect(alerts[0]!.body.toLowerCase()).toContain("this destination's own");
   });
 
+  test("mid-session model switch does not re-alert (dedup keys on provider)", () => {
+    engine.process(exchangeMeta({ model: "claude-opus-4-8" }), [finding()]);
+    engine.process(
+      exchangeMeta({ id: "01JZXKQ8WVXH5N4T2M9R7C3DHH", model: "claude-sonnet-5" }),
+      [finding()],
+    );
+    expect(alerts.length).toBe(1);
+  });
+
   test("two distinct secrets in one exchange fire two alerts", () => {
     engine.process(exchangeMeta(), [
       finding(),

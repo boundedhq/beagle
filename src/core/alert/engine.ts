@@ -30,7 +30,10 @@ export class AlertEngine {
   ) {}
 
   process(ex: ExchangeMeta, findings: Finding[]): void {
-    const destination = ex.model ? `${ex.provider}/${ex.model}` : ex.provider;
+    // Dedup keys on the destination PROVIDER (R6) — a mid-session model
+    // switch is the same destination and must not re-alert. The model only
+    // enriches the human-facing copy.
+    const displayDestination = ex.model ? `${ex.provider}/${ex.model}` : ex.provider;
     for (const f of findings) {
       const seenBefore = this.store.fingerprintKnown(f.fingerprint);
       const { fresh, eventId } = this.store.upsertLeakEvent({
@@ -40,7 +43,7 @@ export class AlertEngine {
         secretType: f.secretType,
         severity: f.severity,
         confidenceTier: f.tier,
-        destination,
+        destination: ex.provider,
         exchangeId: ex.id,
         ts: Date.now(),
       });
@@ -49,7 +52,7 @@ export class AlertEngine {
           eventId,
           exchangeId: ex.id,
           seenBefore,
-          ...alertCopy(f, ex, destination, seenBefore),
+          ...alertCopy(f, ex, displayDestination, seenBefore),
         });
       }
     }
