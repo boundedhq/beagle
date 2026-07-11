@@ -96,6 +96,35 @@ describe("CLI commands (headless loop, R12)", () => {
   });
 });
 
+describe("parseRunArgs", () => {
+  const { parseRunArgs } = require("../src/cli/commands") as typeof import("../src/cli/commands");
+
+  test("shim invocation: --real and separator", () => {
+    const r = parseRunArgs(["--real", "/opt/bin/claude", "--", "-p", "hello"]);
+    expect(r.realBinary).toBe("/opt/bin/claude");
+    expect(r.agentArgs).toEqual(["-p", "hello"]);
+    expect(r.telemetry).toBe(false);
+  });
+
+  test("--telemetry before the separator is beagle's", () => {
+    const r = parseRunArgs(["--telemetry", "--", "-p", "hi"]);
+    expect(r.telemetry).toBe(true);
+    expect(r.agentArgs).toEqual(["-p", "hi"]);
+  });
+
+  test("--telemetry AFTER the separator belongs to the agent", () => {
+    const r = parseRunArgs(["--", "--telemetry"]);
+    expect(r.telemetry).toBe(false);
+    expect(r.agentArgs).toEqual(["--telemetry"]);
+  });
+
+  test("no separator: beagle flags are stripped from agent args", () => {
+    const r = parseRunArgs(["--telemetry", "-p", "hi"]);
+    expect(r.telemetry).toBe(true);
+    expect(r.agentArgs).toEqual(["-p", "hi"]);
+  });
+});
+
 describe("run env mapping", () => {
   test("claude uses ANTHROPIC_BASE_URL with the run prefix", () => {
     const env = buildRunEnv("claude", 4242, "uuid-1");

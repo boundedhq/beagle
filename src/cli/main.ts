@@ -11,8 +11,12 @@ const HELP = `beagle ${VERSION} — a local transparency proxy for AI agents
 
 usage:
   beagle run <agent> [args...]   watch one agent run (claude, codex)
+  beagle run claude --telemetry  watch via Claude Code's own telemetry
+                                 (for Claude.ai subscription logins — nothing
+                                 sits on the wire; capture is agent-reported)
   beagle watch <agent> [--yes]   watch an agent automatically (PATH shim)
   beagle unwatch <agent>         stop watching, restore your setup
+  beagle detect                  find supported agents on this machine
   beagle status                  trust strip: coverage, store, retention
   beagle search <string>         was this ever sent? definitive answer
   beagle leaks                   the leak log
@@ -101,6 +105,7 @@ export async function run(argv: string[]): Promise<number> {
     }
     default:
       console.log(HELP);
+      if (!cmd) console.log(cmdDetect()); // R1: bare `beagle` tells you the next command
       return cmd ? 2 : 0;
   }
 }

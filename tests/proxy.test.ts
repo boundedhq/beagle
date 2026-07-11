@@ -166,6 +166,14 @@ describe("proxy", () => {
     expect(seen).toContain("anthropic-beta: other");
   });
 
+  test("chunked request body → 411, never mangled into the next request", async () => {
+    register();
+    const resp = await sendRaw(proxy.port,
+      `POST /run/run-abc/v1/messages HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n`);
+    expect(resp.toString()).toContain("411");
+    expect(upstream.requests.length).toBe(0);
+  });
+
   test("unknown run id → 502, never forwarded", async () => {
     const resp = await sendRaw(proxy.port,
       `POST /run/nope/v1/messages HTTP/1.1\r\nHost: h\r\nContent-Length: 2\r\n\r\n{}`);

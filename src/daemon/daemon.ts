@@ -22,11 +22,17 @@ import { startControlServer, type ControlRequest, type ControlResponse } from ".
 import { ViewerServer } from "../viewer/server";
 import { OtlpReceiver } from "../core/otlp/receiver";
 import type { OtelExchange } from "../parsers/otlp-map";
+// Embedded at build time so the compiled binary needs no repo checkout.
+// (bun-types types *.json as a parsed object; with { type: "text" } the
+// runtime value is the raw string — required for the sha256 pin to verify.)
+import embeddedRulesRaw from "../../rules/beagle-rules.json" with { type: "text" };
+import embeddedRulesPin from "../../rules/beagle-rules.sha256" with { type: "text" };
+const embeddedRules = embeddedRulesRaw as unknown as string;
 
 export interface DaemonOptions {
   stateDir: string;
-  rulesPath?: string;
-  rulesPinPath?: string;
+  rulesJson?: string; // override for tests; defaults to the embedded corpus
+  rulesPin?: string;
   scanDeadlineMs?: number;
   alertSinkForTest?: (a: AlertEvent) => void;
 }
@@ -84,11 +90,9 @@ export class Daemon {
     d.store = Store.openOrRecover(opts.stateDir);
     d.config = loadConfig(opts.stateDir);
     const installKey = loadOrCreateInstallKey(opts.stateDir);
-    const rulesPath = opts.rulesPath ?? join(process.cwd(), "rules/beagle-rules.json");
-    const pinPath = opts.rulesPinPath ?? join(process.cwd(), "rules/beagle-rules.sha256");
     d.scanHost = new ScanHost({
-      rulesPath,
-      rulesPin: existsSync(pinPath) ? readFileSync(pinPath, "utf8").trim() : undefined,
+      rulesJson: opts.rulesJson ?? embeddedRules,
+      rulesPin: opts.rulesPin ?? embeddedRulesPin.trim(),
       hmacKey: installKey,
       deadlineMs: opts.scanDeadlineMs ?? 500,
     });

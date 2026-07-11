@@ -12,6 +12,7 @@ import { GraduationTracker } from "../install/graduation";
 import { detectAgents, knownExtraLocations, pathDirsFromEnv } from "../install/detect";
 import { watchAgent, unwatchAgent, type WatchEnv } from "../install/watch";
 import { ChangeManifest } from "../install/manifest";
+import { buildOtelEnv } from "../parsers/otlp-map";
 import { AGENTS, buildRunEnv } from "./agents";
 
 // Everything printed by these commands can embed traffic-derived text
@@ -25,9 +26,21 @@ export function defaultStateDir(): string {
   return join(base, "beagle");
 }
 
-function openStore(stateDir: string): Store | null {
+// Opens the store read-only, or returns the plain-language problem: version
+// mismatches must never surface as a stack trace on the trust-critical
+// surfaces (search/leaks/show) — design §4.
+function openStore(stateDir: string): Store | null | { error: string } {
   if (!existsSync(join(stateDir, "beagle.db"))) return null;
-  return Store.openReadOnly(stateDir);
+  try {
+    return Store.openReadOnly(stateDir);
+  } catch (e) {
+    if (e instanceof StoreVersionError) return { error: e.message };
+    throw e;
+  }
+}
+
+function isStoreError(s: Store | null | { error: string }): s is { error: string } {
+  return s !== null && "error" in s;
 }
 
 interface DaemonInfo {
@@ -55,6 +68,29 @@ async function pingDaemon(stateDir: string): Promise<DaemonInfo | null> {
   }
 }
 
+// Ensure a daemon is up, spawning one if needed. Shared by run and ui.
+async function ensureDaemon(stateDir: string): Promise<DaemonInfo | null> {
+  let daemon = await pingDaemon(stateDir);
+  if (daemon) return daemon;
+  // Compiled binary: argv[1] is not a script path — invoke ourselves
+  // directly. Dev (bun run): re-run the entry script.
+  const script = process.argv[1];
+  const argv =
+    script && /\.(ts|js|mjs)$/.test(script)
+      ? [process.execPath, script, "daemon"]
+      : [process.execPath, "daemon"];
+  const child = Bun.spawn(argv, {
+    env: { ...process.env, BEAGLE_STATE_DIR: stateDir },
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  child.unref();
+  for (let i = 0; i < 40 && !daemon; i++) {
+    await Bun.sleep(100);
+    daemon = await pingDaemon(stateDir);
+  }
+  return daemon;
+}
+
 export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null): string {
   const lines: string[] = [];
   if (daemonUp) {
@@ -62,13 +98,8 @@ export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null):
   } else {
     lines.push("daemon: not running — agents launched now go DIRECT (unmonitored)");
   }
-  let store: Store | null = null;
-  try {
-    store = openStore(stateDir);
-  } catch (e) {
-    if (e instanceof StoreVersionError) return lines.concat(e.message).join("\n");
-    throw e;
-  }
+  const store = openStore(stateDir);
+  if (isStoreError(store)) return lines.concat(store.error).join("\n");
   const exchanges = store?.countExchanges() ?? 0;
   const leaks = store?.countLeakEvents() ?? 0;
   store?.close();
@@ -89,6 +120,7 @@ export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null):
 
 export function cmdSearch(stateDir: string, term: string): string {
   const store = openStore(stateDir);
+  if (isStoreError(store)) return store.error;
   if (!store) return "no capture store yet — nothing has been recorded, so: no matches (never sent).";
   const hits = store.searchLiteral(term);
   store.close();
@@ -105,6 +137,7 @@ export function cmdSearch(stateDir: string, term: string): string {
 
 export function cmdLeaks(stateDir: string): string {
   const store = openStore(stateDir);
+  if (isStoreError(store)) return store.error;
   if (!store) return "no leaks recorded.";
   const events = store.listLeakEvents();
   store.close();
@@ -122,6 +155,7 @@ export function cmdLeaks(stateDir: string): string {
 
 export function cmdShow(stateDir: string, idPrefix: string): string {
   const store = openStore(stateDir);
+  if (isStoreError(store)) return store.error;
   const ex = store?.getExchange(idPrefix) ?? null;
   store?.close();
   if (!ex) return `no exchange matches '${idPrefix}' (prefix may be ambiguous or unknown).`;
@@ -255,8 +289,8 @@ export async function cmdConfig(stateDir: string, args: string[]): Promise<strin
 }
 
 export async function cmdUi(stateDir: string): Promise<string> {
-  const daemon = await pingDaemon(stateDir);
-  if (!daemon) return "the beagle daemon isn't running — start an agent with `beagle run <agent>` first.";
+  const daemon = await ensureDaemon(stateDir); // R1: the dashboard is always one command away
+  if (!daemon) return "could not start the beagle daemon — check `beagle status`.";
   const r = await controlRequest(daemon.socketPath, { cmd: "ui" });
   if (!r.ok) return `could not start the viewer: ${r.error}`;
   const url = (r.data as { url: string }).url;
@@ -269,46 +303,52 @@ export async function cmdUi(stateDir: string): Promise<string> {
   return `dashboard: ${url}\n(the link is one-time; run \`beagle ui\` again for a fresh one)`;
 }
 
+// Parses `beagle run` arguments. Beagle's own flags (--telemetry, --real)
+// are recognized only BEFORE the `--` separator; everything after it belongs
+// to the agent verbatim. The shim invokes: beagle run <agent> --real <path> -- <args...>
+export function parseRunArgs(rawArgs: string[]): {
+  telemetry: boolean;
+  realBinary: string | null;
+  agentArgs: string[];
+} {
+  const sepIdx = rawArgs.indexOf("--");
+  const beagleArgs = sepIdx === -1 ? rawArgs : rawArgs.slice(0, sepIdx);
+  const realIdx = beagleArgs.indexOf("--real");
+  return {
+    telemetry: beagleArgs.includes("--telemetry"),
+    realBinary: realIdx !== -1 ? (beagleArgs[realIdx + 1] ?? null) : null,
+    agentArgs:
+      sepIdx !== -1
+        ? rawArgs.slice(sepIdx + 1)
+        : rawArgs.filter(
+            (a, i) => a !== "--telemetry" && a !== "--real" && rawArgs[i - 1] !== "--real",
+          ),
+  };
+}
+
 export async function cmdRun(stateDir: string, agentName: string, rawArgs: string[]): Promise<number> {
   const spec = AGENTS[agentName];
   if (!spec) {
     console.error(`unknown agent '${agentName}' — supported: ${Object.keys(AGENTS).join(", ")}`);
     return 2;
   }
-  if (!spec.baseUrlEnv) {
+  // Mode B (R2): --telemetry watches via the agent's own OTel export instead
+  // of the wire — for Claude Code on a Claude.ai subscription, where putting
+  // a proxy on the wire is off-limits. Capture is labeled agent-reported.
+  const { telemetry, realBinary: realOverride, agentArgs } = parseRunArgs(rawArgs);
+  if (telemetry && agentName !== "claude") {
+    console.error("--telemetry (agent self-report capture) is supported for claude only in v1.");
+    return 2;
+  }
+  if (!telemetry && !spec.baseUrlEnv) {
     console.error(
       `${agentName} is config-driven; wrapper support arrives with 'beagle watch' — coming in a following release.`,
     );
     return 2;
   }
-  // The shim invokes: beagle run <agent> --real <path> -- <args...>
-  let realBinary = spec.command;
-  let agentArgs = rawArgs;
-  const realIdx = rawArgs.indexOf("--real");
-  if (realIdx !== -1 && rawArgs[realIdx + 1]) {
-    realBinary = rawArgs[realIdx + 1]!;
-    const sep = rawArgs.indexOf("--", realIdx);
-    agentArgs = sep !== -1 ? rawArgs.slice(sep + 1) : rawArgs.slice(realIdx + 2);
-  }
+  const realBinary = realOverride ?? spec.command;
 
-  let daemon = await pingDaemon(stateDir);
-  if (!daemon) {
-    const script = process.argv[1];
-    const argv =
-      script && /\.(ts|js|mjs)$/.test(script)
-        ? [process.execPath, script, "daemon"]
-        : [process.execPath, "daemon"];
-    const child = Bun.spawn(argv, {
-      env: { ...process.env, BEAGLE_STATE_DIR: stateDir },
-      stdio: ["ignore", "ignore", "ignore"],
-    });
-    child.unref();
-    for (let i = 0; i < 40 && !daemon; i++) {
-      await Bun.sleep(100);
-      daemon = await pingDaemon(stateDir);
-    }
-  }
-
+  const daemon = await ensureDaemon(stateDir);
   if (!daemon) {
     // Proxy-down: v1 fails OPEN (observe-only, nothing to protect) but says so
     // unmissably via an OS notification — a printed line dies with the first
@@ -318,32 +358,52 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
     return await direct.exited;
   }
 
-  const runId = randomUUID();
-  await controlRequest(daemon.socketPath, {
-    cmd: "register-run",
-    args: {
-      id: runId,
-      agent: agentName,
-      provider: spec.provider,
-      upstream: spec.upstream,
-      authLocation: spec.authLocation,
-      extraHeaders: spec.extraHeaders,
-    },
-  });
+  let modeEnv: Record<string, string>;
+  if (telemetry) {
+    // Nothing goes on the wire: point the agent's own OTel exporter at the
+    // daemon's loopback receiver, authed by the per-session run token.
+    const status = await controlRequest(daemon.socketPath, { cmd: "status" });
+    const data = status.data as { otlpPort?: number; otlpToken?: string } | undefined;
+    if (!status.ok || !data?.otlpPort || !data.otlpToken) {
+      console.error("could not read the telemetry receiver from the daemon — try `beagle status`.");
+      return 1;
+    }
+    modeEnv = buildOtelEnv(`http://127.0.0.1:${data.otlpPort}`, data.otlpToken);
+  } else {
+    const runId = randomUUID();
+    await controlRequest(daemon.socketPath, {
+      cmd: "register-run",
+      args: {
+        id: runId,
+        agent: agentName,
+        provider: spec.provider,
+        upstream: spec.upstream,
+        authLocation: spec.authLocation,
+        extraHeaders: spec.extraHeaders,
+      },
+    });
+    modeEnv = buildRunEnv(agentName, daemon.proxyPort, runId);
+  }
 
-  // Graduation nudge after the 3rd wrapper run (R2) — never applies anything.
   const grad = new GraduationTracker(stateDir);
-  if (grad.recordRunAndCheck(agentName)) {
+  const shouldNudge = grad.recordRunAndCheck(agentName);
+
+  const child = Bun.spawn([realBinary, ...agentArgs], {
+    env: { ...process.env, ...modeEnv },
+    stdio: ["inherit", "inherit", "inherit"],
+  });
+  const exitCode = await child.exited;
+
+  // Graduation nudge AFTER the agent exits (R2): full-screen TUIs wipe
+  // anything printed before they start; after exit the terminal is ours.
+  if (shouldNudge) {
     process.stderr.write(
       `\nbeagle: you've run ${agentName} under Beagle a few times.\n` +
         `  Watch it automatically so you never have to prefix again? Run: beagle watch ${agentName}\n` +
         `  (one-time nudge; it won't ask again)\n\n`,
     );
   }
-
-  const env = { ...process.env, ...buildRunEnv(agentName, daemon.proxyPort, runId) };
-  const child = Bun.spawn([realBinary, ...agentArgs], { env, stdio: ["inherit", "inherit", "inherit"] });
-  return await child.exited;
+  return exitCode;
 }
 
 function notifyProxyDown(agent: string): void {

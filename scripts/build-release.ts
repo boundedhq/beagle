@@ -21,7 +21,8 @@ for (const t of TARGETS) {
   console.log(`building ${t.out}…`);
   const r = Bun.spawnSync([
     "bun", "build", "--compile", `--target=${t.target}`,
-    "src/cli/main.ts", "--outfile", outfile,
+    "src/cli/main.ts", "src/adapters/scan-worker-entry.ts",
+    "--outfile", outfile,
   ]);
   if (r.exitCode !== 0) {
     console.error(`  FAILED: ${r.stderr.toString()}`);

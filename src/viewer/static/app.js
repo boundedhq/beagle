@@ -185,11 +185,17 @@ function Detail({ id }) {
   try {
     const body = JSON.parse(detail.requestBody);
     system = typeof body.system === "string" ? body.system : null;
-    messages = Array.isArray(body.messages) ? body.messages : [];
+    // Anthropic uses `messages`; the Responses API uses `input` items.
+    const items = Array.isArray(body.messages) ? body.messages : body.input;
+    messages = Array.isArray(items) ? items : [];
   } catch { /* raw only */ }
 
   const older = messages.slice(0, -1);
   const newest = messages.slice(-1);
+  // Nothing structured to show → raw is the only honest view; don't render
+  // an empty timeline with a toggle the user has to discover.
+  const hasStructure = messages.length > 0 || system !== null;
+  const showRaw = raw || !hasStructure;
 
   return html`
     <div class="detail">
@@ -199,10 +205,11 @@ function Detail({ id }) {
         ${detail.captureState !== "ok" ? " · ⚠ capture truncated" : ""}
         ${detail.scanState !== "ok" ? " · ⚠ scan incomplete — unverified, not clean" : ""}
       </div>
-      <button class=${raw ? "active" : ""} onClick=${() => setRaw(!raw)}>
-        ${raw ? "structured view" : "raw bytes"}
-      </button>
-      ${raw
+      ${hasStructure &&
+      html`<button class=${showRaw ? "active" : ""} onClick=${() => setRaw(!raw)}>
+        ${showRaw ? "structured view" : "raw bytes"}
+      </button>`}
+      ${showRaw
         ? html`
             <h4>request</h4>
             <pre>${pretty(detail.requestBody)}</pre>

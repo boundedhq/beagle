@@ -6,7 +6,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "build": "bun build --compile src/cli/main.ts --outfile dist/beagle",
+    "build": "bun build --compile src/cli/main.ts src/adapters/scan-worker-entry.ts --outfile dist/beagle",
     "test": "bun test",
     "lint": "bun scripts/lint-bun-imports.ts && bun scripts/lint-viewer-safety.ts",
     "loc": "bun scripts/loc-report.ts",

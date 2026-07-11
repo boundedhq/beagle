@@ -3,11 +3,20 @@
 // Origin/Host validation, strict CSP, POST-only mutations, fetch-SSE feed,
 // idle shutdown when the last tab disconnects.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { Store } from "../core/store/store";
 import { listExchanges } from "./feed-query";
+// Statics embedded at build time (ships-what's-in-repo, and the compiled
+// binary has no filesystem view of the repo).
+import indexHtmlRaw from "./static/index.html" with { type: "text" };
+import appJs from "./static/app.js" with { type: "text" };
+// bun-types types *.html imports as HTMLBundle; with { type: "text" } the
+// runtime value is a plain string.
+const indexHtml = indexHtmlRaw as unknown as string;
+import styleCss from "./static/style.css" with { type: "text" };
+import preactJs from "./static/vendor/preact.module.js" with { type: "text" };
+import preactHooksJs from "./static/vendor/preact-hooks.module.js" with { type: "text" };
+import htmJs from "./static/vendor/htm.module.js" with { type: "text" };
 
 export interface ViewerOptions {
   stateDir: string;
@@ -16,21 +25,20 @@ export interface ViewerOptions {
   onPurge?: (kind: string) => void;
 }
 
-const STATIC_FILES: Record<string, { path: string; type: string }> = {
-  "/": { path: "index.html", type: "text/html; charset=utf-8" },
-  "/app.js": { path: "app.js", type: "text/javascript; charset=utf-8" },
-  "/style.css": { path: "style.css", type: "text/css; charset=utf-8" },
-  "/vendor/preact.module.js": { path: "vendor/preact.module.js", type: "text/javascript" },
-  "/vendor/preact-hooks.module.js": { path: "vendor/preact-hooks.module.js", type: "text/javascript" },
-  "/vendor/htm.module.js": { path: "vendor/htm.module.js", type: "text/javascript" },
+const STATIC_FILES: Record<string, { body: string; type: string }> = {
+  "/": { body: indexHtml, type: "text/html; charset=utf-8" },
+  "/app.js": { body: appJs, type: "text/javascript; charset=utf-8" },
+  "/style.css": { body: styleCss, type: "text/css; charset=utf-8" },
+  "/vendor/preact.module.js": { body: preactJs, type: "text/javascript" },
+  "/vendor/preact-hooks.module.js": { body: preactHooksJs, type: "text/javascript" },
+  "/vendor/htm.module.js": { body: htmJs, type: "text/javascript" },
 };
 
 // script-src allows exactly two things: same-origin module files and the
 // inline import map, pinned by its content hash — still nothing external,
 // still no other inline script.
 function buildCsp(): string {
-  const html = readFileSync(join(import.meta.dir, "static", "index.html"), "utf8");
-  const m = html.match(/<script type="importmap">([\s\S]*?)<\/script>/);
+  const m = indexHtml.match(/<script type="importmap">([\s\S]*?)<\/script>/);
   const importMapHash = m
     ? `'sha256-${createHash("sha256").update(m[1]!).digest("base64")}'`
     : "";
@@ -115,14 +123,13 @@ export class ViewerServer {
 
     const staticFile = STATIC_FILES[path];
     if (staticFile && req.method === "GET") {
-      const body = readFileSync(join(import.meta.dir, "static", staticFile.path));
       res.writeHead(200, {
         "content-type": staticFile.type,
         "content-security-policy": CSP,
         "x-content-type-options": "nosniff",
         "referrer-policy": "no-referrer",
       });
-      res.end(body);
+      res.end(staticFile.body);
       return;
     }
 
