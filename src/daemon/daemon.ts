@@ -3,6 +3,7 @@
 // only writer; CLI and viewer read the store directly.
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { randomBytes } from "node:crypto";
 import type { Server } from "node:net";
 import { AlertEngine, type AlertEvent } from "../core/alert/engine";
 import { loadConfig, loadOrCreateInstallKey, type BeagleConfig } from "../core/config/config";
@@ -17,6 +18,8 @@ import { Notifier } from "../notifier/notifier";
 import { detectFormat, parseRequest, parseResponse, type Format, type ParsedRequest } from "../parsers/parsers";
 import { startControlServer, type ControlRequest, type ControlResponse } from "./control";
 import { ViewerServer } from "../viewer/server";
+import { OtlpReceiver } from "../core/otlp/receiver";
+import type { OtelExchange } from "../parsers/otlp-map";
 
 export interface DaemonOptions {
   stateDir: string;
@@ -54,6 +57,9 @@ export class Daemon {
   private control!: Server;
   private notifier = new Notifier();
   private viewer: ViewerServer | null = null;
+  private otlp: OtlpReceiver | null = null;
+  otlpPort = 0;
+  private otlpToken = "";
   private pending = new Map<string, PendingExchange>();
   private paused = false;
   private sweeper: ReturnType<typeof setInterval> | null = null;
@@ -93,13 +99,24 @@ export class Daemon {
     });
     await d.proxy.listen(0);
     d.proxyPort = d.proxy.port;
+    // A per-daemon-session token, minted into the agent's OTEL headers — never
+    // the install key (which must not leave the machine).
+    d.otlpToken = randomBytes(24).toString("hex");
+    d.otlp = new OtlpReceiver({
+      token: d.otlpToken,
+      onExchanges: (exs) => d.ingestOtel(exs),
+    });
+    d.otlpPort = await d.otlp.listen(0);
     d.control = await startControlServer(d.socketPath, (req) => d.handleControl(req));
     d.sweep();
     d.sweeper = setInterval(() => d.sweep(), SWEEP_INTERVAL_MS);
     d.sweeper.unref?.();
     writeFileSync(
       join(opts.stateDir, "daemon.json"),
-      JSON.stringify({ pid: process.pid, proxyPort: d.proxyPort, socketPath: d.socketPath }),
+      JSON.stringify({
+        pid: process.pid, proxyPort: d.proxyPort, socketPath: d.socketPath,
+        otlpPort: d.otlpPort, otlpToken: d.otlpToken,
+      }),
       { mode: 0o600 },
     );
     return d;
@@ -108,6 +125,7 @@ export class Daemon {
   async stop(): Promise<void> {
     if (this.sweeper) clearInterval(this.sweeper);
     this.viewer?.stop();
+    this.otlp?.close();
     this.proxy.close();
     this.control.close();
     this.scanHost.close();
@@ -232,6 +250,98 @@ export class Daemon {
     });
   }
 
+  // Mode B ingest (design §6.2): OTel-reported exchanges run the identical
+  // scanner/session/alert/store path — source='otel' is the only difference,
+  // surfaced as the agent-reported badge (R7).
+  private async ingestOtel(exchanges: OtelExchange[]): Promise<void> {
+    for (const ex of exchanges) {
+      if (this.paused || this.config.excludedAgents.includes(ex.agent ?? "")) continue;
+      const resolution = this.resolver.resolve({
+        agent: ex.agent,
+        provider: ex.provider,
+        runId: ex.runId,
+        ts: ex.meta.tsRequest,
+        convId: ex.convId,
+        messages: ex.request.messages,
+      });
+      const scanResult = await this.scanHost.scan(ex.request.bodyBytes, {});
+      // Keep session chaining state current, same as the wire path — so a
+      // Mode B session without an explicit id still chains across turns.
+      if (ex.request.messages?.length || ex.response.text) {
+        this.resolver.recordResponse({
+          sessionId: resolution.sessionId,
+          messages: [
+            ...(ex.request.messages ?? []),
+            ...(ex.response.text ? [{ role: "assistant", content: ex.response.text }] : []),
+          ],
+          responseId: ex.convId,
+        });
+      }
+      this.store.insertExchange({
+        id: ex.id,
+        sessionId: resolution.sessionId,
+        runId: ex.runId,
+        source: "otel",
+        agent: ex.agent,
+        provider: ex.provider,
+        model: ex.model,
+        endpoint: ex.endpoint,
+        tsRequest: ex.meta.tsRequest,
+        tsResponse: ex.meta.tsResponse,
+        status: 200,
+        tokensIn: ex.meta.tokensIn,
+        tokensOut: ex.meta.tokensOut,
+        bytesReq: ex.request.bodyBytes.byteLength,
+        bytesResp: ex.response.bodyBytes?.byteLength,
+        summary: buildSummary(
+          { model: ex.model, messages: ex.request.messages ?? [] } as ParsedRequest,
+          ex.response.text,
+        ),
+        scanState: scanResult.state,
+        captureState: "ok",
+        sessionTier: resolution.tier,
+        requestBody: ex.request.bodyBytes,
+        requestHeaders: null,
+        responseBody: ex.response.bodyBytes ?? null,
+        responseHeaders: null,
+        sseRaw: null,
+        searchText:
+          (ex.request.messages?.map((m) => m.content).join("\n") ?? "") + "\n" + (ex.response.text ?? ""),
+      });
+      this.alertEngine.process(
+        {
+          id: ex.id,
+          sessionId: resolution.sessionId,
+          agent: ex.agent,
+          provider: ex.provider,
+          model: ex.model,
+        },
+        scanResult.findings,
+      );
+      this.viewer?.broadcast("exchange", {
+        id: ex.id,
+        sessionId: resolution.sessionId,
+        agent: ex.agent,
+        provider: ex.provider,
+        model: ex.model,
+        tsRequest: ex.meta.tsRequest,
+        status: 200,
+        tokensIn: ex.meta.tokensIn,
+        tokensOut: ex.meta.tokensOut,
+        bytesReq: ex.request.bodyBytes.byteLength,
+        summary: buildSummary(
+          { model: ex.model, messages: ex.request.messages ?? [] } as ParsedRequest,
+          ex.response.text,
+        ),
+        scanState: scanResult.state,
+        captureState: "ok",
+        sessionTier: resolution.tier,
+        source: "otel",
+        hasLeak: false,
+      });
+    }
+  }
+
   private emitAlert(a: AlertEvent): void {
     this.viewer?.broadcast("alert", a);
     if (this.opts.alertSinkForTest) {
@@ -276,6 +386,8 @@ export class Daemon {
           data: {
             paused: this.paused,
             proxyPort: this.proxyPort,
+            otlpPort: this.otlpPort,
+            otlpToken: this.otlpToken,
             exchanges: this.store.countExchanges(),
             leaks: this.store.countLeakEvents(),
           },
