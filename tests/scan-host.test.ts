@@ -1,11 +1,13 @@
 import { afterAll, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { ScanHost } from "../src/adapters/scan-host";
 
 const HMAC_KEY = new Uint8Array(32).fill(7);
+const RULES_JSON = readFileSync("rules/beagle-rules.json", "utf8");
 
 describe("ScanHost (worker-hosted scanner)", () => {
   const host = new ScanHost({
-    rulesPath: "rules/beagle-rules.json",
+    rulesJson: RULES_JSON,
     hmacKey: HMAC_KEY,
     deadlineMs: 500,
   });
@@ -21,7 +23,7 @@ describe("ScanHost (worker-hosted scanner)", () => {
 
   test("deadline breach terminates the worker and reports incomplete, then recovers", async () => {
     const evil = new ScanHost({
-      rulesPath: "rules/beagle-rules.json",
+      rulesJson: RULES_JSON,
       hmacKey: HMAC_KEY,
       deadlineMs: 300,
       extraRulesForTest: [{

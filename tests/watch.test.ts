@@ -53,6 +53,14 @@ describe("watchAgent", () => {
     expect(r.message.toLowerCase()).toContain("alias");
   });
 
+  test("non-coverage message includes the exact PATH fix", () => {
+    const env = makeEnv({ runType: () => "claude is /opt/homebrew/bin/claude" });
+    const r = watchAgent("claude", env);
+    expect(r.verdict?.covered).toBe(false);
+    expect(r.message).toContain(`export PATH="${env.shimDir}:$PATH"`);
+    expect(r.message).toContain("beagle status");
+  });
+
   test("unsupported or missing agent is refused", () => {
     expect(watchAgent("nonesuch", makeEnv()).applied).toBe(false);
     expect(watchAgent("claude", makeEnv({ resolveReal: () => null })).applied).toBe(false);

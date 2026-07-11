@@ -81,6 +81,10 @@ export class ProxyServer {
         client.end("HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n");
         return;
       }
+      if (parsed === "length-required") {
+        client.end("HTTP/1.1 411 Length Required\r\ncontent-length: 0\r\n\r\n");
+        return;
+      }
       buf = buf.subarray(parsed.consumed);
       busy = true;
       this.handleRequest(client, parsed.req)
@@ -245,7 +249,9 @@ export class ProxyServer {
   }
 }
 
-function parseRequest(buf: Buffer): { req: ParsedRequest; consumed: number } | "bad" | null {
+function parseRequest(
+  buf: Buffer,
+): { req: ParsedRequest; consumed: number } | "bad" | "length-required" | null {
   const headerEnd = buf.indexOf("\r\n\r\n");
   if (headerEnd === -1) return null;
   const lines = buf.subarray(0, headerEnd).toString("latin1").split("\r\n");
@@ -258,6 +264,11 @@ function parseRequest(buf: Buffer): { req: ParsedRequest; consumed: number } | "
     if (i <= 0) return "bad";
     headers.push([line.slice(0, i), line.slice(i + 1).trim()]);
   }
+  // Chunked request bodies aren't supported (agents send content-length JSON
+  // POSTs); without this check the chunk framing would be mis-parsed as the
+  // next request. 411 tells the client to retry with a length.
+  const te = headers.find(([n]) => n.toLowerCase() === "transfer-encoding")?.[1];
+  if (te?.toLowerCase().includes("chunked")) return "length-required";
   const clHeader = headers.find(([n]) => n.toLowerCase() === "content-length")?.[1];
   const bodyLen = clHeader ? Number(clHeader) : 0;
   if (!Number.isInteger(bodyLen) || bodyLen < 0) return "bad";

@@ -66,9 +66,18 @@ export function watchAgent(agent: string, env: WatchEnv): WatchResult {
 
   // Verify coverage against the user's actual shell (the honesty clause).
   const verdict = parseCoverageVerdict(agent, plan.shimPath, env.runType(agent));
-  const msg = verdict.covered
-    ? `watching ${agent} — verified: ${verdict.reason}. New shells are covered; run 'rehash' or open a new terminal for existing ones.`
-    : `shim placed, but coverage is NOT yet active: ${verdict.reason}`;
+  let msg: string;
+  if (verdict.covered) {
+    msg = `watching ${agent} — verified: ${verdict.reason}. New shells are covered; run 'rehash' or open a new terminal for existing ones.`;
+  } else {
+    // Never report a failure without the fix (R2: name the exact cause AND
+    // how to close it) — the usual cause is the shim dir not being on PATH.
+    msg =
+      `shim placed, but coverage is NOT yet active: ${verdict.reason}\n` +
+      `To fix, add Beagle's shim directory to the FRONT of your PATH — put this line in your shell rc (~/.zshrc or ~/.bashrc):\n` +
+      `  export PATH="${env.shimDir}:$PATH"\n` +
+      `then open a new terminal and run 'beagle status' to re-verify.`;
+  }
   return { applied: true, message: msg, verdict };
 }
 

@@ -10,7 +10,9 @@ export interface ScanResult {
 }
 
 export interface ScanHostOptions {
-  rulesPath: string;
+  /** Rule file CONTENT (not a path): the caller owns loading/embedding, so
+   *  the compiled binary needs no filesystem access for rules. */
+  rulesJson: string;
   rulesPin?: string;
   hmacKey: Uint8Array;
   deadlineMs: number;
@@ -58,7 +60,15 @@ export class ScanHost {
 
   private ensureWorker(): Worker {
     if (this.worker) return this.worker;
-    const worker = new Worker(new URL("./scan-worker-entry.ts", import.meta.url).href);
+    // Compiled binary: entrypoints land in $bunfs under their paths relative
+    // to the entries' common root (src/), and Worker strings resolve against
+    // that root — URL-based resolution fails there. Dev/test: resolve
+    // relative to this module. Both verified in tests/build.test.ts.
+    const isCompiled = import.meta.url.includes("$bunfs");
+    const entry = isCompiled
+      ? "./adapters/scan-worker-entry.ts"
+      : new URL("./scan-worker-entry.ts", import.meta.url).href;
+    const worker = new Worker(entry);
     worker.onmessage = (event: MessageEvent<{ kind: string; id: number; findings: Finding[] }>) => {
       const { id, findings } = event.data;
       const p = this.pending.get(id);
@@ -67,10 +77,17 @@ export class ScanHost {
       this.pending.delete(id);
       p.resolve({ state: "ok", findings });
     };
-    worker.onerror = () => this.failAll();
+    worker.onerror = (e) => {
+      // Never die silently: a dead scanner means every scan reports
+      // incomplete — say why, once per worker incarnation.
+      process.stderr.write(
+        `beagle: scanner worker error — scans will report incomplete: ${String((e as ErrorEvent).message ?? e).slice(0, 300)}\n`,
+      );
+      this.failAll();
+    };
     worker.postMessage({
       kind: "init",
-      rulesPath: this.opts.rulesPath,
+      rulesJson: this.opts.rulesJson,
       rulesPin: this.opts.rulesPin,
       extraRules: this.opts.extraRulesForTest,
       hmacKey: this.opts.hmacKey,

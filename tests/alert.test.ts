@@ -73,7 +73,8 @@ describe("AlertEngine", () => {
     expect(a.body).toContain("claude-code");
     expect(a.body).toContain("anthropic/claude-sonnet-5");
     expect(a.body.toLowerCase()).toContain("already been sent");
-    expect(a.body).toContain("beagle show 01JZXKQ8");
+    // 12-char prefix: same-millisecond ULIDs share their first 8 chars
+    expect(a.body).toContain("beagle show 01JZXKQ8WVXH");
   });
 
   test("destination's own key alerts with the annotation", () => {

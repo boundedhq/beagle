@@ -71,6 +71,8 @@ function alertCopy(
   const body =
     `${f.secretType} sent to ${destination} by ${ex.agent ?? "unknown agent"}${ownKey}. ` +
     `The data has already been sent — Beagle observes, it does not block. ` +
-    `Details: beagle show ${ex.id.slice(0, 8)}`;
+    // 12 chars: same-millisecond ULIDs share their first 8, so an 8-char
+    // prefix can be ambiguous exactly when a burst of exchanges lands.
+    `Details: beagle show ${ex.id.slice(0, 12)}`;
   return { title, body };
 }
