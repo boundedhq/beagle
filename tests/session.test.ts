@@ -101,6 +101,23 @@ describe("SessionResolver", () => {
     expect(later.sessionId).not.toBe(a.sessionId);
   });
 
+  test("identical histories from different agents never share a session", () => {
+    const a = resolver.resolve({ ...base, messages: [U("q1"), A("a1"), U("q2")] });
+    const b = resolver.resolve({
+      ...base,
+      agent: "codex",
+      provider: "openai",
+      messages: [U("q1"), A("a1"), U("q2")],
+    });
+    expect(b.sessionId).not.toBe(a.sessionId);
+  });
+
+  test("two conversations that both open with 'hi' are not merged", () => {
+    const a = resolver.resolve({ ...base, messages: [U("hi")] });
+    const b = resolver.resolve({ ...base, runId: "run-2", messages: [U("hi")] });
+    expect(b.sessionId).not.toBe(a.sessionId);
+  });
+
   test("sessions persist: a new resolver over the same store still chains", () => {
     const t1 = resolver.resolve({ ...base, messages: [U("q1")] });
     resolver.recordResponse({ sessionId: t1.sessionId, messages: [U("q1"), A("a1")] });

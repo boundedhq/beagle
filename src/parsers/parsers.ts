@@ -70,8 +70,14 @@ export function parseRequest(format: Format, bytes: Uint8Array): ParsedRequest |
 export function parseResponse(format: Format, bytes: Uint8Array): ParsedResponse | null {
   try {
     const text = new TextDecoder().decode(bytes);
-    if (text.includes("data:")) return parseSse(format, text);
-    const body = JSON.parse(text);
+    // JSON first: a JSON body can legitimately contain "data:" (data-URIs);
+    // a real SSE stream never parses as JSON.
+    let body: Record<string, any>;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      return parseSse(format, text);
+    }
     if (format === "anthropic-messages") {
       return {
         model: body.model,

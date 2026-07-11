@@ -31,13 +31,15 @@ export class SessionResolver {
   constructor(private store: Store) {}
 
   resolve(input: ResolveInput): Resolution {
+    const scope = { agent: input.agent ?? "unknown", provider: input.provider };
+
     // Tier 1 — explicit conversation identity.
     const explicitId = input.convId ?? input.prevResponseId;
     if (explicitId) {
-      const found = this.store.findSessionBy("conv_id", [explicitId]);
+      const found = this.store.findSessionBy("conv_id", [explicitId], scope);
       if (found) {
-        this.store.updateSession(found, { lastTs: input.ts });
-        return { sessionId: found, tier: "conv-id" };
+        this.store.updateSession(found.id, { lastTs: input.ts });
+        return { sessionId: found.id, tier: "conv-id" };
       }
       if (input.convId) {
         return { sessionId: this.create(input, { convId: input.convId }), tier: "conv-id" };
@@ -49,18 +51,26 @@ export class SessionResolver {
     if (input.messages && input.messages.length > 0) {
       const prefixHashes = chainHashes(input.messages);
       const fullHash = prefixHashes[prefixHashes.length - 1]!;
-      const byPrefix = this.store.findSessionBy("head_hash", prefixHashes);
-      if (byPrefix) {
-        this.store.updateSession(byPrefix, { lastTs: input.ts, headHash: fullHash });
-        return { sessionId: byPrefix, tier: "prefix" };
+      const byPrefix = this.store.findSessionBy("head_hash", prefixHashes, scope);
+      // Chain only when the incoming array properly EXTENDS the stored head,
+      // or exactly replays a multi-turn history (--resume / retry). A
+      // 1-message exact match is two conversations that merely opened the
+      // same way ("hi") — never merge those.
+      const matchedIndex = byPrefix ? prefixHashes.indexOf(byPrefix.matched) : -1;
+      const extendsHead = matchedIndex >= 0 && matchedIndex < input.messages.length - 1;
+      const replaysMultiTurn =
+        matchedIndex === input.messages.length - 1 && input.messages.length >= 2;
+      if (byPrefix && (extendsHead || replaysMultiTurn)) {
+        this.store.updateSession(byPrefix.id, { lastTs: input.ts, headHash: fullHash });
+        return { sessionId: byPrefix.id, tier: "prefix" };
       }
       // Compaction rewrote history: fuzzy-link on system + first user message.
       const fuzzy = fuzzyHash(input.systemPrompt, input.messages);
-      if (fuzzy) {
-        const byFuzzy = this.store.findSessionBy("fuzzy_hash", [fuzzy]);
+      if (fuzzy && input.messages.length >= 2) {
+        const byFuzzy = this.store.findSessionBy("fuzzy_hash", [fuzzy], scope);
         if (byFuzzy) {
-          this.store.updateSession(byFuzzy, { lastTs: input.ts, headHash: fullHash });
-          return { sessionId: byFuzzy, tier: "compaction-link" };
+          this.store.updateSession(byFuzzy.id, { lastTs: input.ts, headHash: fullHash });
+          return { sessionId: byFuzzy.id, tier: "compaction-link" };
         }
       }
       return {
@@ -71,15 +81,15 @@ export class SessionResolver {
 
     // Tier 3 — the floor: run identity, then time gap.
     if (input.runId) {
-      const byRun = this.store.findSessionBy("run_id", [input.runId]);
+      const byRun = this.store.findSessionBy("run_id", [input.runId], scope);
       if (byRun) {
-        this.store.updateSession(byRun, { lastTs: input.ts });
-        return { sessionId: byRun, tier: "run" };
+        this.store.updateSession(byRun.id, { lastTs: input.ts });
+        return { sessionId: byRun.id, tier: "run" };
       }
       return { sessionId: this.create(input, { runId: input.runId }), tier: "run" };
     }
     const recent = this.store.findRecentSession(
-      input.agent ?? "", input.provider, input.ts - TIME_GAP_MS,
+      scope.agent, input.provider, input.ts - TIME_GAP_MS,
     );
     if (recent) {
       this.store.updateSession(recent, { lastTs: input.ts });
@@ -108,7 +118,7 @@ export class SessionResolver {
     const id = ulid(input.ts);
     this.store.insertSession({
       id,
-      agent: input.agent,
+      agent: input.agent ?? "unknown",
       provider: input.provider,
       firstTs: input.ts,
       lastTs: input.ts,

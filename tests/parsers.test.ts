@@ -111,6 +111,19 @@ describe("OpenAI Responses", () => {
   });
 });
 
+describe("JSON containing 'data:' substrings is not misrouted to the SSE parser", () => {
+  test("data-URI in response content parses as JSON", () => {
+    const body = JSON.stringify({
+      model: "claude-sonnet-5",
+      content: [{ type: "text", text: "here: data:image/png;base64,iVBORw0KGgo=" }],
+      usage: { input_tokens: 1, output_tokens: 2 },
+    });
+    const r = parseResponse("anthropic-messages", enc(body))!;
+    expect(r.text).toContain("data:image/png");
+    expect(r.tokensOut).toBe(2);
+  });
+});
+
 describe("malformed input degrades to null, never throws (R3)", () => {
   test("garbage bytes", () => {
     expect(parseRequest("anthropic-messages", enc("not json{{{"))).toBeNull();

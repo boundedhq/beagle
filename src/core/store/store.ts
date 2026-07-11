@@ -263,18 +263,24 @@ export class Store {
       this.db.run(`UPDATE sessions SET head_hash=? WHERE id=?`, [fields.headHash, id]);
   }
 
+  // Session lookups are always scoped by agent+provider: sessions are
+  // per-agent (R6 folds the agent dimension into session identity), and an
+  // unscoped hash/conv-id match would let purge-by-session reach across
+  // agents.
   findSessionBy(
     column: "conv_id" | "head_hash" | "fuzzy_hash" | "run_id",
     values: string[],
-  ): string | null {
+    scope: { agent: string; provider: string },
+  ): { id: string; matched: string } | null {
     if (values.length === 0) return null;
     const qs = values.map(() => "?").join(",");
-    return (
-      this.db.get<{ id: string }>(
-        `SELECT id FROM sessions WHERE ${column} IN (${qs}) ORDER BY last_ts DESC LIMIT 1`,
-        values,
-      )?.id ?? null
+    const row = this.db.get<{ id: string; matched: string }>(
+      `SELECT id, ${column} AS matched FROM sessions
+       WHERE ${column} IN (${qs}) AND agent=? AND provider=?
+       ORDER BY last_ts DESC LIMIT 1`,
+      [...values, scope.agent, scope.provider],
     );
+    return row ?? null;
   }
 
   findRecentSession(agent: string, provider: string, sinceTs: number): string | null {
