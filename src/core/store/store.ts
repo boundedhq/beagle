@@ -209,6 +209,15 @@ export class Store {
     return { fresh, eventId };
   }
 
+  fingerprintKnown(fingerprint: string): boolean {
+    return (
+      this.db.get<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM leak_events WHERE fingerprint = ?`,
+        [fingerprint],
+      )?.n ?? 0
+    ) > 0;
+  }
+
   listLeakEvents(): LeakEvent[] {
     return this.db.all<Record<string, unknown>>(
       `SELECT id, fingerprint, session_id, detector, secret_type, severity,
@@ -317,6 +326,16 @@ export class Store {
   }
 
   private deleteExchangesWhereInner(where: string, params: unknown[]): void {
+    // Manual leak-table cleanup (no FKs to exchanges — see schema note).
+    this.db.run(
+      `UPDATE leak_events SET first_exchange = NULL
+       WHERE first_exchange IN (SELECT id FROM exchanges WHERE ${where})`,
+      params,
+    );
+    this.db.run(
+      `DELETE FROM leak_occurrences WHERE exchange_id IN (SELECT id FROM exchanges WHERE ${where})`,
+      params,
+    );
     this.db.run(
       `DELETE FROM exchanges_fts WHERE exchange_id IN (SELECT id FROM exchanges WHERE ${where})`,
       params,
