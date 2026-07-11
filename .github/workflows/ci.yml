@@ -22,7 +22,7 @@ jobs:
         run: bun run loc:check
       - name: Typecheck
         run: bunx tsc --noEmit
-      - name: Tests
+      - name: Tests (incl. detection-precision ship gate + budget harness)
         run: bun test
       - name: Compile single binary
         run: bun run build
