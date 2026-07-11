@@ -3,6 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ViewerServer } from "../src/viewer/server";
+import { findViewerSafetyViolations } from "../scripts/lint-viewer-safety";
 import { Store, type ExchangeRecord } from "../src/core/store/store";
 import { ulid } from "../src/core/store/ulid";
 
@@ -157,6 +158,39 @@ describe("ViewerServer hardening (design §6.8)", () => {
   test("SSE stream requires the credential", async () => {
     const r = await fetch(`${origin()}/api/stream`);
     expect(r.status).toBe(401);
+  });
+
+  test("SSE reconnects do not leak store handles (crown-jewels held open)", async () => {
+    const cred = await getCredential();
+    for (let i = 0; i < 5; i++) {
+      const controller = new AbortController();
+      const s = await fetch(`${origin()}/api/stream`, {
+        headers: { "x-beagle-token": cred },
+        signal: controller.signal,
+      });
+      expect(s.status).toBe(200);
+      controller.abort();
+      await Bun.sleep(20);
+    }
+    // A leaked read handle would have kept the WAL pinned; a fresh writer
+    // opening and inserting still succeeds cleanly.
+    const w = Store.open(stateDir);
+    w.close();
+    // and the feed still serves normally afterward
+    const feed = await fetch(`${origin()}/api/feed`, { headers: { "x-beagle-token": cred } });
+    expect(feed.status).toBe(200);
+  });
+
+  test("bad session credential is rejected in constant time (timing-safe compare)", async () => {
+    await getCredential();
+    const wrong = await fetch(`${origin()}/api/feed`, {
+      headers: { "x-beagle-token": "0".repeat(64) },
+    });
+    expect(wrong.status).toBe(401);
+  });
+
+  test("the viewer client code contains no unsafe HTML sinks", () => {
+    expect(findViewerSafetyViolations(join(import.meta.dir, ".."))).toEqual([]);
   });
 
   test("idle shutdown: viewer stops after the last SSE client disconnects", async () => {

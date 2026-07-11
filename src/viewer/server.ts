@@ -5,7 +5,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { Store } from "../core/store/store";
 
 export interface ViewerOptions {
@@ -47,6 +47,15 @@ function buildCsp(): string {
 }
 
 const CSP = buildCsp();
+
+// Constant-time string compare so a token/credential check can't be probed
+// byte-by-byte via response timing (loopback lowers but doesn't remove risk).
+function constantTimeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
 
 export class ViewerServer {
   isRunning = false;
@@ -119,7 +128,7 @@ export class ViewerServer {
     if (path === "/api/session" && req.method === "POST") {
       void this.readJson(req).then((body) => {
         const boot = (body as { boot?: string })?.boot;
-        if (this.bootToken && boot === this.bootToken) {
+        if (this.bootToken && typeof boot === "string" && constantTimeEqual(boot, this.bootToken)) {
           this.bootToken = null; // one-time: invalidated on use
           this.credential = randomBytes(32).toString("hex");
           this.json(res, 200, { credential: this.credential });
@@ -132,7 +141,11 @@ export class ViewerServer {
 
     if (path.startsWith("/api/")) {
       const token = req.headers["x-beagle-token"];
-      if (!this.credential || token !== this.credential) {
+      if (
+        !this.credential ||
+        typeof token !== "string" ||
+        !constantTimeEqual(token, this.credential)
+      ) {
         this.json(res, 401, { error: "missing or invalid session credential" });
         return;
       }
@@ -144,16 +157,44 @@ export class ViewerServer {
   }
 
   private apiRoute(path: string, req: IncomingMessage, res: ServerResponse): void {
+    // The SSE stream and purge hold no store handle: streaming pushes are
+    // broadcast from the daemon, and purge routes to onPurge.
+    if (path === "/api/stream" && req.method === "GET") {
+      res.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        connection: "keep-alive",
+      });
+      res.write(": connected\n\n");
+      this.sseClients.add(res);
+      req.on("close", () => {
+        this.sseClients.delete(res);
+        this.armIdleTimer();
+      });
+      return;
+    }
+    if (path === "/api/purge" && req.method === "POST") {
+      void this.readJson(req).then((body) => {
+        const kind = String((body as { kind?: string })?.kind ?? "all");
+        if (!this.opts.onPurge) return this.json(res, 501, { error: "purge runs via the daemon" });
+        this.opts.onPurge(kind);
+        this.json(res, 200, { ok: true });
+      });
+      return;
+    }
+
     const store = this.openStore();
-    if (!store && path !== "/api/purge") {
+    if (!store) {
       this.json(res, 200, []);
       return;
     }
+    // readJson is async: track whether the async branch owns closing the store.
+    let deferredClose = false;
     try {
       if (path === "/api/feed" && req.method === "GET") {
-        this.json(res, 200, store!.listExchanges(500));
+        this.json(res, 200, store.listExchanges(500));
       } else if (path.startsWith("/api/exchange/") && req.method === "GET") {
-        const ex = store!.getExchange(path.slice("/api/exchange/".length));
+        const ex = store.getExchange(path.slice("/api/exchange/".length));
         if (!ex) return this.json(res, 404, { error: "no such exchange" });
         const dec = new TextDecoder("utf-8", { fatal: false });
         this.json(res, 200, {
@@ -163,38 +204,22 @@ export class ViewerServer {
           sseRaw: ex.sseRaw ? dec.decode(ex.sseRaw) : null,
         });
       } else if (path === "/api/search" && req.method === "POST") {
+        deferredClose = true;
         void this.readJson(req).then((body) => {
-          const term = String((body as { term?: string })?.term ?? "");
-          this.json(res, 200, term ? store!.searchLiteral(term) : []);
-          store!.close();
+          try {
+            const term = String((body as { term?: string })?.term ?? "");
+            this.json(res, 200, term ? store.searchLiteral(term) : []);
+          } finally {
+            store.close();
+          }
         });
-        return; // store closed in the async branch
       } else if (path === "/api/leaks" && req.method === "GET") {
-        this.json(res, 200, store!.listLeakEvents());
-      } else if (path === "/api/stream" && req.method === "GET") {
-        res.writeHead(200, {
-          "content-type": "text/event-stream",
-          "cache-control": "no-cache",
-          connection: "keep-alive",
-        });
-        res.write(": connected\n\n");
-        this.sseClients.add(res);
-        req.on("close", () => {
-          this.sseClients.delete(res);
-          this.armIdleTimer();
-        });
-      } else if (path === "/api/purge" && req.method === "POST") {
-        void this.readJson(req).then((body) => {
-          const kind = String((body as { kind?: string })?.kind ?? "all");
-          if (!this.opts.onPurge) return this.json(res, 501, { error: "purge runs via the daemon" });
-          this.opts.onPurge(kind);
-          this.json(res, 200, { ok: true });
-        });
+        this.json(res, 200, store.listLeakEvents());
       } else {
         this.json(res, 404, { error: "no such endpoint" });
       }
     } finally {
-      if (path !== "/api/search" && path !== "/api/stream") store?.close();
+      if (!deferredClose) store.close();
     }
   }
 
