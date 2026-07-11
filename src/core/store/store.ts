@@ -230,6 +230,32 @@ export class Store {
     }));
   }
 
+  insertRun(run: {
+    id: string; agent: string | null; provider: string | null; upstream: string;
+    authLocation: string | null; extraHeaders: Array<[string, string]> | null; createdTs: number;
+  }): void {
+    this.db.run(
+      `INSERT OR REPLACE INTO runs (id, agent, provider, upstream, auth_location, extra_headers, created_ts)
+       VALUES (?,?,?,?,?,?,?)`,
+      [run.id, run.agent, run.provider, run.upstream, run.authLocation,
+       run.extraHeaders ? JSON.stringify(run.extraHeaders) : null, run.createdTs],
+    );
+  }
+
+  listRuns(): Array<{
+    id: string; agent: string; provider: string; upstream: string;
+    authLocation?: string; extraHeaders?: Array<[string, string]>;
+  }> {
+    return this.db.all<Record<string, unknown>>(`SELECT * FROM runs`).map((r) => ({
+      id: r.id as string,
+      agent: r.agent as string,
+      provider: r.provider as string,
+      upstream: r.upstream as string,
+      authLocation: (r.auth_location as string) ?? undefined,
+      extraHeaders: r.extra_headers ? JSON.parse(r.extra_headers as string) : undefined,
+    }));
+  }
+
   sweep(policy: SweepPolicy): void {
     const now = Date.now();
     if (Number.isFinite(policy.payloadWindowMs)) {

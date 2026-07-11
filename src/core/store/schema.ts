@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS runs (
   agent TEXT, provider TEXT,
   upstream      TEXT NOT NULL,
   auth_location TEXT,
+  extra_headers TEXT,
   created_ts    INTEGER NOT NULL
 );
 
