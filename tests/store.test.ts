@@ -1,0 +1,236 @@
+import { beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Store, SCHEMA_VERSION, StoreVersionError } from "../src/core/store/store";
+import type { ExchangeRecord } from "../src/core/store/store";
+import { ulid } from "../src/core/store/ulid";
+
+function tmpRoot(): string {
+  return mkdtempSync(join(tmpdir(), "beagle-store-"));
+}
+
+function fakeExchange(overrides: Partial<ExchangeRecord> = {}): ExchangeRecord {
+  return {
+    id: ulid(),
+    sessionId: "sess-1",
+    runId: "run-1",
+    source: "wire",
+    agent: "claude-code",
+    provider: "anthropic",
+    model: "claude-sonnet-5",
+    endpoint: "/v1/messages",
+    tsRequest: Date.now(),
+    tsResponse: Date.now() + 1200,
+    status: 200,
+    tokensIn: 100,
+    tokensOut: 50,
+    bytesReq: 1024,
+    bytesResp: 2048,
+    summary: "read 3 files",
+    scanState: "ok",
+    captureState: "ok",
+    sessionTier: "conv-id",
+    requestBody: new TextEncoder().encode('{"messages":[{"role":"user","content":"hello secret-xyz"}]}'),
+    requestHeaders: [["content-type", "application/json"]],
+    responseBody: new TextEncoder().encode('{"content":"hi"}'),
+    responseHeaders: [["content-type", "application/json"]],
+    sseRaw: null,
+    searchText: 'messages user hello secret-xyz content hi',
+    ...overrides,
+  };
+}
+
+describe("Store lifecycle", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = tmpRoot();
+  });
+
+  test("creates state dir 0700 and db 0600", () => {
+    const store = Store.open(dir);
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    expect(statSync(join(dir, "beagle.db")).mode & 0o777).toBe(0o600);
+    store.close();
+  });
+
+  test("stamps user_version and required pragmas", () => {
+    const store = Store.open(dir);
+    expect(store.pragma("user_version")).toBe(SCHEMA_VERSION);
+    expect(store.pragma("journal_mode")).toBe("wal");
+    expect(store.pragma("secure_delete")).toBe(1);
+    store.close();
+  });
+
+  test("read-only open refuses a future schema version in plain language", () => {
+    const store = Store.open(dir);
+    store.setUserVersionForTest(SCHEMA_VERSION + 1);
+    store.close();
+    expect(() => Store.openReadOnly(dir)).toThrow(StoreVersionError);
+    expect(() => Store.openReadOnly(dir)).toThrow(/upgrade beagle|restart the daemon/i);
+  });
+});
+
+describe("Exchange write/read", () => {
+  let dir: string;
+  beforeEach(() => (dir = tmpRoot()));
+
+  test("insert then read back full exchange with payload", () => {
+    const store = Store.open(dir);
+    const ex = fakeExchange();
+    store.insertExchange(ex);
+    const got = store.getExchange(ex.id);
+    expect(got?.provider).toBe("anthropic");
+    expect(new TextDecoder().decode(got!.requestBody!)).toContain("secret-xyz");
+    expect(got?.requestHeaders).toEqual([["content-type", "application/json"]]);
+    store.close();
+  });
+
+  test("getExchange supports unambiguous id prefix", () => {
+    const store = Store.open(dir);
+    const ex = fakeExchange();
+    store.insertExchange(ex);
+    expect(store.getExchange(ex.id.slice(0, 8))?.id).toBe(ex.id);
+    store.close();
+  });
+
+  test("literal search finds content and reports exchange/session grouping", () => {
+    const store = Store.open(dir);
+    store.insertExchange(fakeExchange({ sessionId: "s1" }));
+    store.insertExchange(fakeExchange({ sessionId: "s1" }));
+    store.insertExchange(fakeExchange({ sessionId: "s2", searchText: "nothing here" }));
+    const hits = store.searchLiteral("secret-xyz");
+    expect(hits.length).toBe(2);
+    expect(new Set(hits.map((h) => h.sessionId))).toEqual(new Set(["s1"]));
+    expect(store.searchLiteral("never-sent-string")).toEqual([]);
+    store.close();
+  });
+
+  test("literal search is safe for FTS metacharacters in credentials", () => {
+    const store = Store.open(dir);
+    const cred = 'p@ss"word-*with(chars)';
+    store.insertExchange(fakeExchange({ searchText: `leading ${cred} trailing` }));
+    const hits = store.searchLiteral(cred);
+    expect(hits.length).toBe(1);
+    store.close();
+  });
+});
+
+describe("Leak events", () => {
+  let dir: string;
+  beforeEach(() => (dir = tmpRoot()));
+
+  test("upsert: first insert reports fresh, second same-key increments", () => {
+    const store = Store.open(dir);
+    const ex = fakeExchange();
+    store.insertExchange(ex);
+    const first = store.upsertLeakEvent({
+      fingerprint: "fp1", sessionId: "sess-1", detector: "aws-access-key",
+      secretType: "aws-key", severity: "high", confidenceTier: "structured",
+      destination: "anthropic/claude-sonnet-5", exchangeId: ex.id, ts: Date.now(),
+    });
+    expect(first.fresh).toBe(true);
+    const second = store.upsertLeakEvent({
+      fingerprint: "fp1", sessionId: "sess-1", detector: "aws-access-key",
+      secretType: "aws-key", severity: "high", confidenceTier: "structured",
+      destination: "anthropic/claude-sonnet-5", exchangeId: ex.id, ts: Date.now(),
+    });
+    expect(second.fresh).toBe(false);
+    const events = store.listLeakEvents();
+    expect(events.length).toBe(1);
+    expect(events[0]?.occurrences).toBe(2);
+    store.close();
+  });
+
+  test("same fingerprint, new destination is a fresh event", () => {
+    const store = Store.open(dir);
+    const ex = fakeExchange();
+    store.insertExchange(ex);
+    const base = {
+      fingerprint: "fp1", sessionId: "sess-1", detector: "d", secretType: "t",
+      severity: "high", confidenceTier: "structured", exchangeId: ex.id, ts: Date.now(),
+    };
+    store.upsertLeakEvent({ ...base, destination: "anthropic/m" });
+    const r = store.upsertLeakEvent({ ...base, destination: "openai/m" });
+    expect(r.fresh).toBe(true);
+    expect(store.listLeakEvents().length).toBe(2);
+    store.close();
+  });
+});
+
+describe("Retention & purge", () => {
+  let dir: string;
+  beforeEach(() => (dir = tmpRoot()));
+
+  test("sweep deletes payloads+exchanges past the age window, keeps leak events", () => {
+    const store = Store.open(dir);
+    const old = fakeExchange({ tsRequest: Date.now() - 8 * 24 * 3600_000 });
+    const fresh = fakeExchange();
+    store.insertExchange(old);
+    store.insertExchange(fresh);
+    store.upsertLeakEvent({
+      fingerprint: "fp", sessionId: old.sessionId, detector: "d", secretType: "t",
+      severity: "high", confidenceTier: "structured", destination: "x",
+      exchangeId: old.id, ts: old.tsRequest,
+    });
+    store.sweep({ payloadWindowMs: 7 * 24 * 3600_000, eventWindowMs: 90 * 24 * 3600_000, sizeCapBytes: 1 << 30 });
+    expect(store.getExchange(old.id)).toBeNull();
+    expect(store.getExchange(fresh.id)).not.toBeNull();
+    const events = store.listLeakEvents();
+    expect(events.length).toBe(1);
+    expect(events[0]?.firstExchange).toBeNull(); // FK set null, event survives
+    store.close();
+  });
+
+  test("sweep enforces size cap oldest-first", () => {
+    const store = Store.open(dir);
+    const big = () => new Uint8Array(200_000);
+    const a = fakeExchange({ tsRequest: Date.now() - 3000, requestBody: big() });
+    const b = fakeExchange({ tsRequest: Date.now() - 2000, requestBody: big() });
+    const c = fakeExchange({ tsRequest: Date.now() - 1000, requestBody: big() });
+    for (const e of [a, b, c]) store.insertExchange(e);
+    store.sweep({ payloadWindowMs: Infinity, eventWindowMs: Infinity, sizeCapBytes: 450_000 });
+    expect(store.getExchange(a.id)).toBeNull();
+    expect(store.getExchange(c.id)).not.toBeNull();
+    store.close();
+  });
+
+  test("purge by session removes that session only", () => {
+    const store = Store.open(dir);
+    const a = fakeExchange({ sessionId: "s1" });
+    const b = fakeExchange({ sessionId: "s2" });
+    store.insertExchange(a);
+    store.insertExchange(b);
+    store.purge({ kind: "session", sessionId: "s1" });
+    expect(store.getExchange(a.id)).toBeNull();
+    expect(store.getExchange(b.id)).not.toBeNull();
+    store.close();
+  });
+
+  test("panic purge erases everything including leak events and FTS", () => {
+    const store = Store.open(dir);
+    const ex = fakeExchange();
+    store.insertExchange(ex);
+    store.upsertLeakEvent({
+      fingerprint: "fp", sessionId: ex.sessionId, detector: "d", secretType: "t",
+      severity: "high", confidenceTier: "structured", destination: "x",
+      exchangeId: ex.id, ts: Date.now(),
+    });
+    store.panicPurge();
+    expect(store.getExchange(ex.id)).toBeNull();
+    expect(store.listLeakEvents()).toEqual([]);
+    expect(store.searchLiteral("secret-xyz")).toEqual([]);
+    store.close();
+  });
+});
+
+describe("ulid", () => {
+  test("time-sortable and unique", () => {
+    const a = ulid(1000);
+    const b = ulid(2000);
+    expect(a < b).toBe(true);
+    expect(a).toHaveLength(26);
+    const many = new Set(Array.from({ length: 1000 }, () => ulid()));
+    expect(many.size).toBe(1000);
+  });
+});
