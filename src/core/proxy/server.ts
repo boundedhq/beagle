@@ -38,6 +38,10 @@ interface ParsedRequest {
   body: Buffer;
 }
 
+// Mid-stream failure after bytes were relayed: the client connection is
+// dropped (like going direct), never patched with synthesized bytes.
+class StreamAbortedError extends Error {}
+
 export class ProxyServer {
   port = 0;
   private server: Server | null = null;
@@ -76,8 +80,8 @@ export class ProxyServer {
       buf = buf.subarray(parsed.consumed);
       busy = true;
       this.handleRequest(client, parsed.req)
-        .catch(() => {
-          if (!client.destroyed) {
+        .catch((e) => {
+          if (!(e instanceof StreamAbortedError) && !client.destroyed) {
             client.end("HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\n\r\n");
           }
         })
@@ -115,20 +119,22 @@ export class ProxyServer {
     const authValue = req.headers.find(
       ([n]) => n.toLowerCase() === (run.authLocation ?? "").toLowerCase(),
     )?.[1];
-    void this.opts.scan(new Uint8Array(req.body), {
-      runId: run.id,
-      provider: run.provider,
-      agent: run.agent,
-      authValue,
-    });
+    this.opts
+      .scan(new Uint8Array(req.body), {
+        runId: run.id,
+        provider: run.provider,
+        agent: run.agent,
+        authValue,
+      })
+      .catch(() => {}); // a scanner failure must never take down the forward path
 
-    // ---- forward ----
-    const upstream = await this.pool.acquire(run.parsedUpstream);
+    // ---- forward (retry once on a stale pooled connection) ----
     const captureCap = this.opts.captureBufferCap;
     const captured: Buffer[] = [];
     let capturedBytes = 0;
     let truncated = false;
-    let rawBytes = 0;
+    let relayStarted = false;
+    let clientAborted = false;
 
     const reader = new ResponseReader((bodyChunk) => {
       if (capturedBytes + bodyChunk.length <= captureCap) {
@@ -139,40 +145,70 @@ export class ProxyServer {
       }
     });
 
-    await new Promise<void>((resolve, reject) => {
-      const onData = (chunk: Buffer) => {
-        rawBytes += chunk.length;
-        if (!client.destroyed) client.write(chunk); // client backpressure only
-        reader.feed(chunk);
-        if (reader.done) {
+    const attempt = (upstream: Socket) =>
+      new Promise<void>((resolve, reject) => {
+        const onData = (chunk: Buffer) => {
+          relayStarted = true;
+          if (!client.destroyed) {
+            // Honor the client's backpressure: pause upstream while its buffer drains.
+            if (!client.write(chunk)) {
+              upstream.pause();
+              client.once("drain", () => upstream.resume());
+            }
+          }
+          reader.feed(chunk);
+          if (reader.done) {
+            cleanup();
+            if (reader.keepAlive && !clientAborted) this.pool.release(run.parsedUpstream, upstream);
+            else upstream.destroy();
+            resolve();
+          }
+        };
+        const onEnd = () => {
+          reader.end();
           cleanup();
-          if (reader.keepAlive) this.pool.release(run.parsedUpstream, upstream);
-          else upstream.destroy();
+          if (reader.done) resolve();
+          else reject(new Error("upstream closed mid-response"));
+        };
+        const onErr = (e: Error) => {
+          cleanup();
+          reject(e);
+        };
+        const onClientClose = () => {
+          // Cancel propagates upstream, exactly what going direct would do;
+          // partial capture is kept, marked truncated.
+          clientAborted = true;
+          truncated = true;
+          cleanup();
+          upstream.destroy();
           resolve();
-        }
-      };
-      const onEnd = () => {
-        reader.end();
-        cleanup();
-        if (reader.done) resolve();
-        else reject(new Error("upstream closed mid-response"));
-      };
-      const onErr = (e: Error) => {
-        cleanup();
-        reject(e);
-      };
-      const cleanup = () => {
-        upstream.off("data", onData);
-        upstream.off("end", onEnd);
-        upstream.off("error", onErr);
-        upstream.off("close", onEnd);
-      };
-      upstream.on("data", onData);
-      upstream.on("end", onEnd);
-      upstream.on("close", onEnd);
-      upstream.on("error", onErr);
-      upstream.write(serializeRequest(req.method, upstreamPath, headers, req.body));
-    });
+        };
+        const cleanup = () => {
+          upstream.off("data", onData);
+          upstream.off("end", onEnd);
+          upstream.off("error", onErr);
+          upstream.off("close", onEnd);
+          client.off("close", onClientClose);
+        };
+        upstream.on("data", onData);
+        upstream.on("end", onEnd);
+        upstream.on("close", onEnd);
+        upstream.on("error", onErr);
+        client.on("close", onClientClose);
+        upstream.write(serializeRequest(req.method, upstreamPath, headers, req.body));
+      });
+
+    try {
+      await attempt(await this.pool.acquire(run.parsedUpstream));
+    } catch (e) {
+      if (relayStarted) {
+        // Mid-response failure: pass the drop through, never synthesize bytes.
+        client.destroy();
+        throw new StreamAbortedError();
+      }
+      // Nothing relayed yet — likely a stale pooled connection; retry fresh once.
+      await attempt(await this.pool.acquireFresh(run.parsedUpstream));
+    }
 
     // ---- capture branch (off the relay path) ----
     const responseRaw = Buffer.concat(captured);
@@ -197,7 +233,6 @@ export class ProxyServer {
         captureState: truncated ? "truncated" : "ok",
       },
     };
-    void rawBytes;
     this.opts.onExchange(ex);
   }
 }

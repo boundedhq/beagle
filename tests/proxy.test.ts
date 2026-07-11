@@ -284,6 +284,50 @@ describe("proxy", () => {
     expect(resp.toString()).toContain("overloaded_error");
   });
 
+  test("client abort mid-stream propagates cancel upstream, keeps partial capture", async () => {
+    upstream.close();
+    let upstreamSock: Socket | null = null;
+    let upstreamClosed = false;
+    upstream = await startFakeUpstream((_raw, sock) => {
+      upstreamSock = sock;
+      sock.on("close", () => { upstreamClosed = true; });
+      sock.write("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n");
+      sock.write("8\r\npartial\n\r\n");
+      // never finishes: an SSE stream held open
+    });
+    register({ upstream: `http://127.0.0.1:${upstream.port}` });
+
+    const { connect } = await import("node:net");
+    await new Promise<void>((resolve) => {
+      const sock = connect(proxy.port, "127.0.0.1", () => {
+        sock.write(`POST /run/run-abc/v1/messages HTTP/1.1\r\nHost: h\r\nContent-Length: 2\r\n\r\n{}`);
+      });
+      sock.on("data", () => sock.destroy()); // abort as soon as bytes arrive
+      sock.on("close", () => resolve());
+    });
+    await Bun.sleep(100);
+    expect(upstreamClosed).toBe(true); // cancel propagated
+    expect(exchanges.length).toBe(1);  // partial capture kept
+    expect(exchanges[0]!.meta.captureState).toBe("truncated");
+    expect(new TextDecoder().decode(exchanges[0]!.response.bodyBytes!)).toContain("partial");
+    void upstreamSock;
+  });
+
+  test("a rejecting scan never breaks the forward path", async () => {
+    proxy.close();
+    proxy = new ProxyServer({
+      registry,
+      scan: () => Promise.reject(new Error("scanner exploded")),
+      onExchange: (ex) => exchanges.push(ex),
+      captureBufferCap: 1 << 20,
+    });
+    await proxy.listen(0);
+    register();
+    const resp = await sendRaw(proxy.port,
+      `POST /run/run-abc/v1/messages HTTP/1.1\r\nHost: h\r\nContent-Length: 2\r\n\r\n{}`);
+    expect(resp.toString()).toContain('{"ok":true}');
+  });
+
   test("keep-alive: sequential requests reuse one upstream connection", async () => {
     register();
     await sendRaw(proxy.port,

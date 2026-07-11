@@ -155,6 +155,10 @@ export class ConnectionPool {
     const key = `${up.scheme}://${up.authority}`;
     const sock = this.idle.get(key)?.pop();
     if (sock && !sock.destroyed) return Promise.resolve(sock);
+    return this.acquireFresh(up);
+  }
+
+  acquireFresh(up: Upstream): Promise<Socket> {
     return new Promise((resolve, reject) => {
       const s =
         up.scheme === "https"

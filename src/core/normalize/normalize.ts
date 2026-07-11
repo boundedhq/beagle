@@ -10,7 +10,11 @@ export function scrubAuthHeaders(
   authLocation: string | undefined,
   provider: string,
 ): HeaderList {
-  const authNames = new Set(["authorization", "proxy-authorization", "cookie"]);
+  // Well-known credential headers are scrubbed unconditionally — defense in
+  // depth against a misregistered authLocation.
+  const authNames = new Set([
+    "authorization", "proxy-authorization", "cookie", "x-api-key", "api-key",
+  ]);
   if (authLocation) authNames.add(authLocation.toLowerCase());
   return headers.map(([name, value]) => {
     if (!authNames.has(name.toLowerCase())) return [name, value];
