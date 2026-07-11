@@ -42,13 +42,15 @@ CREATE TABLE IF NOT EXISTS leak_events (
   destination     TEXT NOT NULL,
   occurrences     INTEGER NOT NULL DEFAULT 1,
   first_ts        INTEGER NOT NULL, last_ts INTEGER NOT NULL,
-  first_exchange  TEXT REFERENCES exchanges(id) ON DELETE SET NULL
+  -- No FK to exchanges: alerts fire mid-stream (R6), before the exchange row
+  -- is written post-response. The sweeper nulls/cleans these manually.
+  first_exchange  TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_leak_fp ON leak_events(fingerprint, destination, session_id);
 
 CREATE TABLE IF NOT EXISTS leak_occurrences (
   event_id      TEXT REFERENCES leak_events(id) ON DELETE CASCADE,
-  exchange_id   TEXT REFERENCES exchanges(id) ON DELETE CASCADE,
+  exchange_id   TEXT, -- no FK: may be linked before the exchange row lands
   PRIMARY KEY (event_id, exchange_id)
 );
 
