@@ -1,7 +1,7 @@
 // Runtime hedge (design §2): Bun-specific imports (`bun:*`) are confined to
 // src/adapters so a runtime change lands in one adapter, not across the core.
 // `bun:test` is allowed in *.test.ts anywhere.
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 
 export interface Violation {
@@ -10,15 +10,15 @@ export interface Violation {
 }
 
 const IMPORT_RE =
-  /(?:from\s*|import\s*\(\s*|require\s*\(\s*)["'](bun:[a-z-]+)["']/g;
+  /(?:from\s*|import\s*\(?\s*|require\s*\(\s*)["'](bun:[a-z-]+)["']/g;
 
 function* walk(dir: string): Generator<string> {
-  for (const entry of readdirSync(dir)) {
-    const p = join(dir, entry);
-    if (statSync(p).isDirectory()) {
-      if (entry === "node_modules" || entry === ".git") continue;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === "node_modules" || entry.name === ".git") continue;
       yield* walk(p);
-    } else if (p.endsWith(".ts")) {
+    } else if (entry.isFile() && p.endsWith(".ts")) {
       yield p;
     }
   }
@@ -49,7 +49,8 @@ export function findBunImportViolations(root: string): Violation[] {
 }
 
 if (import.meta.main) {
-  const violations = findBunImportViolations(process.argv[2] ?? process.cwd());
+  const root = process.argv.slice(2).find((a) => !a.startsWith("--")) ?? process.cwd();
+  const violations = findBunImportViolations(root);
   if (violations.length > 0) {
     for (const v of violations) {
       console.error(`bun:* import outside src/adapters: ${v.specifier} in ${v.file}`);

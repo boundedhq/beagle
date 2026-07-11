@@ -1,7 +1,7 @@
 // LOC accounting for the R9 legibility budget: the security-path core
 // (src/core) must stay ≤ CORE_BUDGET readable lines; everything else is
 // disclosed in the same report but not budgeted.
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 
 export const CORE_BUDGET = 1500;
@@ -43,12 +43,12 @@ export function countLoc(source: string): number {
 }
 
 function* walk(dir: string): Generator<string> {
-  for (const entry of readdirSync(dir)) {
-    const p = join(dir, entry);
-    if (statSync(p).isDirectory()) {
-      if (entry === "node_modules" || entry === ".git") continue;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === "node_modules" || entry.name === ".git") continue;
       yield* walk(p);
-    } else {
+    } else if (entry.isFile()) {
       yield p;
     }
   }
@@ -70,7 +70,7 @@ export function locReport(root: string): LocResult {
     if (!rel.endsWith(".ts")) continue;
     if (rel.endsWith(".test.ts")) continue;
     const lines = countLoc(readFileSync(file, "utf8"));
-    const isCore = rel.startsWith(join("src", "core") + "/") || rel === join("src", "core");
+    const isCore = rel.startsWith(join("src", "core") + "/");
     perFile.push({ file: rel, lines, core: isCore });
     total += lines;
     if (isCore) core += lines;
@@ -79,8 +79,9 @@ export function locReport(root: string): LocResult {
 }
 
 if (import.meta.main) {
-  const root = process.argv[2] ?? process.cwd();
-  const check = process.argv.includes("--check");
+  const args = process.argv.slice(2);
+  const check = args.includes("--check");
+  const root = args.find((a) => !a.startsWith("--")) ?? process.cwd();
   const r = locReport(root);
   for (const f of r.perFile.sort((a, b) => b.lines - a.lines)) {
     console.log(`${f.core ? "CORE " : "     "} ${String(f.lines).padStart(6)}  ${f.file}`);

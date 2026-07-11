@@ -45,6 +45,14 @@ describe("findBunImportViolations", () => {
     expect(v.map((x) => x.specifier).sort()).toEqual(["bun:ffi", "bun:sqlite"]);
   });
 
+  test("catches bare side-effect imports", () => {
+    const root = scratch();
+    mkdirSync(join(root, "src/core"), { recursive: true });
+    writeFileSync(join(root, "src/core/x.ts"), 'import "bun:sqlite";\n');
+    const v = findBunImportViolations(root);
+    expect(v.map((x) => x.specifier)).toEqual(["bun:sqlite"]);
+  });
+
   test("node: stdlib imports are fine anywhere", () => {
     const root = scratch();
     mkdirSync(join(root, "src/core"), { recursive: true });
