@@ -8,7 +8,8 @@ export interface ShimSpec {
 }
 
 function shQuote(s: string): string {
-  // POSIX-safe single-quote wrapping.
+  // Wrap in double quotes and backslash-escape the four characters the shell
+  // still interprets inside them (", \, $, `). Handles spaces and metachars.
   return `"${s.replace(/(["\\$`])/g, "\\$1")}"`;
 }
 
@@ -36,7 +37,9 @@ export function parseCoverageVerdict(
   typeOutput: string,
 ): CoverageVerdict {
   const out = typeOutput.trim();
-  if (out.includes("alias")) {
+  // Match how shells announce an alias ("is an alias for", "is aliased to"),
+  // not any path that merely contains the substring "alias".
+  if (/\bis (an alias|aliased)\b/i.test(out)) {
     return {
       covered: false,
       reason: `an alias bypasses the shim (${out}) — remove it or the alias will keep going direct`,

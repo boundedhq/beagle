@@ -85,6 +85,18 @@ describe("coverage verdict (the shim honesty clause, R2)", () => {
     expect(v.reason.toLowerCase()).toContain("alias");
   });
 
+  test("zsh 'is an alias for' phrasing is detected too", () => {
+    const v = parseCoverageVerdict("claude", "/usr/local/bin/claude", "claude is an alias for /Users/u/.claude/local/claude");
+    expect(v.covered).toBe(false);
+    expect(v.reason.toLowerCase()).toContain("alias");
+  });
+
+  test("a shim path that merely contains 'alias' is not a false alias hit", () => {
+    const shim = "/Users/alias/bin/claude";
+    const v = parseCoverageVerdict("claude", shim, `claude is ${shim}`);
+    expect(v.covered).toBe(true);
+  });
+
   test("resolution to a different absolute path is a bypass", () => {
     const v = parseCoverageVerdict("claude", "/usr/local/bin/claude", "claude is /Users/u/.claude/local/claude");
     expect(v.covered).toBe(false);

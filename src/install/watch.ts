@@ -1,7 +1,7 @@
 // watch/unwatch orchestration (design §6.7, §6.12, R2). Places a PATH shim
 // after a diff-and-confirm, verifies coverage via the user's real shell, and
 // records every mutation in the change manifest so revert is mechanical.
-import { chmodSync, existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync, realpathSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { AGENTS } from "../cli/agents";
 import { ChangeManifest } from "./manifest";
@@ -24,13 +24,25 @@ export interface WatchResult {
 }
 
 export function planWatch(agent: string, env: WatchEnv): { shimPath: string; real: string } | null {
-  if (!AGENTS[agent]) return null;
+  const spec = AGENTS[agent];
+  if (!spec) return null;
+  // v1 shims work only for env-base-URL agents; a shim for a config-driven
+  // agent (opencode/pi) would exec `beagle run <agent>`, which run rejects —
+  // don't place a shim that can't work. Config-redirect support lands later.
+  if (!spec.baseUrlEnv) return null;
   const real = env.resolveReal(agent);
   if (!real) return null;
   return { shimPath: join(env.shimDir, agent), real };
 }
 
 export function watchAgent(agent: string, env: WatchEnv): WatchResult {
+  const spec = AGENTS[agent];
+  if (spec && !spec.baseUrlEnv) {
+    return {
+      applied: false,
+      message: `${agent} is config-driven; automatic watch for it isn't supported yet (env-base-URL agents only in v1).`,
+    };
+  }
   const plan = planWatch(agent, env);
   if (!plan) {
     return { applied: false, message: `cannot watch ${agent}: not found or unsupported` };
@@ -69,10 +81,10 @@ export function unwatchAgent(agent: string, env: WatchEnv): WatchResult {
       removed = true;
     }
     if ((e.kind === "config-backup" || e.kind === "config-redirect") && e.backup && existsSync(e.backup)) {
-      // restore the backed-up original
-      const original = e.path;
-      rmSync(original, { force: true });
-      symlinkSync(realpathSync(e.backup), original);
+      // Copy the backed-up original back into place (a symlink into the state
+      // dir would break the moment the store is purged).
+      rmSync(e.path, { force: true });
+      copyFileSync(e.backup, e.path);
       removed = true;
     }
     if (e.kind === "service" && existsSync(e.path)) {

@@ -57,6 +57,14 @@ describe("watchAgent", () => {
     expect(watchAgent("nonesuch", makeEnv()).applied).toBe(false);
     expect(watchAgent("claude", makeEnv({ resolveReal: () => null })).applied).toBe(false);
   });
+
+  test("config-driven agent (opencode) is refused rather than getting a broken shim", () => {
+    const env = makeEnv({ resolveReal: () => "/opt/homebrew/bin/opencode" });
+    const r = watchAgent("opencode", env);
+    expect(r.applied).toBe(false);
+    expect(r.message.toLowerCase()).toContain("config-driven");
+    expect(existsSync(join(env.shimDir, "opencode"))).toBe(false);
+  });
 });
 
 describe("unwatchAgent", () => {
