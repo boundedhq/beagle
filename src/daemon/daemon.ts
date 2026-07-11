@@ -16,6 +16,7 @@ import { scrubAuthHeaders } from "../core/normalize/normalize";
 import { Notifier } from "../notifier/notifier";
 import { detectFormat, parseRequest, parseResponse, type Format, type ParsedRequest } from "../parsers/parsers";
 import { startControlServer, type ControlRequest, type ControlResponse } from "./control";
+import { ViewerServer } from "../viewer/server";
 
 export interface DaemonOptions {
   stateDir: string;
@@ -52,6 +53,7 @@ export class Daemon {
   private proxy!: ProxyServer;
   private control!: Server;
   private notifier = new Notifier();
+  private viewer: ViewerServer | null = null;
   private pending = new Map<string, PendingExchange>();
   private paused = false;
   private sweeper: ReturnType<typeof setInterval> | null = null;
@@ -105,6 +107,7 @@ export class Daemon {
 
   async stop(): Promise<void> {
     if (this.sweeper) clearInterval(this.sweeper);
+    this.viewer?.stop();
     this.proxy.close();
     this.control.close();
     this.scanHost.close();
@@ -209,9 +212,28 @@ export class Daemon {
       sseRaw: null,
       searchText: buildSearchText(parsed, respParsed?.text, ex),
     });
+    this.viewer?.broadcast("exchange", {
+      id: ex.id,
+      sessionId: resolution.sessionId,
+      agent: ex.agent,
+      provider: ex.provider,
+      model: parsed?.model ?? respParsed?.model,
+      tsRequest: ex.meta.tsRequest,
+      status: ex.response.status,
+      tokensIn: respParsed?.tokensIn,
+      tokensOut: respParsed?.tokensOut,
+      bytesReq: ex.request.bodyBytes.byteLength,
+      summary: buildSummary(parsed, respParsed?.text),
+      scanState: stash?.scanState ?? "ok",
+      captureState: ex.meta.captureState,
+      sessionTier: resolution.tier,
+      source: ex.source,
+      hasLeak: false, // the alert event corrects this if a leak lands
+    });
   }
 
   private emitAlert(a: AlertEvent): void {
+    this.viewer?.broadcast("alert", a);
     if (this.opts.alertSinkForTest) {
       this.opts.alertSinkForTest(a);
       return;
@@ -268,6 +290,23 @@ export class Daemon {
           this.store.purge({ kind: "before", ts: args.ts });
         else return { ok: false, error: "unknown purge spec" };
         return { ok: true };
+      }
+      case "ui": {
+        if (!this.viewer?.isRunning) {
+          this.viewer = new ViewerServer({
+            stateDir: this.opts.stateDir,
+            onPurge: (kind) => {
+              if (kind === "panic") this.store.panicPurge();
+              else this.store.purge({ kind: "all" });
+            },
+          });
+          const url = await this.viewer.start();
+          return { ok: true, data: { url } };
+        }
+        // A viewer is already up: mint a fresh one-time URL by restarting it.
+        this.viewer.stop();
+        this.viewer = new ViewerServer({ stateDir: this.opts.stateDir });
+        return { ok: true, data: { url: await this.viewer.start() } };
       }
       case "shutdown":
         setTimeout(() => void this.stop().then(() => process.exit(0)), 10);

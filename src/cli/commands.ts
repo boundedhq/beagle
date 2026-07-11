@@ -150,6 +150,21 @@ export async function cmdPurge(stateDir: string, kind: string): Promise<string> 
   return `purged (${kind}).`;
 }
 
+export async function cmdUi(stateDir: string): Promise<string> {
+  const daemon = await pingDaemon(stateDir);
+  if (!daemon) return "the beagle daemon isn't running — start an agent with `beagle run <agent>` first.";
+  const r = await controlRequest(daemon.socketPath, { cmd: "ui" });
+  if (!r.ok) return `could not start the viewer: ${r.error}`;
+  const url = (r.data as { url: string }).url;
+  // Best-effort open; the URL is printed either way.
+  try {
+    Bun.spawn([process.platform === "darwin" ? "open" : "xdg-open", url], {
+      stdio: ["ignore", "ignore", "ignore"],
+    }).unref();
+  } catch { /* printing is enough */ }
+  return `dashboard: ${url}\n(the link is one-time; run \`beagle ui\` again for a fresh one)`;
+}
+
 export async function cmdRun(stateDir: string, agentName: string, agentArgs: string[]): Promise<number> {
   const spec = AGENTS[agentName];
   if (!spec) {

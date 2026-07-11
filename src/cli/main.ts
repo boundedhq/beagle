@@ -13,6 +13,7 @@ usage:
   beagle leaks                   the leak log
   beagle show <id-prefix>        one exchange, summarized
   beagle purge [all|panic]       erase captured data
+  beagle ui                      open the dashboard (fresh one-time link)
   beagle daemon                  run the daemon in the foreground
 `;
 
@@ -58,6 +59,11 @@ export async function run(argv: string[]): Promise<number> {
     }
     case "purge": {
       console.log(await cmdPurge(stateDir, rest[0] ?? "all"));
+      return 0;
+    }
+    case "ui": {
+      const { cmdUi } = await import("./commands");
+      console.log(await cmdUi(stateDir));
       return 0;
     }
     case "daemon": {

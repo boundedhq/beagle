@@ -8,13 +8,15 @@
   "scripts": {
     "build": "bun build --compile src/cli/main.ts --outfile dist/beagle",
     "test": "bun test",
-    "lint": "bun scripts/lint-bun-imports.ts",
+    "lint": "bun scripts/lint-bun-imports.ts && bun scripts/lint-viewer-safety.ts",
     "loc": "bun scripts/loc-report.ts",
     "loc:check": "bun scripts/loc-report.ts . --check",
     "check": "bun run lint && bun run loc:check && tsc --noEmit && bun test"
   },
   "devDependencies": {
     "@types/bun": "^1.2.0",
+    "htm": "3.1.1",
+    "preact": "10.24.3",
     "typescript": "^5.6.0"
   }
 }
