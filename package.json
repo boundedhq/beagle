@@ -1,0 +1,20 @@
+{
+  "name": "@boundedhq/beagle",
+  "version": "0.1.0",
+  "description": "A local transparency proxy for AI agents: see exactly what your agents send to remote models, with leaked secrets flagged as they leave.",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "bun build --compile src/cli/main.ts --outfile dist/beagle",
+    "test": "bun test",
+    "lint": "bun scripts/lint-bun-imports.ts",
+    "loc": "bun scripts/loc-report.ts",
+    "loc:check": "bun scripts/loc-report.ts . --check",
+    "check": "bun run lint && bun run loc:check && tsc --noEmit && bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.6.0"
+  }
+}

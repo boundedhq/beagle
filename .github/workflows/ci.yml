@@ -1,0 +1,36 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - name: bun:* import lint (core stays runtime-portable)
+        run: bun run lint
+      - name: Core LOC budget (R9, ≤1500)
+        run: bun run loc:check
+      - name: Typecheck
+        run: bunx tsc --noEmit
+      - name: Tests
+        run: bun test
+      - name: Compile single binary
+        run: bun run build
+      - name: Binary size budget (R9, ≤100 MB)
+        shell: bash
+        run: |
+          size=$(wc -c < dist/beagle)
+          echo "binary size: $size bytes"
+          if [ "$size" -gt 104857600 ]; then
+            echo "FAIL: binary exceeds 100 MB budget (R9)"; exit 1
+          fi
