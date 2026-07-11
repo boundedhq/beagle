@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/core/store/store";
-import { redactBody, redactionPlaceholder } from "../src/core/store/redact";
+import { redactBody, redactValues, redactionPlaceholder } from "../src/transform/redact";
 import { quarantineCorruptDb } from "../src/core/store/quarantine";
 import type { Finding } from "../src/core/scanner/engine";
 
@@ -26,10 +26,25 @@ describe("redact-on-capture (R11)", () => {
     const body = 'key = "AKIAZQ3DRSTUVWXY2345" done';
     const start = body.indexOf("AKIA");
     const out = redactBody(enc(body), [finding(start, start + 20)]);
-    const text = dec(out);
+    const text = dec(out.bytes);
     expect(text).not.toContain("AKIAZQ3DRSTUVWXY2345");
     expect(text).toContain("[REDACTED:aws-access-key-id:");
     expect(text).toContain("done"); // surrounding bytes intact
+    expect(out.values[0]?.value).toBe("AKIAZQ3DRSTUVWXY2345");
+  });
+
+  test("redactValues scrubs an echoed secret from another body", () => {
+    const secret = "AKIAZQ3DRSTUVWXY2345";
+    const resp = enc(`the model says your key ${secret} is set`);
+    const out = redactValues(resp, [{ value: secret, type: "aws-access-key-id" }]);
+    expect(dec(out!)).not.toContain(secret);
+    expect(dec(out!)).toContain("[REDACTED:aws-access-key-id:");
+  });
+
+  test("redactValues ignores short values (avoids scrubbing common substrings)", () => {
+    const resp = enc("the word key appears often, key key key");
+    const out = redactValues(resp, [{ value: "key", type: "x" }]);
+    expect(dec(out!)).toBe("the word key appears often, key key key");
   });
 
   test("placeholder is stable for the same secret, distinct per type", () => {
@@ -47,7 +62,7 @@ describe("redact-on-capture (R11)", () => {
     const out = dec(redactBody(enc(body), [
       finding(s1, s1 + 20),
       finding(s2, s2 + 40, "github-pat"),
-    ]));
+    ]).bytes);
     expect(out).not.toContain("AKIAZQ3DRSTUVWXY2345");
     expect(out).not.toContain("ghp_XXXX");
     expect(out.startsWith("a ")).toBe(true);
@@ -56,7 +71,7 @@ describe("redact-on-capture (R11)", () => {
 
   test("no findings leaves the body byte-identical", () => {
     const body = enc('{"hello":"world"}');
-    expect(dec(redactBody(body, []))).toBe('{"hello":"world"}');
+    expect(dec(redactBody(body, []).bytes)).toBe('{"hello":"world"}');
   });
 });
 

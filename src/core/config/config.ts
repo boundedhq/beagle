@@ -1,6 +1,6 @@
 // Config + install key (design §6.11). One 0600 file in the state dir;
 // defaults are the R11 retention posture.
-import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 
@@ -36,7 +36,10 @@ export function loadConfig(stateDir: string): BeagleConfig {
 
 export function saveConfig(stateDir: string, config: BeagleConfig): void {
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-  writeFileSync(join(stateDir, "config.json"), JSON.stringify(config, null, 2), { mode: 0o600 });
+  const path = join(stateDir, "config.json");
+  writeFileSync(path, JSON.stringify(config, null, 2), { mode: 0o600 });
+  // mode on writeFileSync only applies at creation; enforce on existing files.
+  chmodSync(path, 0o600);
 }
 
 export function loadOrCreateInstallKey(stateDir: string): Uint8Array {

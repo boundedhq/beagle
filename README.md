@@ -62,10 +62,9 @@ The whole loop works headless — a skeptic never has to start the viewer.
 | Added request latency | p50 ≤ 5 ms | `tests/budget.test.ts` (warm baseline) |
 | Install size | ≤ 100 MB | CI binary-size check |
 
-**Current core count: 1,500 / 1,500 LOC** (at the ceiling by design — any core
-growth must name an offsetting cut). Zero third-party runtime dependencies in
-the core; `bun:*` imports confined to `src/adapters/`; the viewer's Preact+htm
-is vendored, pinned, and buildless.
+**Current core count: 1,485 / 1,500 LOC.** Zero third-party runtime
+dependencies in the core; `bun:*` imports confined to `src/adapters/`; the
+viewer's Preact+htm is vendored, pinned, and buildless.
 
 ## Trust properties
 

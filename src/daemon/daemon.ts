@@ -14,7 +14,7 @@ import { SessionResolver, type Resolution } from "../core/session/resolver";
 import { Store } from "../core/store/store";
 import { ScanHost } from "../adapters/scan-host";
 import type { Finding } from "../core/scanner/engine";
-import { redactBody } from "../core/store/redact";
+import { redactBody, redactValues } from "../transform/redact";
 import { scrubAuthHeaders } from "../core/normalize/normalize";
 import { Notifier } from "../notifier/notifier";
 import { detectFormat, parseRequest, parseResponse, type Format, type ParsedRequest } from "../parsers/parsers";
@@ -220,14 +220,23 @@ export class Daemon {
     // scan came back incomplete we can't trust the spans, so we hold the raw
     // value out entirely and mark it (never write raw-and-hope, §4).
     let requestBody: Uint8Array | null = ex.request.bodyBytes;
+    let responseBody: Uint8Array | null = ex.response.bodyBytes ?? null;
     let searchText = buildSearchText(parsed, respParsed?.text, ex);
     if (this.config.redactOnCapture && stash) {
       if (stash.scanState === "incomplete") {
         requestBody = new TextEncoder().encode("[REDACTION INCOMPLETE: scan did not verify this body]");
+        responseBody = null;
         searchText = "";
       } else if (stash.findings.length > 0) {
-        requestBody = redactBody(ex.request.bodyBytes, stash.findings);
-        searchText = new TextDecoder().decode(requestBody) + "\n" + (respParsed?.text ?? "");
+        const redacted = redactBody(ex.request.bodyBytes, stash.findings);
+        requestBody = redacted.bytes;
+        // Scrub the same secret values from the response too, in case the model
+        // echoed a leaked key back (request-side redaction alone would miss it).
+        responseBody = redactValues(responseBody, redacted.values);
+        searchText =
+          new TextDecoder().decode(requestBody) +
+          "\n" +
+          (responseBody ? new TextDecoder().decode(responseBody) : "");
       }
     }
 
@@ -253,7 +262,7 @@ export class Daemon {
       sessionTier: resolution.tier,
       requestBody,
       requestHeaders: ex.request.headers ?? null,
-      responseBody: ex.response.bodyBytes ?? null,
+      responseBody,
       responseHeaders: ex.response.headers
         ? scrubAuthHeaders(ex.response.headers, undefined, ex.provider)
         : null,
