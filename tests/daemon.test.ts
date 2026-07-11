@@ -6,6 +6,7 @@ import { connect } from "node:net";
 import { Daemon } from "../src/daemon/daemon";
 import { controlRequest } from "../src/daemon/control";
 import { Store } from "../src/core/store/store";
+import { listExchanges } from "../src/viewer/feed-query";
 import type { AlertEvent } from "../src/core/alert/engine";
 import { createServer, type Server } from "node:net";
 
@@ -191,6 +192,34 @@ describe("Daemon end-to-end", () => {
     const status = await controlRequest(daemon.socketPath, { cmd: "status" });
     expect(status.ok).toBe(true);
     expect((status.data as { exchanges: number }).exchanges).toBeGreaterThan(0);
+    store.close();
+  });
+
+  test("redact-on-capture removes the raw secret from the stored body", async () => {
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    await sendThroughProxy(
+      daemon.proxyPort, "run-e2e",
+      requestBody("my aws key AKIAZQ3DRSTUVWXY2345 here"),
+    );
+    await Bun.sleep(200);
+    const store = Store.openReadOnly(stateDir);
+    // the leak event still exists (audit value kept)...
+    expect(store.listLeakEvents().length).toBe(1);
+    // ...but the raw secret is gone from the stored payload and the index
+    expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
+    const anyEx = listExchanges(store, 10).find((e) => e.hasLeak);
+    const full = store.getExchange(anyEx!.id)!;
+    expect(new TextDecoder().decode(full.requestBody!)).toContain("[REDACTED:aws-access-key-id:");
+    store.close();
+  });
+
+  test("excluded agent traffic is forwarded but never captured", async () => {
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { excludedAgents: ["claude-code"] } });
+    const resp = await sendThroughProxy(daemon.proxyPort, "run-e2e", requestBody("excluded content"));
+    expect(resp).toContain("done!"); // still forwarded
+    await Bun.sleep(150);
+    const store = Store.openReadOnly(stateDir);
+    expect(store.searchLiteral("excluded content")).toEqual([]);
     store.close();
   });
 

@@ -34,6 +34,11 @@ export function loadConfig(stateDir: string): BeagleConfig {
   }
 }
 
+export function saveConfig(stateDir: string, config: BeagleConfig): void {
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  writeFileSync(join(stateDir, "config.json"), JSON.stringify(config, null, 2), { mode: 0o600 });
+}
+
 export function loadOrCreateInstallKey(stateDir: string): Uint8Array {
   const path = join(stateDir, "install.key");
   if (existsSync(path)) {

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { Store, StoreVersionError } from "../core/store/store";
-import { loadConfig } from "../core/config/config";
+import { loadConfig, saveConfig } from "../core/config/config";
 import { controlRequest } from "../daemon/control";
 import { Notifier, stripControlChars } from "../notifier/notifier";
 import { GraduationTracker } from "../install/graduation";
@@ -224,6 +224,34 @@ function readLineSync(): string {
   } catch {
     return "";
   }
+}
+
+export async function cmdConfig(stateDir: string, args: string[]): Promise<string> {
+  const cfg = loadConfig(stateDir);
+  if (args.length === 0) {
+    return (
+      `redact-on-capture: ${cfg.redactOnCapture}\n` +
+      `excluded agents: ${cfg.excludedAgents.join(", ") || "(none)"}\n` +
+      `retention: ${cfg.payloadWindowDays}d / ${cfg.sizeCapMB} MB payloads · ${cfg.eventWindowDays}d events`
+    );
+  }
+  const update: Record<string, unknown> = {};
+  if (args[0] === "redact-on-capture" && args[1]) {
+    update.redactOnCapture = args[1] === "on" || args[1] === "true";
+  } else if (args[0] === "exclude" && args[1]) {
+    update.excludedAgents = [...new Set([...cfg.excludedAgents, args[1]])];
+  } else if (args[0] === "unexclude" && args[1]) {
+    update.excludedAgents = cfg.excludedAgents.filter((a) => a !== args[1]);
+  } else {
+    return "usage: beagle config [redact-on-capture on|off | exclude <agent> | unexclude <agent>]";
+  }
+  const daemon = await pingDaemon(stateDir);
+  if (daemon) {
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: update });
+  } else {
+    saveConfig(stateDir, { ...cfg, ...update });
+  }
+  return "config updated.";
 }
 
 export async function cmdUi(stateDir: string): Promise<string> {

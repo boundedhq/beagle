@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { Store } from "../core/store/store";
+import { listExchanges } from "./feed-query";
 
 export interface ViewerOptions {
   stateDir: string;
@@ -192,7 +193,7 @@ export class ViewerServer {
     let deferredClose = false;
     try {
       if (path === "/api/feed" && req.method === "GET") {
-        this.json(res, 200, store.listExchanges(500));
+        this.json(res, 200, listExchanges(store, 500));
       } else if (path.startsWith("/api/exchange/") && req.method === "GET") {
         const ex = store.getExchange(path.slice("/api/exchange/".length));
         if (!ex) return this.json(res, 404, { error: "no such exchange" });

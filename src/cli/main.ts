@@ -1,7 +1,7 @@
 // CLI entry point (non-core). Headless loop per R12: run, status, search,
 // leaks, show, purge — the whole product without the viewer.
 import {
-  cmdDetect, cmdLeaks, cmdPurge, cmdRun, cmdSearch, cmdShow, cmdStatus,
+  cmdConfig, cmdDetect, cmdLeaks, cmdPurge, cmdRun, cmdSearch, cmdShow, cmdStatus,
   cmdUnwatch, cmdWatch, defaultStateDir,
 } from "./commands";
 
@@ -18,6 +18,7 @@ usage:
   beagle leaks                   the leak log
   beagle show <id-prefix>        one exchange, summarized
   beagle purge [all|panic]       erase captured data
+  beagle config [...]            view/set redact-on-capture, exclusions
   beagle ui                      open the dashboard (fresh one-time link)
   beagle daemon                  run the daemon in the foreground
 `;
@@ -85,6 +86,9 @@ export async function run(argv: string[]): Promise<number> {
       console.log(await cmdUi(stateDir));
       return 0;
     }
+    case "config":
+      console.log(await cmdConfig(stateDir, rest));
+      return 0;
     case "daemon": {
       const { Daemon } = await import("../daemon/daemon");
       const daemon = await Daemon.start({ stateDir });

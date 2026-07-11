@@ -6,13 +6,15 @@ import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { Server } from "node:net";
 import { AlertEngine, type AlertEvent } from "../core/alert/engine";
-import { loadConfig, loadOrCreateInstallKey, type BeagleConfig } from "../core/config/config";
+import { loadConfig, saveConfig, loadOrCreateInstallKey, type BeagleConfig } from "../core/config/config";
 import type { Message } from "../core/exchange";
 import { ProxyServer, type CapturedExchange, type ScanContext } from "../core/proxy/server";
 import { RunRegistry, type RunRegistration } from "../core/proxy/registry";
 import { SessionResolver, type Resolution } from "../core/session/resolver";
 import { Store } from "../core/store/store";
 import { ScanHost } from "../adapters/scan-host";
+import type { Finding } from "../core/scanner/engine";
+import { redactBody } from "../core/store/redact";
 import { scrubAuthHeaders } from "../core/normalize/normalize";
 import { Notifier } from "../notifier/notifier";
 import { detectFormat, parseRequest, parseResponse, type Format, type ParsedRequest } from "../parsers/parsers";
@@ -34,6 +36,8 @@ interface PendingExchange {
   parsed: ParsedRequest | null;
   format: Format;
   scanState: "ok" | "incomplete";
+  findings: Finding[];
+  scanDone: Promise<void>;
   createdTs: number;
 }
 
@@ -77,7 +81,7 @@ export class Daemon {
         `a beagle daemon is already running (pid ${existing.pid}) — refusing to start a second writer`,
       );
     }
-    d.store = Store.open(opts.stateDir);
+    d.store = Store.openOrRecover(opts.stateDir);
     d.config = loadConfig(opts.stateDir);
     const installKey = loadOrCreateInstallKey(opts.stateDir);
     const rulesPath = opts.rulesPath ?? join(process.cwd(), "rules/beagle-rules.json");
@@ -94,7 +98,7 @@ export class Daemon {
     d.proxy = new ProxyServer({
       registry: d.registry,
       scan: (bytes, ctx) => d.scanPipeline(bytes, ctx),
-      onExchange: (ex) => d.captureExchange(ex),
+      onExchange: (ex) => void d.captureExchange(ex).catch(() => {}),
       captureBufferCap: 8 << 20,
     });
     await d.proxy.listen(0);
@@ -152,16 +156,21 @@ export class Daemon {
       messages: parsed?.messages,
       systemPrompt: parsed?.system,
     });
+    let resolveScan!: () => void;
+    const scanDone = new Promise<void>((r) => (resolveScan = r));
     const entry: PendingExchange = {
-      resolution, parsed, format, scanState: "ok", createdTs: Date.now(),
+      resolution, parsed, format, scanState: "ok", findings: [], scanDone,
+      createdTs: Date.now(),
     };
     this.pending.set(ctx.exchangeId, entry);
 
     const result = await this.scanHost.scan(bytes, { authValue: ctx.authValue });
+    entry.findings = result.findings;
     if (result.state === "incomplete") {
       entry.scanState = "incomplete";
       this.store.updateExchangeScanState(ctx.exchangeId, "incomplete"); // no-op if not yet inserted
     }
+    resolveScan();
     this.alertEngine.process(
       {
         id: ctx.exchangeId,
@@ -174,8 +183,13 @@ export class Daemon {
     );
   }
 
-  private captureExchange(ex: CapturedExchange): void {
+  private async captureExchange(ex: CapturedExchange): Promise<void> {
     const stash = this.pending.get(ex.id);
+    // redact-on-capture (R11): await the scan verdict and substitute the raw
+    // secret BEFORE the first write, so no raw value ever lands in the WAL.
+    if (this.config.redactOnCapture && stash) {
+      await stash.scanDone;
+    }
     this.pending.delete(ex.id);
     if (this.paused || this.config.excludedAgents.includes(ex.agent ?? "")) return;
     const format = stash?.format ?? detectFormat(ex.endpoint);
@@ -201,6 +215,22 @@ export class Daemon {
         responseId: respParsed.responseId,
       });
     }
+
+    // redact-on-capture: substitute secret spans in the persisted body. If the
+    // scan came back incomplete we can't trust the spans, so we hold the raw
+    // value out entirely and mark it (never write raw-and-hope, §4).
+    let requestBody: Uint8Array | null = ex.request.bodyBytes;
+    let searchText = buildSearchText(parsed, respParsed?.text, ex);
+    if (this.config.redactOnCapture && stash) {
+      if (stash.scanState === "incomplete") {
+        requestBody = new TextEncoder().encode("[REDACTION INCOMPLETE: scan did not verify this body]");
+        searchText = "";
+      } else if (stash.findings.length > 0) {
+        requestBody = redactBody(ex.request.bodyBytes, stash.findings);
+        searchText = new TextDecoder().decode(requestBody) + "\n" + (respParsed?.text ?? "");
+      }
+    }
+
     this.store.insertExchange({
       id: ex.id,
       sessionId: resolution.sessionId,
@@ -221,14 +251,14 @@ export class Daemon {
       scanState: stash?.scanState ?? "ok",
       captureState: ex.meta.captureState,
       sessionTier: resolution.tier,
-      requestBody: ex.request.bodyBytes,
+      requestBody,
       requestHeaders: ex.request.headers ?? null,
       responseBody: ex.response.bodyBytes ?? null,
       responseHeaders: ex.response.headers
         ? scrubAuthHeaders(ex.response.headers, undefined, ex.provider)
         : null,
       sseRaw: null,
-      searchText: buildSearchText(parsed, respParsed?.text, ex),
+      searchText,
     });
     this.viewer?.broadcast("exchange", {
       id: ex.id,
@@ -380,6 +410,13 @@ export class Daemon {
       case "resume":
         this.paused = false;
         return { ok: true };
+      case "set-config": {
+        const args = (req.args ?? {}) as Partial<BeagleConfig>;
+        if (typeof args.redactOnCapture === "boolean") this.config.redactOnCapture = args.redactOnCapture;
+        if (Array.isArray(args.excludedAgents)) this.config.excludedAgents = args.excludedAgents;
+        saveConfig(this.opts.stateDir, this.config);
+        return { ok: true, data: this.config };
+      }
       case "status":
         return {
           ok: true,
