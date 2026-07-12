@@ -240,7 +240,16 @@ export class Daemon {
         // case the model echoed a leaked key back (request-side redaction alone
         // would miss it).
         responseBody = redactValues(responseBody, redacted.values);
-        sseRaw = redactValues(sseRaw, redacted.values);
+        // A content-encoded raw stream is compressed bytes — a literal scrub
+        // can't find the secret in it, so keeping it would silently retain an
+        // echoed value. Drop it; the decoded (scrubbed) body remains.
+        const contentEncoded = ex.response.headers?.some(
+          ([n, v]) =>
+            n.toLowerCase() === "content-encoding" &&
+            v.trim() !== "" &&
+            v.trim().toLowerCase() !== "identity",
+        );
+        sseRaw = contentEncoded ? null : redactValues(sseRaw, redacted.values);
         searchText =
           new TextDecoder().decode(requestBody) +
           "\n" +

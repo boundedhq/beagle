@@ -115,9 +115,16 @@ describe("Daemon end-to-end", () => {
       args: { id: "run-stream", agent: "claude-code", provider: "anthropic", upstream: `http://127.0.0.1:${sport}`, authLocation: "x-api-key" },
     });
     await sendThroughProxy(daemon.proxyPort, "run-stream", requestBody("stream please"));
-    await Bun.sleep(200);
-    const store = Store.openReadOnly(stateDir);
-    const ex = store.getExchange(store.searchLiteral("stream please")[0]!.exchangeId)!;
+    // poll for the capture instead of guessing a delay
+    let hit: { exchangeId: string } | undefined;
+    let store = Store.openReadOnly(stateDir);
+    for (let i = 0; i < 40 && !hit; i++) {
+      await Bun.sleep(50);
+      store.close();
+      store = Store.openReadOnly(stateDir);
+      hit = store.searchLiteral("stream please")[0];
+    }
+    const ex = store.getExchange(hit!.exchangeId)!;
     expect(ex.sseRaw).not.toBeNull();
     expect(new TextDecoder().decode(ex.sseRaw!)).toContain("event: content_block_delta");
     store.close();
