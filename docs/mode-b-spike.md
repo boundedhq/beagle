@@ -56,7 +56,13 @@ do **not** substitute a non-vendor mechanism.
    value encodings (int64 as JSON string vs number). The mapper already
    handles both containers, both token-name conventions, string-encoded
    int64, and a JSON-array prompt — but confirm the real keys match and add
-   any missing ones to `recordToExchange`.
+   any missing ones to `recordToExchange`. **If the client emits BOTH a span
+   and a log for the same inference**, the mapper would produce two exchanges
+   for one call — decide whether to de-duplicate (e.g. by a shared span/trace
+   id) once the real behavior is known. Also record the exact serialization of
+   `gen_ai.prompt` for nested content (tool_result blocks): the scanner reads
+   the raw prompt string so it catches secrets in any nested field, but
+   confirm the client doesn't truncate or hash that content.
 
 4. **Session attribute.** Confirm which attribute carries the conversation /
    session id (currently mapped from `session.id`) so tier-1 session keying

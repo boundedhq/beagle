@@ -155,6 +155,26 @@ describe("OTel shape robustness (real-world variants — Gap 3 hardening)", () =
     expect(new TextDecoder().decode(ex.request.bodyBytes)).toContain("You are Claude Code.");
   });
 
+  test("a secret in a nested tool_result block is in bodyBytes for scanning (raw, not lossy-flattened)", () => {
+    // The flatten for display only extracts .text; a tool_result's content
+    // would be dropped by it. bodyBytes must be the RAW prompt so detection
+    // still sees the secret.
+    const promptJson = JSON.stringify([
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "AKIAZQ3DRSTUVWXY2345" }] },
+    ]);
+    const body = {
+      resourceLogs: [{ scopeLogs: [{ logRecords: [{
+        timeUnixNano: "1720000000000000000",
+        attributes: [
+          { key: "gen_ai.prompt", value: { stringValue: promptJson } },
+          { key: "gen_ai.completion", value: { stringValue: "ok" } },
+        ],
+      }] }] }],
+    };
+    const ex = mapOtlpLogsToExchanges(body, { agent: "claude-code", provider: "anthropic" })[0]!;
+    expect(new TextDecoder().decode(ex.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
+  });
+
   test("mixed resourceLogs + resourceSpans in one payload both map", () => {
     const body = {
       resourceLogs: [{ scopeLogs: [{ logRecords: [{

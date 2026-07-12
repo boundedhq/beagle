@@ -84,7 +84,10 @@ function recordToExchange(rec: OtelRecord, ctx: OtlpContext): OtelExchange | nul
   // Only inference records carry prompt/completion content.
   if (!a.has("gen_ai.prompt") && !a.has("gen_ai.completion")) return null;
   const promptRaw = str(a.get("gen_ai.prompt")) ?? "";
-  const prompt = promptRaw ? flattenPromptText(promptRaw) : "";
+  // The scanner reads bodyBytes: it must see the RAW serialized prompt so a
+  // secret buried in a nested block (e.g. a tool_result's content) is still
+  // caught — flattening is lossy and is used only for the readable messages[].
+  const promptDisplay = promptRaw ? flattenPromptText(promptRaw) : "";
   const completion = str(a.get("gen_ai.completion")) ?? "";
   const tsSource = rec.timeUnixNano ?? rec.startTimeUnixNano;
   const tsNano = tsSource !== undefined ? Number(tsSource) : Date.now() * 1e6;
@@ -98,8 +101,8 @@ function recordToExchange(rec: OtelRecord, ctx: OtlpContext): OtelExchange | nul
     model: str(a.get("gen_ai.response.model")) ?? str(a.get("gen_ai.request.model")),
     endpoint: "otel:gen_ai.client.inference",
     request: {
-      bodyBytes: new TextEncoder().encode(prompt),
-      messages: prompt ? [{ role: "user", content: prompt }] : [],
+      bodyBytes: new TextEncoder().encode(promptRaw),
+      messages: promptDisplay ? [{ role: "user", content: promptDisplay }] : [],
     },
     response: {
       text: completion,
