@@ -241,7 +241,12 @@ function Detail({ id }) {
 // values and builds text nodes only — never raw-HTML injection (§6.8).
 function Highlighted({ text, leaks }) {
   if (!leaks || leaks.length === 0 || typeof text !== "string") return text ?? "";
-  const values = leaks.map((l) => l.value).filter(Boolean);
+  // Longest-first so that when two values share a start (one a prefix of the
+  // other, e.g. a password nested in a connection string) the longer wins and
+  // the highlight isn't fragmented.
+  const values = [...new Set(leaks.map((l) => l.value).filter(Boolean))].sort(
+    (a, b) => b.length - a.length,
+  );
   const out = [];
   let rest = text;
   let guard = 0;
@@ -250,6 +255,7 @@ function Highlighted({ text, leaks }) {
     let hit = null;
     for (const v of values) {
       const i = rest.indexOf(v);
+      // strict <: at an equal position the earlier (longer) value already won
       if (i !== -1 && (at === -1 || i < at)) { at = i; hit = v; }
     }
     if (at === -1) { out.push(rest); break; }

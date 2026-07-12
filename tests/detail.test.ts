@@ -82,4 +82,18 @@ describe("buildDetail — leak values to highlight (UI fix 2)", () => {
     const spans: LeakSpan[] = [{ start: 9999, end: 10005, secretType: "x", tier: "structured" }];
     expect(buildDetail(ex(), spans).leaks).toEqual([]);
   });
+
+  test("spans stay aligned when multi-byte characters precede the secret", () => {
+    // Scanner offsets are UTF-16 string indices into the decoded body; the
+    // detail slice must use the same basis. Emoji (surrogate pairs) + CJK
+    // before the secret would expose any byte-vs-char mismatch.
+    const prefix = "🐕🐕 日本語テキスト — ";
+    const secret = "AKIAZQ3DRSTUVWXY2345";
+    const body = `${prefix}${secret} end`;
+    // compute the span exactly as the scanner does: indexOf on the decoded string
+    const start = body.indexOf(secret);
+    const spans: LeakSpan[] = [{ start, end: start + secret.length, secretType: "aws-access-key-id", tier: "structured" }];
+    const d = buildDetail(ex({ requestBody: enc(body) }), spans);
+    expect(d.leaks.map((l) => l.value)).toEqual([secret]);
+  });
 });
