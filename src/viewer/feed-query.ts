@@ -3,6 +3,45 @@
 // security-path budget — reads a read-only handle via Store.queryAll.
 import type { Store } from "../core/store/store";
 
+export interface LeakEvent {
+  id: string;
+  fingerprint: string;
+  sessionId: string;
+  detector: string;
+  secretType: string;
+  severity: string;
+  confidenceTier: string;
+  destination: string;
+  occurrences: number;
+  firstTs: number;
+  lastTs: number;
+  firstExchange: string | null;
+}
+
+// The leak log (CLI `leaks` + viewer /api/leaks). Display query, non-core.
+export function listLeakEvents(store: Store): LeakEvent[] {
+  return store
+    .queryAll<Record<string, unknown>>(
+      `SELECT id, fingerprint, session_id, detector, secret_type, severity,
+              confidence_tier, destination, occurrences, first_ts, last_ts, first_exchange
+       FROM leak_events ORDER BY first_ts`,
+    )
+    .map((r) => ({
+      id: r.id as string,
+      fingerprint: r.fingerprint as string,
+      sessionId: r.session_id as string,
+      detector: r.detector as string,
+      secretType: r.secret_type as string,
+      severity: r.severity as string,
+      confidenceTier: r.confidence_tier as string,
+      destination: r.destination as string,
+      occurrences: r.occurrences as number,
+      firstTs: r.first_ts as number,
+      lastTs: r.last_ts as number,
+      firstExchange: (r.first_exchange as string) ?? null,
+    }));
+}
+
 export interface FeedRow {
   id: string;
   sessionId: string;

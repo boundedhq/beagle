@@ -46,6 +46,7 @@ export class AlertEngine {
         destination: ex.provider,
         exchangeId: ex.id,
         ts: Date.now(),
+        spanStart: f.start, spanEnd: f.end,
       });
       if (fresh && f.tier === "structured") {
         this.sink({

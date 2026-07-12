@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store, SCHEMA_VERSION, StoreVersionError } from "../src/core/store/store";
+import { listLeakEvents } from "../src/viewer/feed-query";
 import type { ExchangeRecord } from "../src/core/store/store";
 import { ulid } from "../src/core/store/ulid";
 
@@ -68,6 +70,49 @@ describe("Store lifecycle", () => {
     store.close();
     expect(() => Store.openReadOnly(dir)).toThrow(StoreVersionError);
     expect(() => Store.openReadOnly(dir)).toThrow(/upgrade beagle|restart the daemon/i);
+  });
+
+  test("read-only open of an OLDER store gives a clean version error, not a raw column error", () => {
+    // A reader can't migrate; it must refuse an un-migrated store in plain
+    // language rather than letting a new-column query throw "no such column".
+    const store = Store.open(dir);
+    store.setUserVersionForTest(SCHEMA_VERSION - 1);
+    store.close();
+    expect(() => Store.openReadOnly(dir)).toThrow(StoreVersionError);
+    expect(() => Store.openReadOnly(dir)).toThrow(/restart the daemon/i);
+  });
+
+  test("migrates an older store forward in place, preserving captured data", () => {
+    // Populate a real store, then rewind its on-disk schema to look like a v1
+    // store (no v2 columns, user_version=1) so Store.open exercises migrate().
+    const store = Store.open(dir);
+    const ex = fakeExchange();
+    store.insertExchange(ex);
+    store.upsertLeakEvent({
+      fingerprint: "fp1", sessionId: "sess-1", detector: "d", secretType: "t",
+      severity: "high", confidenceTier: "structured",
+      destination: "anthropic/m", exchangeId: ex.id, ts: Date.now(),
+    });
+    store.close();
+
+    const raw = new Database(join(dir, "beagle.db"));
+    raw.exec("ALTER TABLE exchanges DROP COLUMN redacted");
+    raw.exec("ALTER TABLE leak_occurrences DROP COLUMN span_start");
+    raw.exec("ALTER TABLE leak_occurrences DROP COLUMN span_end");
+    raw.exec("PRAGMA user_version=1");
+    raw.close();
+
+    // Reopen: should migrate additively, not quarantine or throw.
+    const migrated = Store.open(dir);
+    expect(migrated.pragma("user_version")).toBe(SCHEMA_VERSION);
+    // Pre-migration rows survived.
+    expect(migrated.getExchange(ex.id)?.provider).toBe("anthropic");
+    expect(listLeakEvents(migrated).length).toBe(1);
+    // The re-added columns now accept writes (the redact-on-capture flag).
+    const ex2 = fakeExchange({ redacted: true });
+    migrated.insertExchange(ex2);
+    expect(migrated.getExchange(ex2.id)?.redacted).toBe(true);
+    migrated.close();
   });
 });
 
@@ -136,7 +181,7 @@ describe("Leak events", () => {
       destination: "anthropic/claude-sonnet-5", exchangeId: ex.id, ts: Date.now(),
     });
     expect(second.fresh).toBe(false);
-    const events = store.listLeakEvents();
+    const events = listLeakEvents(store);
     expect(events.length).toBe(1);
     expect(events[0]?.occurrences).toBe(2);
     store.close();
@@ -153,7 +198,7 @@ describe("Leak events", () => {
     store.upsertLeakEvent({ ...base, destination: "anthropic/m" });
     const r = store.upsertLeakEvent({ ...base, destination: "openai/m" });
     expect(r.fresh).toBe(true);
-    expect(store.listLeakEvents().length).toBe(2);
+    expect(listLeakEvents(store).length).toBe(2);
     store.close();
   });
 });
@@ -176,7 +221,7 @@ describe("Retention & purge", () => {
     store.sweep({ payloadWindowMs: 7 * 24 * 3600_000, eventWindowMs: 90 * 24 * 3600_000, sizeCapBytes: 1 << 30 });
     expect(store.getExchange(old.id)).toBeNull();
     expect(store.getExchange(fresh.id)).not.toBeNull();
-    const events = store.listLeakEvents();
+    const events = listLeakEvents(store);
     expect(events.length).toBe(1);
     expect(events[0]?.firstExchange).toBeNull(); // FK set null, event survives
     store.close();
@@ -233,7 +278,7 @@ describe("Retention & purge", () => {
     });
     store.panicPurge();
     expect(store.getExchange(ex.id)).toBeNull();
-    expect(store.listLeakEvents()).toEqual([]);
+    expect(listLeakEvents(store)).toEqual([]);
     expect(store.searchLiteral("secret-xyz")).toEqual([]);
     store.close();
   });

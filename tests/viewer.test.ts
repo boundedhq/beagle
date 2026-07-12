@@ -151,8 +151,9 @@ describe("ViewerServer hardening (design §6.8)", () => {
       headers: { "x-beagle-token": cred },
     });
     expect(r.status).toBe(200);
-    const detail = (await r.json()) as { summary: string; requestBody: string };
+    const detail = (await r.json()) as { summary: string; messages: unknown[]; requestRaw: string };
     expect(detail.summary).toBe("hello world");
+    expect(Array.isArray(detail.messages)).toBe(true);
   });
 
   test("SSE stream requires the credential", async () => {

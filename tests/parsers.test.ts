@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { detectFormat, parseRequest, parseResponse } from "../src/parsers/parsers";
+import { detectFormat, extractActions, parseRequest, parseResponse } from "../src/parsers/parsers";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 
@@ -128,5 +128,42 @@ describe("malformed input degrades to null, never throws (R3)", () => {
   test("garbage bytes", () => {
     expect(parseRequest("anthropic-messages", enc("not json{{{"))).toBeNull();
     expect(parseResponse("openai-chat", enc("\x00\x01binary"))).toBeNull();
+  });
+});
+
+describe("extractActions (tool-aware summaries, UI fix 3)", () => {
+  test("Anthropic tool_use blocks in a JSON response", () => {
+    const body = JSON.stringify({
+      content: [
+        { type: "text", text: "let me check" },
+        { type: "tool_use", name: "Read", input: { file_path: "src/server.ts" } },
+        { type: "tool_use", name: "Bash", input: { command: "npm test" } },
+      ],
+    });
+    const actions = extractActions("anthropic-messages", enc(body));
+    expect(actions).toEqual([
+      { tool: "Read", detail: "src/server.ts" },
+      { tool: "Bash", detail: "npm test" },
+    ]);
+  });
+
+  test("Anthropic tool_use in a streamed SSE response", () => {
+    const sse =
+      'data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"Grep","input":{"pattern":"TODO"}}}\n\n';
+    const actions = extractActions("anthropic-messages", enc(sse));
+    expect(actions[0]).toEqual({ tool: "Grep", detail: "TODO" });
+  });
+
+  test("OpenAI tool_calls in a chat response", () => {
+    const body = JSON.stringify({
+      choices: [{ message: { tool_calls: [{ function: { name: "run_shell", arguments: '{"command":"ls -la"}' } }] } }],
+    });
+    const actions = extractActions("openai-chat", enc(body));
+    expect(actions[0]).toEqual({ tool: "run_shell", detail: "ls -la" });
+  });
+
+  test("plain text response has no actions", () => {
+    const body = JSON.stringify({ content: [{ type: "text", text: "all done" }] });
+    expect(extractActions("anthropic-messages", enc(body))).toEqual([]);
   });
 });
