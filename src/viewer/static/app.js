@@ -131,7 +131,7 @@ function App() {
       ${searchHits !== null && html`<${SearchResults} hits=${searchHits} term=${searchTerm}
         onClear=${() => setSearchHits(null)} onOpen=${(id) => setExpanded(id)} />`}
       ${visible.length === 0 && html`<div class="empty">
-        no exchanges${leaksOnly ? " with leaks" : ""} yet — run an agent under
+        no calls${leaksOnly ? " with leaks" : ""} yet — run an agent under
         ${" "}<code>beagle run</code> and its traffic appears here live
       </div>`}
       ${visible.map(
@@ -197,14 +197,23 @@ function Detail({ id }) {
   return html`
     <div class="detail">
       <div class="meta">
-        ${detail.id} · ${detail.agent} → ${detail.provider}${detail.model ? "/" + detail.model : ""}
-        · session ${detail.sessionId.slice(0, 8)} (${detail.sessionTier})
-        ${detail.captureState !== "ok" ? " · ⚠ capture truncated" : ""}
-        ${detail.scanState !== "ok" ? " · ⚠ scan incomplete — unverified, not clean" : ""}
+        <div><span class="k">call</span> ${detail.id}</div>
+        <div>
+          <span class="k">from</span> ${detail.agent}${" "}
+          <span class="k">to</span> ${detail.provider}${detail.model ? " / " + detail.model : ""}
+        </div>
+        <div>
+          <span class="k">session</span> ${detail.sessionId.slice(0, 8)} ·${" "}
+          <span class="k">grouped by</span> ${groupedBy(detail.sessionTier)}
+        </div>
+        ${detail.captureState !== "ok" &&
+        html`<div class="warn">⚠ capture truncated — the stored bytes are incomplete</div>`}
+        ${detail.scanState !== "ok" &&
+        html`<div class="warn">⚠ scan incomplete — this body was not fully verified, not marked clean</div>`}
       </div>
       ${leaks.length > 0 &&
       html`<div class="leakbar">
-        🔴 ${leaks.length} secret${leaks.length === 1 ? "" : "s"} sent in this exchange —
+        🔴 ${leaks.length} secret${leaks.length === 1 ? "" : "s"} sent in this call —
         highlighted below:
         ${leaks.map((l) => html`<span class="chip leak">${l.secretType}</span>`)}
       </div>`}
@@ -294,7 +303,7 @@ function SearchResults({ hits, term, onClear, onOpen }) {
         ${hits.length === 0
           ? html`<strong>no matches — never sent.</strong>`
           : html`<strong>
-              found in ${hits.length} exchange${hits.length === 1 ? "" : "s"} across
+              found in ${hits.length} call${hits.length === 1 ? "" : "s"} across
               ${" " + new Set(hits.map((h) => h.sessionId)).size} session(s)
             </strong>`}
         ${" "}<button onClick=${onClear}>clear</button>
@@ -312,6 +321,20 @@ function SearchResults({ hits, term, onClear, onOpen }) {
       )}
     </div>
   `;
+}
+
+// Plain-language read of HOW this exchange was grouped into its session (the
+// resolver's tier), with the confidence that grouping carries — so the label
+// says what it means, not an internal tag like "conv-id".
+function groupedBy(tier) {
+  switch (tier) {
+    case "conv-id": return "the provider's conversation id (high confidence)";
+    case "prefix": return "matching message history (high confidence)";
+    case "compaction-link": return "history matched across a compaction (medium confidence)";
+    case "run": return "the same run, no history match (lower confidence)";
+    case "time-gap": return "recent activity — a best guess (low confidence)";
+    default: return tier;
+  }
 }
 
 function pretty(s) {

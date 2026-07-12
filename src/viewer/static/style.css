@@ -63,7 +63,9 @@ main { flex: 1; padding: 8px 16px; }
   background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
   margin: 4px 0 10px; padding: 12px; overflow-x: auto;
 }
-.detail .meta { color: var(--muted); margin-bottom: 8px; }
+.detail .meta { color: var(--text); margin-bottom: 8px; line-height: 1.7; }
+.detail .meta .k { color: var(--muted); }
+.detail .meta .warn { color: var(--leak); }
 .detail .msg { margin: 6px 0; padding: 6px 10px; border-left: 2px solid var(--border); }
 .detail .msg .role { color: var(--accent); font-size: 12px; }
 .detail .msg.assistant .role { color: var(--ok); }

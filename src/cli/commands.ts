@@ -112,7 +112,7 @@ export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null):
   const dbPath = join(stateDir, "beagle.db");
   const sizeMb = existsSync(dbPath) ? (statSync(dbPath).size / (1 << 20)).toFixed(1) : "0.0";
   const cfg = loadConfig(stateDir);
-  lines.push(`exchanges: ${exchanges} · leaks: ${leaks} · store: ${sizeMb} MB`);
+  lines.push(`calls: ${exchanges} · leaks: ${leaks} · store: ${sizeMb} MB`);
   lines.push(
     `retention: ${cfg.payloadWindowDays}d / ${cfg.sizeCapMB} MB payloads · ${cfg.eventWindowDays}d leak events`,
   );
@@ -133,7 +133,7 @@ export function cmdSearch(stateDir: string, term: string): string {
   if (hits.length === 0) return "no matches — that string was never sent through Beagle.";
   const sessions = new Set(hits.map((h) => h.sessionId));
   const lines = [
-    `found in ${hits.length} exchange${hits.length === 1 ? "" : "s"} across ${sessions.size} session${sessions.size === 1 ? "" : "s"}:`,
+    `found in ${hits.length} call${hits.length === 1 ? "" : "s"} across ${sessions.size} session${sessions.size === 1 ? "" : "s"}:`,
   ];
   for (const h of hits) {
     lines.push(`  ${h.exchangeId.slice(0, 8)}  ${new Date(h.tsRequest).toISOString()}  session ${clean(h.sessionId).slice(0, 8)}`);
@@ -164,9 +164,9 @@ export function cmdShow(stateDir: string, idPrefix: string): string {
   if (isStoreError(store)) return store.error;
   const ex = store?.getExchange(idPrefix) ?? null;
   store?.close();
-  if (!ex) return `no exchange matches '${idPrefix}' (prefix may be ambiguous or unknown).`;
+  if (!ex) return `no call matches '${idPrefix}' (prefix may be ambiguous or unknown).`;
   const lines = [
-    `exchange ${ex.id}`,
+    `call ${ex.id}`,
     `  ${clean(ex.agent ?? "?")} → ${clean(ex.provider ?? "?")}${ex.model ? `/${clean(ex.model)}` : ""}  ${clean(ex.endpoint ?? "")}`,
     `  at ${new Date(ex.tsRequest).toISOString()}  status ${ex.status ?? "?"}  tokens ${ex.tokensIn ?? "?"}→${ex.tokensOut ?? "?"}`,
     `  session ${ex.sessionId.slice(0, 8)} (keyed by ${ex.sessionTier})  run ${clean(ex.runId)}`,

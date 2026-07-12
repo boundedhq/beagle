@@ -44,7 +44,7 @@ describe("CLI commands (headless loop, R12)", () => {
 
   test("search: definitive found-in-N answer", () => {
     const out = cmdSearch(stateDir, "hunter2");
-    expect(out).toContain("found in 1 exchange");
+    expect(out).toContain("found in 1 call");
     expect(out).toContain("s1");
   });
 
@@ -67,7 +67,7 @@ describe("CLI commands (headless loop, R12)", () => {
 
   test("show: ambiguous or unknown prefix says so plainly", () => {
     const out = cmdShow(stateDir, "ZZZZZZZZ");
-    expect(out.toLowerCase()).toContain("no exchange");
+    expect(out.toLowerCase()).toContain("no call");
   });
 
   test("show: traffic-derived text is stripped of terminal escapes", () => {
@@ -91,7 +91,7 @@ describe("CLI commands (headless loop, R12)", () => {
   test("status: trust-strip text works with no daemon running", () => {
     const out = cmdStatus(stateDir);
     expect(out.toLowerCase()).toContain("daemon: not running");
-    expect(out).toContain("exchanges: 1");
+    expect(out).toContain("calls: 1");
     expect(out.toLowerCase()).toContain("local only");
   });
 });

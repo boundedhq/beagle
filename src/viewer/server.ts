@@ -210,7 +210,7 @@ export class ViewerServer {
         this.json(res, 200, listExchanges(store, 500));
       } else if (path.startsWith("/api/exchange/") && req.method === "GET") {
         const ex = store.getExchange(path.slice("/api/exchange/".length));
-        if (!ex) return this.json(res, 404, { error: "no such exchange" });
+        if (!ex) return this.json(res, 404, { error: "no such call" });
         // Reassemble the response, structure the request, and recover the
         // secret strings to highlight (detail.ts, UI fixes 1 + 2).
         this.json(res, 200, buildDetail(ex, leakSpansFor(store, ex.id)));

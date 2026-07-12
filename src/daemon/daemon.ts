@@ -587,7 +587,7 @@ function buildSummary(
 ): string {
   if (actions && actions.length > 0) return summarizeActions(actions);
   if (responseText) return firstLine(responseText, 100);
-  if (!parsed) return "unparsed exchange (raw view available)";
+  if (!parsed) return "unparsed call (raw view available)";
   const lastUser = [...parsed.messages].reverse().find((m) => m.role === "user");
   return lastUser ? firstLine(lastUser.content, 100) : `${parsed.messages.length} messages`;
 }
