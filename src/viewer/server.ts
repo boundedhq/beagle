@@ -90,13 +90,19 @@ export class ViewerServer {
     });
   }
 
+  /** Notified when the viewer shuts down (last tab closed / idle) so the host
+   *  daemon can re-evaluate its own idle-exit. */
+  onStop: (() => void) | null = null;
+
   stop(): void {
+    const wasRunning = this.isRunning;
     for (const c of this.sseClients) c.end();
     this.sseClients.clear();
     this.server?.close();
     this.server?.closeAllConnections?.();
     this.isRunning = false;
     if (this.idleTimer) clearTimeout(this.idleTimer);
+    if (wasRunning) this.onStop?.();
   }
 
   /** Push a live event (new exchange, alert) to any open tabs. */

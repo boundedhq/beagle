@@ -95,7 +95,16 @@ export async function run(argv: string[]): Promise<number> {
       return 0;
     case "daemon": {
       const { Daemon } = await import("../daemon/daemon");
-      const daemon = await Daemon.start({ stateDir });
+      // An explicitly-launched `beagle daemon` (foreground or service unit)
+      // stays up; only the one auto-started by `beagle run` is ephemeral and
+      // idle-exits (BEAGLE_EPHEMERAL, set by that spawn). BEAGLE_IDLE_MS tunes
+      // the grace period.
+      const idleEnv = Number(process.env.BEAGLE_IDLE_MS);
+      const daemon = await Daemon.start({
+        stateDir,
+        persistent: process.env.BEAGLE_EPHEMERAL !== "1",
+        idleTimeoutMs: Number.isFinite(idleEnv) && idleEnv > 0 ? idleEnv : undefined,
+      });
       console.log(`beagled: proxy on 127.0.0.1:${daemon.proxyPort}, control at ${daemon.socketPath}`);
       const shutdown = () => void daemon.stop().then(() => process.exit(0));
       process.on("SIGINT", shutdown);

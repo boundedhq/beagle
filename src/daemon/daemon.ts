@@ -4,7 +4,7 @@
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import type { Server } from "node:net";
+import type { Server, Socket } from "node:net";
 import { AlertEngine, type AlertEvent } from "../core/alert/engine";
 import { loadConfig, saveConfig, loadOrCreateInstallKey, type BeagleConfig } from "../core/config/config";
 import type { Message } from "../core/exchange";
@@ -35,6 +35,14 @@ export interface DaemonOptions {
   rulesPin?: string;
   scanDeadlineMs?: number;
   alertSinkForTest?: (a: AlertEvent) => void;
+  /** Never idle-exit — set for the service-installed daemon (§6.7), inferred
+   *  from BEAGLE_SERVICE=1 when unset. */
+  persistent?: boolean;
+  /** Idle grace before an ephemeral daemon (no live leases, no open viewer)
+   *  exits. Default 2 min. */
+  idleTimeoutMs?: number;
+  /** Production run-mode daemon exits the process on idle; tests set false. */
+  exitProcessOnIdle?: boolean;
 }
 
 interface PendingExchange {
@@ -53,9 +61,12 @@ const PENDING_TTL_MS = 10 * 60_000;
 
 const SWEEP_INTERVAL_MS = 15 * 60_000;
 
+const DEFAULT_IDLE_MS = 2 * 60_000;
+
 export class Daemon {
   proxyPort = 0;
   socketPath: string;
+  isRunning = false;
 
   private store!: Store;
   private config!: BeagleConfig;
@@ -73,6 +84,13 @@ export class Daemon {
   private pending = new Map<string, PendingExchange>();
   private paused = false;
   private sweeper: ReturnType<typeof setInterval> | null = null;
+  private leases = 0;
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private persistent = false;
+  // Last time the pipeline saw traffic. The idle check consults this so a
+  // daemon actively relaying (even with a lost/failed lease) never stops
+  // mid-agent-session — leases are the primary signal, this is the backstop.
+  private lastActivityTs = Date.now();
 
   private constructor(private opts: DaemonOptions) {
     this.socketPath = join(opts.stateDir, "control.sock");
@@ -115,7 +133,7 @@ export class Daemon {
       onExchanges: (exs) => d.ingestOtel(exs),
     });
     d.otlpPort = await d.otlp.listen(0);
-    d.control = await startControlServer(d.socketPath, (req) => d.handleControl(req));
+    d.control = await startControlServer(d.socketPath, (req, sock) => d.handleControl(req, sock));
     d.sweep();
     d.sweeper = setInterval(() => d.sweep(), SWEEP_INTERVAL_MS);
     d.sweeper.unref?.();
@@ -127,10 +145,18 @@ export class Daemon {
       }),
       { mode: 0o600 },
     );
+    d.isRunning = true;
+    d.persistent = opts.persistent ?? process.env.BEAGLE_SERVICE === "1";
+    // Arm the idle timer at startup: a daemon nobody ever leases (or whose
+    // spawning `beagle run` died before leasing) still winds down.
+    d.armIdleExit();
     return d;
   }
 
   async stop(): Promise<void> {
+    if (!this.isRunning) return;
+    this.isRunning = false;
+    if (this.idleTimer) clearTimeout(this.idleTimer);
     if (this.sweeper) clearInterval(this.sweeper);
     this.viewer?.stop();
     this.otlp?.close();
@@ -145,6 +171,7 @@ export class Daemon {
   // ---- pipeline ----
 
   private async scanPipeline(bytes: Uint8Array, ctx: ScanContext): Promise<void> {
+    this.lastActivityTs = Date.now();
     if (this.paused || this.config.excludedAgents.includes(ctx.agent ?? "")) return;
     const format = detectFormat(ctx.endpoint);
     const parsed = format === "unknown" ? null : parseRequest(format, bytes);
@@ -310,6 +337,7 @@ export class Daemon {
   // scanner/session/alert/store path — source='otel' is the only difference,
   // surfaced as the agent-reported badge (R7).
   private async ingestOtel(exchanges: OtelExchange[]): Promise<void> {
+    this.lastActivityTs = Date.now();
     for (const ex of exchanges) {
       if (this.paused || this.config.excludedAgents.includes(ex.agent ?? "")) continue;
       const resolution = this.resolver.resolve({
@@ -420,12 +448,61 @@ export class Daemon {
     }
   }
 
+  // Ephemeral run-mode daemon (§6.7): once it owns no live runs and hosts no
+  // open viewer, wind down after a grace period so a "nothing changed" trial
+  // run leaves no background process behind. The service-installed daemon
+  // (persistent) never does this.
+  private armIdleExit(): void {
+    if (this.persistent || !this.isRunning) return;
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    if (this.leases > 0 || this.viewer?.isRunning) return;
+    const idleMs = this.opts.idleTimeoutMs ?? DEFAULT_IDLE_MS;
+    this.idleTimer = setTimeout(() => {
+      const recentTraffic = Date.now() - this.lastActivityTs < idleMs;
+      if (this.leases > 0 || this.viewer?.isRunning || recentTraffic) {
+        // Something reappeared — or the proxy is actively relaying (a lost
+        // lease must never let us stop mid-agent-session). Re-check later.
+        this.idleTimer = null;
+        this.armIdleExit();
+        return;
+      }
+      void this.stop().then(() => {
+        if (this.opts.exitProcessOnIdle !== false) process.exit(0);
+      });
+    }, idleMs);
+    this.idleTimer.unref?.();
+  }
+
+  private makeViewer(): ViewerServer {
+    const v = new ViewerServer({
+      stateDir: this.opts.stateDir,
+      onPurge: (kind) => {
+        if (kind === "panic") this.store.panicPurge();
+        else this.store.purge({ kind: "all" });
+      },
+    });
+    v.onStop = () => this.armIdleExit(); // viewer closed → maybe wind down
+    return v;
+  }
+
   // ---- control ----
 
-  private async handleControl(req: ControlRequest): Promise<ControlResponse> {
+  private async handleControl(req: ControlRequest, socket: Socket): Promise<ControlResponse> {
     switch (req.cmd) {
       case "ping":
         return { ok: true, data: { pid: process.pid, proxyPort: this.proxyPort } };
+      case "lease": {
+        // The caller holds this connection for a watched agent's lifetime;
+        // count it as a live run so the daemon doesn't idle-exit. Closing the
+        // socket (or the caller crashing) releases it automatically.
+        this.leases++;
+        if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
+        socket.once("close", () => {
+          this.leases = Math.max(0, this.leases - 1);
+          this.armIdleExit();
+        });
+        return { ok: true, data: { leased: true } };
+      }
       case "register-run": {
         this.registry.register(req.args as unknown as RunRegistration);
         return { ok: true };
@@ -467,20 +544,11 @@ export class Daemon {
         return { ok: true };
       }
       case "ui": {
-        if (!this.viewer?.isRunning) {
-          this.viewer = new ViewerServer({
-            stateDir: this.opts.stateDir,
-            onPurge: (kind) => {
-              if (kind === "panic") this.store.panicPurge();
-              else this.store.purge({ kind: "all" });
-            },
-          });
-          const url = await this.viewer.start();
-          return { ok: true, data: { url } };
-        }
-        // A viewer is already up: mint a fresh one-time URL by restarting it.
-        this.viewer.stop();
-        this.viewer = new ViewerServer({ stateDir: this.opts.stateDir });
+        // An open viewer keeps the daemon alive; when it later shuts down
+        // (last tab / idle) we re-evaluate idle-exit.
+        if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
+        this.viewer?.stop();
+        this.viewer = this.makeViewer();
         return { ok: true, data: { url: await this.viewer.start() } };
       }
       case "shutdown":

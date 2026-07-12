@@ -72,6 +72,7 @@ describe("Daemon end-to-end", () => {
     daemon = await Daemon.start({
       stateDir,
       alertSinkForTest: (a) => alerts.push(a),
+      persistent: true, // these test capture, not lifecycle — no idle-exit
     });
     await controlRequest(daemon.socketPath, {
       cmd: "register-run",
