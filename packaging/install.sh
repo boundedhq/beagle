@@ -1,7 +1,9 @@
 #!/bin/sh
-# Beagle one-line installer (curl channel, R1). Downloads the signed,
-# per-platform binary from GitHub releases — NEVER fetches or runs code on a
-# post-install hook (supply-chain rule). Verifies the checksum before install.
+# Beagle one-line installer (curl channel, R1). Downloads the per-platform
+# binary from GitHub releases and verifies its sha256 checksum before
+# installing — NEVER fetches or runs code on a post-install hook
+# (supply-chain rule). Binary signing (cosign) is on the roadmap; until then
+# the published checksum is the integrity check.
 set -eu
 
 REPO="boundedhq/beagle"
@@ -47,6 +49,9 @@ if [ "$expected" != "$actual" ]; then
 fi
 
 chmod +x "$tmp/beagle"
+if [ ! -d "$PREFIX" ]; then
+  mkdir -p "$PREFIX" 2>/dev/null || sudo mkdir -p "$PREFIX"
+fi
 if [ -w "$PREFIX" ]; then
   mv "$tmp/beagle" "$PREFIX/beagle"
 else
