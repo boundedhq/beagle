@@ -1,6 +1,6 @@
 // Control socket (design §6.7): unix domain socket, 0600, line-delimited
 // JSON. Live actions only — reads go straight to SQLite.
-import { createServer, connect, type Server } from "node:net";
+import { createServer, connect, type Server, type Socket } from "node:net";
 import { chmodSync, rmSync } from "node:fs";
 
 export interface ControlRequest {
@@ -14,7 +14,12 @@ export interface ControlResponse {
   error?: string;
 }
 
-export type ControlHandler = (req: ControlRequest) => Promise<ControlResponse> | ControlResponse;
+// The socket is passed so a handler can hold the connection open (a `lease`
+// keeps the daemon alive for the caller's lifetime — §6.7 idle-exit).
+export type ControlHandler = (
+  req: ControlRequest,
+  socket: Socket,
+) => Promise<ControlResponse> | ControlResponse;
 
 export function startControlServer(socketPath: string, handler: ControlHandler): Promise<Server> {
   rmSync(socketPath, { force: true });
@@ -28,7 +33,7 @@ export function startControlServer(socketPath: string, handler: ControlHandler):
         buf = buf.slice(nl + 1);
         let resp: ControlResponse;
         try {
-          resp = await handler(JSON.parse(line) as ControlRequest);
+          resp = await handler(JSON.parse(line) as ControlRequest, sock);
         } catch (e) {
           resp = { ok: false, error: (e as Error).message };
         }
@@ -41,6 +46,31 @@ export function startControlServer(socketPath: string, handler: ControlHandler):
     server.listen(socketPath, () => {
       chmodSync(socketPath, 0o600);
       resolve(server);
+    });
+  });
+}
+
+// Open a lease: the daemon counts this connection as a live run and won't
+// idle-exit while it's held. The returned socket must be kept open for the
+// caller's lifetime; closing it (or crashing) releases the lease.
+export function openLease(socketPath: string, timeoutMs = 3000): Promise<Socket> {
+  return new Promise((resolve, reject) => {
+    const sock = connect(socketPath, () => sock.write(JSON.stringify({ cmd: "lease" }) + "\n"));
+    const timer = setTimeout(() => {
+      sock.destroy();
+      reject(new Error("lease timeout"));
+    }, timeoutMs);
+    let buf = "";
+    sock.on("data", (d) => {
+      buf += d.toString("utf8");
+      if (buf.indexOf("\n") === -1) return;
+      clearTimeout(timer);
+      // keep the socket OPEN — it is the lease
+      resolve(sock);
+    });
+    sock.on("error", (e) => {
+      clearTimeout(timer);
+      reject(e);
     });
   });
 }

@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { Store, StoreVersionError } from "../core/store/store";
 import { loadConfig, saveConfig } from "../core/config/config";
-import { controlRequest } from "../daemon/control";
+import { controlRequest, openLease } from "../daemon/control";
 import { Notifier, stripControlChars } from "../notifier/notifier";
 import { GraduationTracker } from "../install/graduation";
 import { detectAgents, knownExtraLocations, pathDirsFromEnv } from "../install/detect";
@@ -80,7 +80,11 @@ async function ensureDaemon(stateDir: string): Promise<DaemonInfo | null> {
       ? [process.execPath, script, "daemon"]
       : [process.execPath, "daemon"];
   const child = Bun.spawn(argv, {
-    env: { ...process.env, BEAGLE_STATE_DIR: stateDir },
+    // BEAGLE_EPHEMERAL: this auto-started daemon idle-exits once no agent
+    // holds a lease and no viewer is open (§6.7), so a trial run leaves
+    // nothing behind. An explicit `beagle daemon` or the service unit does not
+    // set it and stays up.
+    env: { ...process.env, BEAGLE_STATE_DIR: stateDir, BEAGLE_EPHEMERAL: "1" },
     stdio: ["ignore", "ignore", "ignore"],
   });
   child.unref();
@@ -388,11 +392,17 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
   const grad = new GraduationTracker(stateDir);
   const shouldNudge = grad.recordRunAndCheck(agentName);
 
+  // Hold a lease for the agent's lifetime so an auto-started ephemeral daemon
+  // stays up while we're watching, then winds down after we exit (§6.7). Both
+  // wire and telemetry modes need this — Mode B registers no run.
+  const lease = await openLease(daemon.socketPath).catch(() => null);
+
   const child = Bun.spawn([realBinary, ...agentArgs], {
     env: { ...process.env, ...modeEnv },
     stdio: ["inherit", "inherit", "inherit"],
   });
   const exitCode = await child.exited;
+  lease?.end();
 
   // Graduation nudge AFTER the agent exits (R2): full-screen TUIs wipe
   // anything printed before they start; after exit the terminal is ours.
