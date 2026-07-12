@@ -13,7 +13,8 @@ import { detectAgents, knownExtraLocations, pathDirsFromEnv } from "../install/d
 import { watchAgent, unwatchAgent, type WatchEnv } from "../install/watch";
 import { ChangeManifest } from "../install/manifest";
 import { buildOtelEnv } from "../parsers/otlp-map";
-import { AGENTS, buildRunEnv } from "./agents";
+import { buildRedirectConfig, readFirstConfig, writeRedirectConfig } from "../install/config-redirect";
+import { AGENTS, buildRunEnv, runBaseUrl } from "./agents";
 
 // Everything printed by these commands can embed traffic-derived text
 // (summaries, session ids from parsed content) — sanitize at the boundary,
@@ -340,9 +341,10 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
     console.error("--telemetry (agent self-report capture) is supported for claude only in v1.");
     return 2;
   }
-  if (!telemetry && !spec.baseUrlEnv) {
+  if (!telemetry && !spec.baseUrlEnv && !spec.config) {
     console.error(
-      `${agentName} is config-driven; wrapper support arrives with 'beagle watch' — coming in a following release.`,
+      `${agentName} is config-driven and its config-override mechanism isn't confirmed yet — ` +
+        `point it at Beagle manually for now (see the README).`,
     );
     return 2;
   }
@@ -382,7 +384,18 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
         extraHeaders: spec.extraHeaders,
       },
     });
-    modeEnv = buildRunEnv(agentName, daemon.proxyPort, runId);
+    if (spec.config) {
+      // Config-driven agent (opencode): write a Beagle-owned config that
+      // merges the user's real settings with the proxy baseURL, and point the
+      // agent at it — the user's real config is never touched.
+      const baseUrl = runBaseUrl(daemon.proxyPort, runId);
+      const userCfg = readFirstConfig(spec.config.realConfigCandidates(homedir()));
+      const merged = buildRedirectConfig(userCfg, spec.config.baseUrlPath, baseUrl);
+      const cfgPath = writeRedirectConfig(stateDir, agentName, merged);
+      modeEnv = { [spec.config.configEnv]: cfgPath };
+    } else {
+      modeEnv = buildRunEnv(agentName, daemon.proxyPort, runId);
+    }
   }
 
   const grad = new GraduationTracker(stateDir);

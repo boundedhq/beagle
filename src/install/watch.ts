@@ -26,10 +26,10 @@ export interface WatchResult {
 export function planWatch(agent: string, env: WatchEnv): { shimPath: string; real: string } | null {
   const spec = AGENTS[agent];
   if (!spec) return null;
-  // v1 shims work only for env-base-URL agents; a shim for a config-driven
-  // agent (opencode/pi) would exec `beagle run <agent>`, which run rejects —
-  // don't place a shim that can't work. Config-redirect support lands later.
-  if (!spec.baseUrlEnv) return null;
+  // A shim execs `beagle run <agent>`, which handles both env-base-URL agents
+  // and config-driven ones (via the Beagle-owned config redirect). Agents with
+  // neither mechanism can't be shimmed.
+  if (!spec.baseUrlEnv && !spec.config) return null;
   const real = env.resolveReal(agent);
   if (!real) return null;
   return { shimPath: join(env.shimDir, agent), real };
@@ -37,10 +37,10 @@ export function planWatch(agent: string, env: WatchEnv): { shimPath: string; rea
 
 export function watchAgent(agent: string, env: WatchEnv): WatchResult {
   const spec = AGENTS[agent];
-  if (spec && !spec.baseUrlEnv) {
+  if (spec && !spec.baseUrlEnv && !spec.config) {
     return {
       applied: false,
-      message: `${agent} is config-driven; automatic watch for it isn't supported yet (env-base-URL agents only in v1).`,
+      message: `${agent}'s config-override mechanism isn't confirmed yet — automatic watch isn't supported for it in v1.`,
     };
   }
   const plan = planWatch(agent, env);
