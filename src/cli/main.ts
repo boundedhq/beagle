@@ -20,7 +20,7 @@ usage:
   beagle status                  trust strip: coverage, store, retention
   beagle search <string>         was this ever sent? definitive answer
   beagle leaks                   the leak log
-  beagle show <id-prefix>        one exchange, summarized
+  beagle show <id-prefix>        one call, summarized
   beagle purge [all|panic]       erase captured data
   beagle config [...]            view/set redact-on-capture, exclusions
   beagle ui                      open the dashboard (fresh one-time link)

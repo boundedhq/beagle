@@ -1,10 +1,10 @@
-// Viewer detail assembly (non-core): turns a stored ExchangeRecord + its leak
+// Viewer detail assembly (non-core): turns a stored CallRecord + its leak
 // spans into the shape the dashboard renders — reassembled response text
 // (UI fix 1), structured request messages, and the exact secret strings to
 // highlight inline (UI fix 2, R7). Reuses the format parsers.
-import type { ExchangeRecord, Store } from "../core/store/store";
+import type { CallRecord, Store } from "../core/store/store";
 import { detectFormat, parseRequest, parseResponse } from "../parsers/parsers";
-import type { Message } from "../core/exchange";
+import type { Message } from "../core/call";
 
 export interface LeakSpan {
   start: number;
@@ -13,14 +13,14 @@ export interface LeakSpan {
   tier: string;
 }
 
-// Secret spans for one exchange (R7 inline highlight). Non-core display query.
-export function leakSpansFor(store: Store, exchangeId: string): LeakSpan[] {
+// Secret spans for one call (R7 inline highlight). Non-core display query.
+export function leakSpansFor(store: Store, callId: string): LeakSpan[] {
   return store
     .queryAll<Record<string, unknown>>(
       `SELECT lo.span_start AS s, lo.span_end AS e, le.secret_type AS t, le.confidence_tier AS tier
        FROM leak_occurrences lo JOIN leak_events le ON le.id = lo.event_id
        WHERE lo.exchange_id = ? AND lo.span_start IS NOT NULL AND lo.span_end IS NOT NULL`,
-      [exchangeId],
+      [callId],
     )
     .map((r) => ({
       start: r.s as number,
@@ -36,7 +36,7 @@ export interface DetailLeak {
   tier: string;
 }
 
-export interface ExchangeDetail {
+export interface CallDetail {
   id: string;
   agent?: string;
   provider?: string;
@@ -63,44 +63,44 @@ export interface ExchangeDetail {
 
 const REDACTED_RE = /\[REDACTED:[^\]]+\]/g;
 
-export function buildDetail(ex: ExchangeRecord, spans: LeakSpan[]): ExchangeDetail {
+export function buildDetail(call: CallRecord, spans: LeakSpan[]): CallDetail {
   const dec = new TextDecoder("utf-8", { fatal: false });
-  const requestRaw = ex.requestBody ? dec.decode(ex.requestBody) : "";
-  const responseRaw = ex.responseBody ? dec.decode(ex.responseBody) : "";
-  const sseRaw = ex.sseRaw ? dec.decode(ex.sseRaw) : null;
-  const format = detectFormat(ex.endpoint ?? "");
+  const requestRaw = call.requestBody ? dec.decode(call.requestBody) : "";
+  const responseRaw = call.responseBody ? dec.decode(call.responseBody) : "";
+  const sseRaw = call.sseRaw ? dec.decode(call.sseRaw) : null;
+  const format = detectFormat(call.endpoint ?? "");
 
-  const parsedReq = ex.requestBody ? parseRequest(format, ex.requestBody) : null;
+  const parsedReq = call.requestBody ? parseRequest(format, call.requestBody) : null;
   // Reassemble from the decoded body; fall back to the raw SSE for streamed
   // responses whose decoded body is the event stream.
   const parsedResp =
-    ex.responseBody ? parseResponse(format, ex.responseBody)
-    : ex.sseRaw ? parseResponse(format, ex.sseRaw)
+    call.responseBody ? parseResponse(format, call.responseBody)
+    : call.sseRaw ? parseResponse(format, call.sseRaw)
     : null;
 
   return {
-    id: ex.id,
-    agent: ex.agent,
-    provider: ex.provider,
-    model: ex.model,
-    endpoint: ex.endpoint,
-    sessionId: ex.sessionId,
-    sessionTier: ex.sessionTier,
-    summary: ex.summary,
-    tsRequest: ex.tsRequest,
-    status: ex.status,
-    tokensIn: ex.tokensIn,
-    tokensOut: ex.tokensOut,
-    scanState: ex.scanState,
-    captureState: ex.captureState,
-    source: ex.source,
+    id: call.id,
+    agent: call.agent,
+    provider: call.provider,
+    model: call.model,
+    endpoint: call.endpoint,
+    sessionId: call.sessionId,
+    sessionTier: call.sessionTier,
+    summary: call.summary,
+    tsRequest: call.tsRequest,
+    status: call.status,
+    tokensIn: call.tokensIn,
+    tokensOut: call.tokensOut,
+    scanState: call.scanState,
+    captureState: call.captureState,
+    source: call.source,
     system: parsedReq?.system ?? null,
     messages: parsedReq?.messages ?? [],
     responseText: parsedResp?.text ?? null,
     requestRaw,
     responseRaw,
     sseRaw,
-    leaks: extractLeaks(requestRaw, spans, ex.redacted ?? false),
+    leaks: extractLeaks(requestRaw, spans, call.redacted ?? false),
   };
 }
 

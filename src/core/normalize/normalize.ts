@@ -1,5 +1,5 @@
 // Capture normalizer (design §4/§5): auth-header scrub is unconditional —
-// the provider credential rides every exchange and must never reach disk.
+// the provider credential rides every call and must never reach disk.
 // Content decoding happens only on the capture copy, never the live path.
 import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib";
 import { createHash } from "node:crypto";

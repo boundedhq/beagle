@@ -3,7 +3,7 @@
 // this is the design's concentration of heuristic risk, so its decisions
 // stay auditable, never silent.
 import { createHash } from "node:crypto";
-import type { Message } from "../exchange";
+import type { Message } from "../call";
 import type { Store } from "../store/store";
 import { ulid } from "../store/ulid";
 

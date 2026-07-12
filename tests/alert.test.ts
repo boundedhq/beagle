@@ -21,7 +21,7 @@ function finding(overrides: Partial<Finding> = {}): Finding {
   };
 }
 
-const exchangeMeta = (over: Partial<{ id: string; sessionId: string; agent: string; provider: string; model: string }> = {}) => ({
+const callMeta = (over: Partial<{ id: string; sessionId: string; agent: string; provider: string; model: string }> = {}) => ({
   id: "01JZXKQ8WVXH5N4T2M9R7C3DEF",
   sessionId: "sess-1",
   agent: "claude-code",
@@ -42,9 +42,9 @@ describe("AlertEngine", () => {
   });
 
   test("first structured finding alerts once; re-sends update silently", () => {
-    engine.process(exchangeMeta(), [finding()]);
-    engine.process(exchangeMeta({ id: "01JZXKQ8WVXH5N4T2M9R7C3DFF" }), [finding()]);
-    engine.process(exchangeMeta({ id: "01JZXKQ8WVXH5N4T2M9R7C3DGG" }), [finding()]);
+    engine.process(callMeta(), [finding()]);
+    engine.process(callMeta({ id: "01JZXKQ8WVXH5N4T2M9R7C3DFF" }), [finding()]);
+    engine.process(callMeta({ id: "01JZXKQ8WVXH5N4T2M9R7C3DGG" }), [finding()]);
     expect(alerts.length).toBe(1);
     const events = listLeakEvents(store);
     expect(events.length).toBe(1);
@@ -52,15 +52,15 @@ describe("AlertEngine", () => {
   });
 
   test("same fingerprint in a new session re-alerts, styled seen-before", () => {
-    engine.process(exchangeMeta(), [finding()]);
-    engine.process(exchangeMeta({ sessionId: "sess-2" }), [finding()]);
+    engine.process(callMeta(), [finding()]);
+    engine.process(callMeta({ sessionId: "sess-2" }), [finding()]);
     expect(alerts.length).toBe(2);
     expect(alerts[0]?.seenBefore).toBe(false);
     expect(alerts[1]?.seenBefore).toBe(true);
   });
 
   test("possible tier records the event but never alerts", () => {
-    engine.process(exchangeMeta(), [finding({ tier: "possible", secretType: "generic-api-key" })]);
+    engine.process(callMeta(), [finding({ tier: "possible", secretType: "generic-api-key" })]);
     expect(alerts.length).toBe(0);
     const events = listLeakEvents(store);
     expect(events.length).toBe(1);
@@ -68,7 +68,7 @@ describe("AlertEngine", () => {
   });
 
   test("alert copy names type, agent, destination, states data already sent, includes id prefix", () => {
-    engine.process(exchangeMeta(), [finding()]);
+    engine.process(callMeta(), [finding()]);
     const a = alerts[0]!;
     expect(a.title).toContain("aws-access-key-id");
     expect(a.body).toContain("claude-code");
@@ -79,22 +79,22 @@ describe("AlertEngine", () => {
   });
 
   test("destination's own key alerts with the annotation", () => {
-    engine.process(exchangeMeta(), [finding({ destinationOwnKey: true })]);
+    engine.process(callMeta(), [finding({ destinationOwnKey: true })]);
     expect(alerts.length).toBe(1);
     expect(alerts[0]!.body.toLowerCase()).toContain("this destination's own");
   });
 
   test("mid-session model switch does not re-alert (dedup keys on provider)", () => {
-    engine.process(exchangeMeta({ model: "claude-opus-4-8" }), [finding()]);
+    engine.process(callMeta({ model: "claude-opus-4-8" }), [finding()]);
     engine.process(
-      exchangeMeta({ id: "01JZXKQ8WVXH5N4T2M9R7C3DHH", model: "claude-sonnet-5" }),
+      callMeta({ id: "01JZXKQ8WVXH5N4T2M9R7C3DHH", model: "claude-sonnet-5" }),
       [finding()],
     );
     expect(alerts.length).toBe(1);
   });
 
-  test("two distinct secrets in one exchange fire two alerts", () => {
-    engine.process(exchangeMeta(), [
+  test("two distinct secrets in one call fire two alerts", () => {
+    engine.process(callMeta(), [
       finding(),
       finding({ fingerprint: "fp-other", secretType: "github-pat", detector: "github-pat" }),
     ]);

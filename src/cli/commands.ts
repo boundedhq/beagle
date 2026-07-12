@@ -106,13 +106,13 @@ export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null):
   }
   const store = openStore(stateDir);
   if (isStoreError(store)) return lines.concat(store.error).join("\n");
-  const exchanges = store?.countExchanges() ?? 0;
+  const calls = store?.countCalls() ?? 0;
   const leaks = store?.countLeakEvents() ?? 0;
   store?.close();
   const dbPath = join(stateDir, "beagle.db");
   const sizeMb = existsSync(dbPath) ? (statSync(dbPath).size / (1 << 20)).toFixed(1) : "0.0";
   const cfg = loadConfig(stateDir);
-  lines.push(`calls: ${exchanges} · leaks: ${leaks} · store: ${sizeMb} MB`);
+  lines.push(`calls: ${calls} · leaks: ${leaks} · store: ${sizeMb} MB`);
   lines.push(
     `retention: ${cfg.payloadWindowDays}d / ${cfg.sizeCapMB} MB payloads · ${cfg.eventWindowDays}d leak events`,
   );
@@ -136,7 +136,7 @@ export function cmdSearch(stateDir: string, term: string): string {
     `found in ${hits.length} call${hits.length === 1 ? "" : "s"} across ${sessions.size} session${sessions.size === 1 ? "" : "s"}:`,
   ];
   for (const h of hits) {
-    lines.push(`  ${h.exchangeId.slice(0, 8)}  ${new Date(h.tsRequest).toISOString()}  session ${clean(h.sessionId).slice(0, 8)}`);
+    lines.push(`  ${h.callId.slice(0, 8)}  ${new Date(h.tsRequest).toISOString()}  session ${clean(h.sessionId).slice(0, 8)}`);
   }
   return lines.join("\n");
 }
@@ -153,7 +153,7 @@ export function cmdLeaks(stateDir: string): string {
     const tier = e.confidenceTier === "structured" ? "" : " (possible)";
     lines.push(
       `  ${new Date(e.firstTs).toISOString()}  ${clean(e.secretType)}${tier} → ${clean(e.destination)}` +
-        `  ×${e.occurrences}${e.firstExchange ? `  first: ${e.firstExchange.slice(0, 8)}` : ""}`,
+        `  ×${e.occurrences}${e.firstCall ? `  first: ${e.firstCall.slice(0, 8)}` : ""}`,
     );
   }
   return lines.join("\n");
@@ -162,20 +162,20 @@ export function cmdLeaks(stateDir: string): string {
 export function cmdShow(stateDir: string, idPrefix: string): string {
   const store = openStore(stateDir);
   if (isStoreError(store)) return store.error;
-  const ex = store?.getExchange(idPrefix) ?? null;
+  const call = store?.getCall(idPrefix) ?? null;
   store?.close();
-  if (!ex) return `no call matches '${idPrefix}' (prefix may be ambiguous or unknown).`;
+  if (!call) return `no call matches '${idPrefix}' (prefix may be ambiguous or unknown).`;
   const lines = [
-    `call ${ex.id}`,
-    `  ${clean(ex.agent ?? "?")} → ${clean(ex.provider ?? "?")}${ex.model ? `/${clean(ex.model)}` : ""}  ${clean(ex.endpoint ?? "")}`,
-    `  at ${new Date(ex.tsRequest).toISOString()}  status ${ex.status ?? "?"}  tokens ${ex.tokensIn ?? "?"}→${ex.tokensOut ?? "?"}`,
-    `  session ${ex.sessionId.slice(0, 8)} (keyed by ${ex.sessionTier})  run ${clean(ex.runId)}`,
-    `  summary: ${clean(ex.summary ?? "—")}`,
+    `call ${call.id}`,
+    `  ${clean(call.agent ?? "?")} → ${clean(call.provider ?? "?")}${call.model ? `/${clean(call.model)}` : ""}  ${clean(call.endpoint ?? "")}`,
+    `  at ${new Date(call.tsRequest).toISOString()}  status ${call.status ?? "?"}  tokens ${call.tokensIn ?? "?"}→${call.tokensOut ?? "?"}`,
+    `  session ${call.sessionId.slice(0, 8)} (keyed by ${call.sessionTier})  run ${clean(call.runId)}`,
+    `  summary: ${clean(call.summary ?? "—")}`,
   ];
-  if (ex.scanState !== "ok") {
+  if (call.scanState !== "ok") {
     lines.push("  ⚠ scan timed out — treated as unverified, not clean");
   }
-  if (ex.captureState !== "ok") {
+  if (call.captureState !== "ok") {
     lines.push("  ⚠ capture truncated — the stream to the agent was complete; the stored copy is not");
   }
   return lines.join("\n");

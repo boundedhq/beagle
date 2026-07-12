@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionResolver } from "../src/core/session/resolver";
 import { Store } from "../src/core/store/store";
-import type { Message } from "../src/core/exchange";
+import type { Message } from "../src/core/call";
 
 const U = (c: string): Message => ({ role: "user", content: c });
 const A = (c: string): Message => ({ role: "assistant", content: c });

@@ -1,7 +1,7 @@
 // Format parsers (non-core, R3): they drive the readable view and tier-2
 // session keying, never the security path. Malformed input degrades to null
 // — capture and detection don't depend on these.
-import type { Message } from "../core/exchange";
+import type { Message } from "../core/call";
 
 export type Format = "anthropic-messages" | "openai-chat" | "openai-responses" | "unknown";
 

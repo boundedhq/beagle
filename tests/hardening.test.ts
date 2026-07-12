@@ -80,7 +80,7 @@ describe("exclusions enforced before the write queue (R11)", () => {
     // Simulated at the store level: the daemon drops before insert; here we
     // assert the store has no leftover when nothing is inserted.
     const store = Store.open(tmp());
-    expect(store.countExchanges()).toBe(0);
+    expect(store.countCalls()).toBe(0);
     store.close();
   });
 });
@@ -96,7 +96,7 @@ describe("corrupt DB quarantine (§6.6)", () => {
     expect(readdirSync(join(dir, "quarantine")).length).toBeGreaterThan(0);
     // a fresh store now opens cleanly
     const store = Store.open(dir);
-    expect(store.countExchanges()).toBe(0);
+    expect(store.countCalls()).toBe(0);
     store.close();
   });
 
@@ -104,13 +104,13 @@ describe("corrupt DB quarantine (§6.6)", () => {
     const dir = tmp();
     writeFileSync(join(dir, "beagle.db"), "corrupt");
     const store = Store.openOrRecover(dir);
-    store.insertExchange({
+    store.insertCall({
       id: "01JZZZZZZZZZZZZZZZZZZZZZZZZ", sessionId: "s", runId: "r", source: "wire",
       endpoint: "/", tsRequest: Date.now(), scanState: "ok", captureState: "ok",
       sessionTier: "run", requestBody: null, requestHeaders: null, responseBody: null,
       responseHeaders: null, sseRaw: null, searchText: "x",
     });
-    expect(store.countExchanges()).toBe(1);
+    expect(store.countCalls()).toBe(1);
     store.close();
   });
 });

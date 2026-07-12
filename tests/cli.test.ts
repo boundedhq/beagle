@@ -4,14 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cmdLeaks, cmdSearch, cmdShow, cmdStatus } from "../src/cli/commands";
 import { buildRunEnv, AGENTS } from "../src/cli/agents";
-import { Store, type ExchangeRecord } from "../src/core/store/store";
+import { Store, type CallRecord } from "../src/core/store/store";
 import { ulid } from "../src/core/store/ulid";
 
-function seed(stateDir: string): { exId: string } {
+function seed(stateDir: string): { callId: string } {
   const store = Store.open(stateDir);
-  const exId = ulid();
-  const ex: ExchangeRecord = {
-    id: exId, sessionId: "s1", runId: "r1", source: "wire",
+  const callId = ulid();
+  const call: CallRecord = {
+    id: callId, sessionId: "s1", runId: "r1", source: "wire",
     agent: "claude-code", provider: "anthropic", model: "claude-sonnet-5",
     endpoint: "/v1/messages", tsRequest: Date.now(), tsResponse: Date.now(),
     status: 200, tokensIn: 10, tokensOut: 5, bytesReq: 100, bytesResp: 50,
@@ -23,23 +23,23 @@ function seed(stateDir: string): { exId: string } {
     responseHeaders: [], sseRaw: null,
     searchText: "my password is hunter2 ok",
   };
-  store.insertExchange(ex);
+  store.insertCall(call);
   store.upsertLeakEvent({
     fingerprint: "fp1", sessionId: "s1", detector: "generic-api-key",
     secretType: "generic-api-key", severity: "medium", confidenceTier: "possible",
-    destination: "anthropic", exchangeId: exId, ts: Date.now(),
+    destination: "anthropic", callId: callId, ts: Date.now(),
   });
   store.close();
-  return { exId };
+  return { callId };
 }
 
 describe("CLI commands (headless loop, R12)", () => {
   let stateDir: string;
-  let exId: string;
+  let callId: string;
 
   beforeEach(() => {
     stateDir = mkdtempSync(join(tmpdir(), "beagle-cli-"));
-    exId = seed(stateDir).exId;
+    callId = seed(stateDir).callId;
   });
 
   test("search: definitive found-in-N answer", () => {
@@ -60,7 +60,7 @@ describe("CLI commands (headless loop, R12)", () => {
   });
 
   test("show: accepts id prefix, prints summary and metadata", () => {
-    const out = cmdShow(stateDir, exId.slice(0, 8));
+    const out = cmdShow(stateDir, callId.slice(0, 8));
     expect(out).toContain("claude-sonnet-5");
     expect(out).toContain("user asked to read files");
   });
@@ -73,7 +73,7 @@ describe("CLI commands (headless loop, R12)", () => {
   test("show: traffic-derived text is stripped of terminal escapes", () => {
     const store = Store.open(stateDir);
     const id = ulid();
-    store.insertExchange({
+    store.insertCall({
       id, sessionId: "s2", runId: "r1", source: "wire", agent: "claude-code",
       provider: "anthropic", model: "m", endpoint: "/v1/messages",
       tsRequest: Date.now(), scanState: "ok", captureState: "ok", sessionTier: "run",

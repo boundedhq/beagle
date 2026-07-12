@@ -6,7 +6,7 @@ import { connect } from "node:net";
 import { Daemon } from "../src/daemon/daemon";
 import { controlRequest } from "../src/daemon/control";
 import { Store } from "../src/core/store/store";
-import { listExchanges, listLeakEvents } from "../src/viewer/feed-query";
+import { listCalls, listLeakEvents } from "../src/viewer/feed-query";
 import type { AlertEvent } from "../src/core/alert/engine";
 import { createServer, type Server } from "node:net";
 
@@ -98,7 +98,7 @@ describe("Daemon end-to-end", () => {
       messages: [{ role: "user", content }],
     });
 
-  test("streaming exchange persists the raw SSE stream (sse_raw)", async () => {
+  test("streaming call persists the raw SSE stream (sse_raw)", async () => {
     // upstream in this rig returns a non-streamed JSON body, so drive a
     // streaming upstream to exercise the fidelity column.
     const streamServer = createServer((sock) => {
@@ -117,7 +117,7 @@ describe("Daemon end-to-end", () => {
     });
     await sendThroughProxy(daemon.proxyPort, "run-stream", requestBody("stream please"));
     // poll for the capture instead of guessing a delay
-    let hit: { exchangeId: string } | undefined;
+    let hit: { callId: string } | undefined;
     let store = Store.openReadOnly(stateDir);
     for (let i = 0; i < 40 && !hit; i++) {
       await Bun.sleep(50);
@@ -125,14 +125,14 @@ describe("Daemon end-to-end", () => {
       store = Store.openReadOnly(stateDir);
       hit = store.searchLiteral("stream please")[0];
     }
-    const ex = store.getExchange(hit!.exchangeId)!;
-    expect(ex.sseRaw).not.toBeNull();
-    expect(new TextDecoder().decode(ex.sseRaw!)).toContain("event: content_block_delta");
+    const call = store.getCall(hit!.callId)!;
+    expect(call.sseRaw).not.toBeNull();
+    expect(new TextDecoder().decode(call.sseRaw!)).toContain("event: content_block_delta");
     store.close();
     streamServer.close();
   });
 
-  test("captures a full exchange: session, parse, summary, search text", async () => {
+  test("captures a full call: session, parse, summary, search text", async () => {
     const resp = await sendThroughProxy(daemon.proxyPort, "run-e2e", requestBody("read main.ts"));
     expect(resp).toContain("done!");
     await Bun.sleep(150);
@@ -140,15 +140,53 @@ describe("Daemon end-to-end", () => {
     const store = Store.openReadOnly(stateDir);
     const hits = store.searchLiteral("read main.ts");
     expect(hits.length).toBe(1);
-    const ex = store.getExchange(hits[0]!.exchangeId)!;
-    expect(ex.provider).toBe("anthropic");
-    expect(ex.model).toBe("claude-sonnet-5");
-    expect(ex.sessionTier).toBe("prefix");
-    expect(ex.tokensOut).toBe(3);
-    expect(ex.scanState).toBe("ok");
+    const call = store.getCall(hits[0]!.callId)!;
+    expect(call.provider).toBe("anthropic");
+    expect(call.model).toBe("claude-sonnet-5");
+    expect(call.sessionTier).toBe("prefix");
+    expect(call.tokensOut).toBe(3);
+    expect(call.scanState).toBe("ok");
     // response text also searchable
     expect(store.searchLiteral("done!").length).toBe(1);
     store.close();
+  });
+
+  test("a captured call is pushed to an open viewer as an SSE 'call' event", async () => {
+    // Guards the daemon->viewer->app.js contract: the live feed event MUST be
+    // named "call" (app.js listens for exactly that). A one-sided rename of the
+    // event name would slip past tsc (app.js is buildless) — this catches it.
+    const ui = await controlRequest(daemon.socketPath, { cmd: "ui" });
+    const url = new URL((ui.data as { url: string }).url);
+    const sess = await fetch(`${url.origin}/api/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ boot: url.searchParams.get("boot") }),
+    });
+    const cred = ((await sess.json()) as { credential: string }).credential;
+
+    // Subscribe to the live feed BEFORE driving traffic so the push can't be missed.
+    const stream = await fetch(`${url.origin}/api/stream`, { headers: { "x-beagle-token": cred } });
+    const reader = stream.body!.getReader();
+    const dec = new TextDecoder();
+
+    await sendThroughProxy(daemon.proxyPort, "run-e2e", requestBody("push me live"));
+
+    // Read frames until the pushed event arrives; bounded so a miss fails, not hangs.
+    const timer = setTimeout(() => void reader.cancel(), 3000);
+    let buf = "";
+    try {
+      while (!buf.includes("event: call")) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+      }
+    } finally {
+      clearTimeout(timer);
+      await reader.cancel().catch(() => {});
+    }
+    expect(buf).toContain("event: call"); // the renamed event, not "exchange"
+    expect(buf).not.toContain("event: exchange");
+    expect(buf).toContain('"summary"'); // frame carries the feed row
   });
 
   test("leak in request body alerts in real time and records the event", async () => {
@@ -190,18 +228,18 @@ describe("Daemon end-to-end", () => {
     const store = Store.openReadOnly(stateDir);
     const events = listLeakEvents(store);
     expect(events.length).toBe(1);
-    expect(events[0]!.occurrences).toBe(2); // both exchanges marked
+    expect(events[0]!.occurrences).toBe(2); // both calls marked
     const sessions = new Set(store.searchLiteral("AKIAZQ3DRSTUVWXY2345").map((h) => h.sessionId));
     expect(sessions.size).toBe(1);
     store.close();
   });
 
-  test("auth header is scrubbed in the persisted exchange", async () => {
+  test("auth header is scrubbed in the persisted call", async () => {
     await sendThroughProxy(daemon.proxyPort, "run-e2e", requestBody("hello"));
     await Bun.sleep(150);
     const store = Store.openReadOnly(stateDir);
-    const ex = store.getExchange(store.searchLiteral("hello")[0]!.exchangeId)!;
-    const persisted = JSON.stringify(ex.requestHeaders);
+    const call = store.getCall(store.searchLiteral("hello")[0]!.callId)!;
+    const persisted = JSON.stringify(call.requestHeaders);
     expect(persisted).not.toContain("sk-ant-realkey");
     expect(persisted).toContain("[AUTH:anthropic:");
     store.close();
@@ -226,7 +264,7 @@ describe("Daemon end-to-end", () => {
 
     const status = await controlRequest(daemon.socketPath, { cmd: "status" });
     expect(status.ok).toBe(true);
-    expect((status.data as { exchanges: number }).exchanges).toBeGreaterThan(0);
+    expect((status.data as { calls: number }).calls).toBeGreaterThan(0);
     store.close();
   });
 
@@ -242,8 +280,8 @@ describe("Daemon end-to-end", () => {
     expect(listLeakEvents(store).length).toBe(1);
     // ...but the raw secret is gone from the stored payload and the index
     expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
-    const anyEx = listExchanges(store, 10).find((e) => e.hasLeak);
-    const full = store.getExchange(anyEx!.id)!;
+    const anyEx = listCalls(store, 10).find((e) => e.hasLeak);
+    const full = store.getCall(anyEx!.id)!;
     expect(new TextDecoder().decode(full.requestBody!)).toContain("[REDACTED:aws-access-key-id:");
     store.close();
   });

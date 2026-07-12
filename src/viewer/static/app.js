@@ -38,7 +38,7 @@ const api = {
 // ---- components ----
 
 function App() {
-  const [exchanges, setExchanges] = useState([]);
+  const [calls, setCalls] = useState([]);
   const [leaks, setLeaks] = useState([]);
   const [leaksOnly, setLeaksOnly] = useState(false);
   const [sessionFilter, setSessionFilter] = useState(null);
@@ -49,7 +49,7 @@ function App() {
   const searchBox = useRef(null);
 
   useEffect(() => {
-    api.get("/api/feed").then(setExchanges);
+    api.get("/api/feed").then(setCalls);
     api.get("/api/leaks").then(setLeaks);
     // fetch-SSE: EventSource can't send the credential header (§6.8)
     let stop = false;
@@ -83,11 +83,11 @@ function App() {
       const dataLine = lines.find((l) => l.startsWith("data:"))?.slice(5).trim();
       if (!ev || !dataLine) return;
       const data = JSON.parse(dataLine);
-      if (ev === "exchange") setExchanges((xs) => [data, ...xs]);
+      if (ev === "call") setCalls((xs) => [data, ...xs]);
       if (ev === "alert") {
         setBanner(data);
         api.get("/api/leaks").then(setLeaks);
-        api.get("/api/feed").then(setExchanges);
+        api.get("/api/feed").then(setCalls);
       }
     }
     return () => { stop = true; };
@@ -100,7 +100,7 @@ function App() {
     setSearchHits(term ? await api.post("/api/search", { term }) : null);
   }
 
-  const visible = exchanges.filter(
+  const visible = calls.filter(
     (x) => (!leaksOnly || x.hasLeak) && (!sessionFilter || x.sessionId === sessionFilter),
   );
 
@@ -178,7 +178,7 @@ function Detail({ id }) {
   const [detail, setDetail] = useState(null);
   const [raw, setRaw] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
-  useEffect(() => { api.get(`/api/exchange/${id}`).then(setDetail); }, [id]);
+  useEffect(() => { api.get(`/api/call/${id}`).then(setDetail); }, [id]);
   if (!detail) return html`<div class="detail">loading…</div>`;
   if (detail.error) return html`<div class="detail">${detail.error}</div>`;
 
@@ -311,8 +311,8 @@ function SearchResults({ hits, term, onClear, onOpen }) {
       ${hits.map(
         (hit) => html`
           <div class="hit">
-            <a href="#" onClick=${(e) => { e.preventDefault(); onOpen(hit.exchangeId); }}>
-              ${hit.exchangeId.slice(0, 8)}
+            <a href="#" onClick=${(e) => { e.preventDefault(); onOpen(hit.callId); }}>
+              ${hit.callId.slice(0, 8)}
             </a>
             ${" "}${new Date(hit.tsRequest).toLocaleString()} · session ${hit.sessionId.slice(0, 8)}
             · <mark>${term}</mark>
@@ -323,7 +323,7 @@ function SearchResults({ hits, term, onClear, onOpen }) {
   `;
 }
 
-// Plain-language read of HOW this exchange was grouped into its session (the
+// Plain-language read of HOW this call was grouped into its session (the
 // resolver's tier), with the confidence that grouping carries — so the label
 // says what it means, not an internal tag like "conv-id".
 function groupedBy(tier) {

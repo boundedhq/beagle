@@ -3,13 +3,13 @@
 // by construction — hand-decoding proto has no place in the zero-dep budget.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import { mapOtlpLogsToExchanges, type OtelExchange } from "../../parsers/otlp-map";
+import { mapOtlpLogsToCalls, type OtelCall } from "../../parsers/otlp-map";
 
 export interface OtlpReceiverOptions {
   token: string;
   agent?: string;
   provider?: string;
-  onExchanges: (exchanges: OtelExchange[]) => void;
+  onCalls: (calls: OtelCall[]) => void;
   maxBodyBytes?: number;
 }
 
@@ -76,14 +76,14 @@ export class OtlpReceiver {
         res.writeHead(400).end("invalid json");
         return;
       }
-      const exchanges = mapOtlpLogsToExchanges(payload, {
+      const calls = mapOtlpLogsToCalls(payload, {
         agent: this.opts.agent ?? "claude-code",
         provider: this.opts.provider ?? "anthropic",
       });
       // Only deliver records whose embedded run token matches (defense in
       // depth: the header already gated the request).
-      const verified = exchanges.filter((e) => !e.runToken || this.tokenOk(e.runToken));
-      if (verified.length > 0) this.opts.onExchanges(verified);
+      const verified = calls.filter((e) => !e.runToken || this.tokenOk(e.runToken));
+      if (verified.length > 0) this.opts.onCalls(verified);
       // OTLP success envelope.
       res.writeHead(200, { "content-type": "application/json" }).end("{}");
     });

@@ -5,7 +5,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { Store } from "../core/store/store";
-import { listExchanges, listLeakEvents } from "./feed-query";
+import { listCalls, listLeakEvents } from "./feed-query";
 import { buildDetail, leakSpansFor } from "./detail";
 // Statics embedded at build time (ships-what's-in-repo, and the compiled
 // binary has no filesystem view of the repo).
@@ -106,7 +106,7 @@ export class ViewerServer {
     if (wasRunning) this.onStop?.();
   }
 
-  /** Push a live event (new exchange, alert) to any open tabs. */
+  /** Push a live event (new call, alert) to any open tabs. */
   broadcast(type: string, data: unknown): void {
     const frame = `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
     for (const c of this.sseClients) c.write(frame);
@@ -207,13 +207,13 @@ export class ViewerServer {
     let deferredClose = false;
     try {
       if (path === "/api/feed" && req.method === "GET") {
-        this.json(res, 200, listExchanges(store, 500));
-      } else if (path.startsWith("/api/exchange/") && req.method === "GET") {
-        const ex = store.getExchange(path.slice("/api/exchange/".length));
-        if (!ex) return this.json(res, 404, { error: "no such call" });
+        this.json(res, 200, listCalls(store, 500));
+      } else if (path.startsWith("/api/call/") && req.method === "GET") {
+        const call = store.getCall(path.slice("/api/call/".length));
+        if (!call) return this.json(res, 404, { error: "no such call" });
         // Reassemble the response, structure the request, and recover the
         // secret strings to highlight (detail.ts, UI fixes 1 + 2).
-        this.json(res, 200, buildDetail(ex, leakSpansFor(store, ex.id)));
+        this.json(res, 200, buildDetail(call, leakSpansFor(store, call.id)));
       } else if (path === "/api/search" && req.method === "POST") {
         deferredClose = true;
         void this.readJson(req).then((body) => {

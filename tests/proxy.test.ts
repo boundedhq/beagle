@@ -4,7 +4,7 @@ import { gzipSync } from "node:zlib";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ProxyServer, type CapturedExchange } from "../src/core/proxy/server";
+import { ProxyServer, type CapturedCall } from "../src/core/proxy/server";
 import { RunRegistry } from "../src/core/proxy/registry";
 import { Store } from "../src/core/store/store";
 
@@ -80,25 +80,25 @@ describe("proxy", () => {
   let registry: RunRegistry;
   let proxy: ProxyServer;
   let upstream: FakeUpstream;
-  let exchanges: CapturedExchange[];
+  let calls: CapturedCall[];
   let scanned: Uint8Array[];
 
   beforeEach(async () => {
     store = Store.open(mkdtempSync(join(tmpdir(), "beagle-proxy-")));
     registry = new RunRegistry(store);
-    exchanges = [];
+    calls = [];
     scanned = [];
     // Bind to THIS test's array by value: a prior test's proxy could still be
-    // finishing a late capture, and onExchange closing over the `exchanges`
+    // finishing a late capture, and onCall closing over the `calls`
     // variable would otherwise push it into the reassigned array.
-    const myExchanges = exchanges;
+    const myCalls = calls;
     upstream = await startFakeUpstream((_raw, sock) => {
       sock.write(OK_JSON('{"ok":true}'));
     });
     proxy = new ProxyServer({
       registry,
       scan: (bytes) => { scanned.push(bytes); return new Promise(() => {}); }, // never resolves
-      onExchange: (ex) => myExchanges.push(ex),
+      onCall: (call) => myCalls.push(call),
       captureBufferCap: 1 << 20,
     });
     await proxy.listen(0);
@@ -202,14 +202,14 @@ describe("proxy", () => {
     expect(new TextDecoder().decode(scanned[0]!)).toBe(body);
   });
 
-  test("captures exchange with auth header scrubbed, never the raw credential", async () => {
+  test("captures call with auth header scrubbed, never the raw credential", async () => {
     register();
     const body = "{}";
     await sendRaw(proxy.port,
       `POST /run/run-abc/v1/messages HTTP/1.1\r\nHost: h\r\nX-Api-Key: sk-ant-supersecret\r\nContent-Length: 2\r\n\r\n${body}`);
     await Bun.sleep(50);
-    expect(exchanges.length).toBe(1);
-    const headers = exchanges[0]!.request.headers!;
+    expect(calls.length).toBe(1);
+    const headers = calls[0]!.request.headers!;
     const auth = headers.find(([n]) => n.toLowerCase() === "x-api-key")!;
     expect(auth[1]).toMatch(/^\[AUTH:anthropic:[0-9a-f]{8}\]$/);
     expect(JSON.stringify(headers)).not.toContain("supersecret");
@@ -231,7 +231,7 @@ describe("proxy", () => {
     expect(resp.includes(payload)).toBe(true);
     await Bun.sleep(50);
     // capture got the decoded form
-    expect(new TextDecoder().decode(exchanges[0]!.response.bodyBytes!)).toContain("decoded-text");
+    expect(new TextDecoder().decode(calls[0]!.response.bodyBytes!)).toContain("decoded-text");
   });
 
   test("streams chunked responses incrementally (first chunk before upstream ends)", async () => {
@@ -279,8 +279,8 @@ describe("proxy", () => {
     register({ upstream: `http://127.0.0.1:${upstream.port}` });
     await sendRaw(proxy.port,
       `POST /run/run-abc/v1/messages HTTP/1.1\r\nHost: h\r\nContent-Length: 2\r\n\r\n{}`);
-    for (let i = 0; i < 40 && exchanges.length === 0; i++) await Bun.sleep(20);
-    const raw = exchanges[0]!.response.sseRaw;
+    for (let i = 0; i < 40 && calls.length === 0; i++) await Bun.sleep(20);
+    const raw = calls[0]!.response.sseRaw;
     expect(raw).toBeDefined();
     const rawText = new TextDecoder().decode(raw!);
     // exact event framing preserved (not reassembled into plain text)
@@ -294,7 +294,7 @@ describe("proxy", () => {
     await sendRaw(proxy.port,
       `POST /run/run-abc/v1/messages HTTP/1.1\r\nHost: h\r\nContent-Length: 2\r\n\r\n{}`);
     await Bun.sleep(50);
-    expect(exchanges[0]!.response.sseRaw).toBeUndefined();
+    expect(calls[0]!.response.sseRaw).toBeUndefined();
   });
 
   test("marks capture truncated past the buffer cap, stream unaffected", async () => {
@@ -302,7 +302,7 @@ describe("proxy", () => {
     proxy = new ProxyServer({
       registry,
       scan: () => new Promise(() => {}),
-      onExchange: (ex) => exchanges.push(ex),
+      onCall: (call) => calls.push(call),
       captureBufferCap: 10, // tiny cap
     });
     await proxy.listen(0);
@@ -311,7 +311,7 @@ describe("proxy", () => {
       `POST /run/run-abc/v1/messages HTTP/1.1\r\nHost: h\r\nContent-Length: 2\r\n\r\n{}`);
     expect(resp.toString()).toContain('{"ok":true}'); // client got everything
     await Bun.sleep(50);
-    expect(exchanges[0]!.meta.captureState).toBe("truncated");
+    expect(calls[0]!.meta.captureState).toBe("truncated");
   });
 
   test("upstream 500 passes through unchanged", async () => {
@@ -350,9 +350,9 @@ describe("proxy", () => {
     });
     await Bun.sleep(100);
     expect(upstreamClosed).toBe(true); // cancel propagated
-    expect(exchanges.length).toBe(1);  // partial capture kept
-    expect(exchanges[0]!.meta.captureState).toBe("truncated");
-    expect(new TextDecoder().decode(exchanges[0]!.response.bodyBytes!)).toContain("partial");
+    expect(calls.length).toBe(1);  // partial capture kept
+    expect(calls[0]!.meta.captureState).toBe("truncated");
+    expect(new TextDecoder().decode(calls[0]!.response.bodyBytes!)).toContain("partial");
     void upstreamSock;
   });
 
@@ -361,7 +361,7 @@ describe("proxy", () => {
     proxy = new ProxyServer({
       registry,
       scan: () => Promise.reject(new Error("scanner exploded")),
-      onExchange: (ex) => exchanges.push(ex),
+      onCall: (call) => calls.push(call),
       captureBufferCap: 1 << 20,
     });
     await proxy.listen(0);

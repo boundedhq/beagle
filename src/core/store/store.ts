@@ -12,7 +12,12 @@ export { SCHEMA_VERSION };
 
 export class StoreVersionError extends Error {}
 
-export interface ExchangeRecord {
+// Naming note: the domain type is `Call`, but the physical SQLite table stays
+// `exchanges` (and its columns `exchange_id` / `first_exchange`). The rename to
+// "call" was UI/code-only — keeping the schema names avoids a data migration.
+// The SQL below aliases the columns back to the Call shape (e.g. `exchange_id
+// AS callId`), so the storage layer and the type stay decoupled on purpose.
+export interface CallRecord {
   id: string;
   sessionId: string;
   runId: string;
@@ -49,7 +54,7 @@ export interface LeakEventInput {
   severity: string;
   confidenceTier: string;
   destination: string;
-  exchangeId: string;
+  callId: string;
   ts: number;
   spanStart?: number; // char span of the secret in the request body (R7 highlight)
   spanEnd?: number;
@@ -67,7 +72,7 @@ export type PurgeSpec =
   | { kind: "before"; ts: number };
 
 export interface SearchHit {
-  exchangeId: string;
+  callId: string;
   sessionId: string;
   tsRequest: number;
 }
@@ -146,31 +151,31 @@ export class Store {
     }
   }
 
-  insertExchange(ex: ExchangeRecord): void {
+  insertCall(call: CallRecord): void {
     this.inTx(() => {
       this.db.run(
         `INSERT INTO exchanges (id, session_id, run_id, source, agent, provider, model,
            endpoint, ts_request, ts_response, status, tokens_in, tokens_out,
            bytes_req, bytes_resp, summary, scan_state, capture_state, session_tier, redacted)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [ex.id, ex.sessionId, ex.runId, ex.source, ex.agent ?? null, ex.provider ?? null,
-         ex.model ?? null, ex.endpoint ?? null, ex.tsRequest, ex.tsResponse ?? null,
-         ex.status ?? null, ex.tokensIn ?? null, ex.tokensOut ?? null, ex.bytesReq ?? null,
-         ex.bytesResp ?? null, ex.summary ?? null, ex.scanState, ex.captureState, ex.sessionTier,
-         ex.redacted ? 1 : null],
+        [call.id, call.sessionId, call.runId, call.source, call.agent ?? null, call.provider ?? null,
+         call.model ?? null, call.endpoint ?? null, call.tsRequest, call.tsResponse ?? null,
+         call.status ?? null, call.tokensIn ?? null, call.tokensOut ?? null, call.bytesReq ?? null,
+         call.bytesResp ?? null, call.summary ?? null, call.scanState, call.captureState, call.sessionTier,
+         call.redacted ? 1 : null],
       );
       this.db.run(
         `INSERT INTO payloads (exchange_id, request_body, request_headers,
            response_body, response_headers, sse_raw) VALUES (?,?,?,?,?,?)`,
-        [ex.id, ex.requestBody, ex.requestHeaders ? JSON.stringify(ex.requestHeaders) : null,
-         ex.responseBody, ex.responseHeaders ? JSON.stringify(ex.responseHeaders) : null, ex.sseRaw],
+        [call.id, call.requestBody, call.requestHeaders ? JSON.stringify(call.requestHeaders) : null,
+         call.responseBody, call.responseHeaders ? JSON.stringify(call.responseHeaders) : null, call.sseRaw],
       );
       this.db.run(`INSERT INTO exchanges_fts (content, exchange_id) VALUES (?,?)`,
-        [ex.searchText, ex.id]);
+        [call.searchText, call.id]);
     });
   }
 
-  getExchange(idOrPrefix: string): ExchangeRecord | null {
+  getCall(idOrPrefix: string): CallRecord | null {
     const rows = this.db.all<Record<string, unknown>>(
       `SELECT e.*, p.request_body, p.request_headers, p.response_body,
               p.response_headers, p.sse_raw
@@ -179,12 +184,12 @@ export class Store {
       [escapeLike(idOrPrefix) + "%"],
     );
     if (rows.length !== 1) return null;
-    return rowToExchange(rows[0]!);
+    return rowToCall(rows[0]!);
   }
 
   searchLiteral(term: string): SearchHit[] {
     return this.db.all<SearchHit>(
-      `SELECT f.exchange_id AS exchangeId, e.session_id AS sessionId,
+      `SELECT f.exchange_id AS callId, e.session_id AS sessionId,
               e.ts_request AS tsRequest
        FROM exchanges_fts f JOIN exchanges e ON e.id = f.exchange_id
        WHERE f.content LIKE ? ESCAPE '\\'
@@ -217,12 +222,12 @@ export class Store {
            severity, confidence_tier, destination, occurrences, first_ts, last_ts, first_exchange)
          VALUES (?,?,?,?,?,?,?,?,1,?,?,?)`,
         [eventId, input.fingerprint, input.sessionId, input.detector, input.secretType,
-         input.severity, input.confidenceTier, input.destination, input.ts, input.ts, input.exchangeId],
+         input.severity, input.confidenceTier, input.destination, input.ts, input.ts, input.callId],
       );
     }
     this.db.run(
       `INSERT OR IGNORE INTO leak_occurrences (event_id, exchange_id, span_start, span_end) VALUES (?,?,?,?)`,
-      [eventId, input.exchangeId, input.spanStart ?? null, input.spanEnd ?? null],
+      [eventId, input.callId, input.spanStart ?? null, input.spanEnd ?? null],
     );
     return { fresh, eventId };
   }
@@ -233,10 +238,10 @@ export class Store {
     return this.db.all<T>(sql, params);
   }
 
-  countExchanges(): number { return this.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM exchanges`)?.n ?? 0; }
+  countCalls(): number { return this.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM exchanges`)?.n ?? 0; }
   countLeakEvents(): number { return this.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM leak_events`)?.n ?? 0; }
 
-  updateExchangeScanState(id: string, state: "ok" | "incomplete"): void {
+  updateCallScanState(id: string, state: "ok" | "incomplete"): void {
     this.db.run(`UPDATE exchanges SET scan_state=? WHERE id=?`, [state, id]);
   }
 
@@ -332,7 +337,7 @@ export class Store {
   sweep(policy: SweepPolicy): void {
     const now = Date.now();
     if (Number.isFinite(policy.payloadWindowMs)) {
-      this.deleteExchangesWhere("ts_request < ?", [now - policy.payloadWindowMs]);
+      this.deleteCallsWhere("ts_request < ?", [now - policy.payloadWindowMs]);
     }
     if (Number.isFinite(policy.sizeCapBytes)) {
       // Oldest-first eviction until payload bytes fit the cap.
@@ -351,7 +356,7 @@ export class Store {
       }
       if (evict.length > 0) {
         const qs = evict.map(() => "?").join(",");
-        this.deleteExchangesWhere(`id IN (${qs})`, evict);
+        this.deleteCallsWhere(`id IN (${qs})`, evict);
       }
     }
     if (Number.isFinite(policy.eventWindowMs)) {
@@ -368,13 +373,13 @@ export class Store {
 
   purge(spec: PurgeSpec): void {
     if (spec.kind === "all") {
-      this.deleteExchangesWhere("1=1", []);
+      this.deleteCallsWhere("1=1", []);
       this.db.run(`DELETE FROM leak_events`);
     } else if (spec.kind === "session") {
-      this.deleteExchangesWhere("session_id = ?", [spec.sessionId]);
+      this.deleteCallsWhere("session_id = ?", [spec.sessionId]);
       this.db.run(`DELETE FROM leak_events WHERE session_id = ?`, [spec.sessionId]);
     } else {
-      this.deleteExchangesWhere("ts_request < ?", [spec.ts]);
+      this.deleteCallsWhere("ts_request < ?", [spec.ts]);
     }
     this.db.exec("PRAGMA incremental_vacuum");
   }
@@ -391,11 +396,11 @@ export class Store {
     this.db.close();
   }
 
-  private deleteExchangesWhere(where: string, params: unknown[]): void {
-    this.inTx(() => this.deleteExchangesWhereInner(where, params));
+  private deleteCallsWhere(where: string, params: unknown[]): void {
+    this.inTx(() => this.deleteCallsWhereInner(where, params));
   }
 
-  private deleteExchangesWhereInner(where: string, params: unknown[]): void {
+  private deleteCallsWhereInner(where: string, params: unknown[]): void {
     // Manual leak-table cleanup (no FKs to exchanges — see schema note).
     this.db.run(
       `UPDATE leak_events SET first_exchange = NULL
@@ -443,7 +448,7 @@ function escapeLike(s: string): string {
   return s.replace(/[\\%_]/g, (c) => "\\" + c);
 }
 
-function rowToExchange(r: Record<string, unknown>): ExchangeRecord {
+function rowToCall(r: Record<string, unknown>): CallRecord {
   return {
     id: r.id as string,
     sessionId: r.session_id as string,

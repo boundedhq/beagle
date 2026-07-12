@@ -4,13 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ViewerServer } from "../src/viewer/server";
 import { findViewerSafetyViolations } from "../scripts/lint-viewer-safety";
-import { Store, type ExchangeRecord } from "../src/core/store/store";
+import { Store, type CallRecord } from "../src/core/store/store";
 import { ulid } from "../src/core/store/ulid";
 
 function seedStore(stateDir: string): string {
   const store = Store.open(stateDir);
   const id = ulid();
-  const ex: ExchangeRecord = {
+  const call: CallRecord = {
     id, sessionId: "s1", runId: "r1", source: "wire",
     agent: "claude-code", provider: "anthropic", model: "claude-sonnet-5",
     endpoint: "/v1/messages", tsRequest: Date.now(), tsResponse: Date.now(),
@@ -20,7 +20,7 @@ function seedStore(stateDir: string): string {
     responseBody: new TextEncoder().encode("{}"), responseHeaders: [], sseRaw: null,
     searchText: "hello secret-content world",
   };
-  store.insertExchange(ex);
+  store.insertCall(call);
   store.close();
   return id;
 }
@@ -29,11 +29,11 @@ describe("ViewerServer hardening (design §6.8)", () => {
   let stateDir: string;
   let viewer: ViewerServer;
   let url: string; // bootstrap URL with one-time token
-  let exId: string;
+  let callId: string;
 
   beforeEach(async () => {
     stateDir = mkdtempSync(join(tmpdir(), "beagle-viewer-"));
-    exId = seedStore(stateDir);
+    callId = seedStore(stateDir);
     viewer = new ViewerServer({ stateDir, idleTimeoutMs: 60_000 });
     url = await viewer.start();
   });
@@ -72,7 +72,7 @@ describe("ViewerServer hardening (design §6.8)", () => {
     expect(ok.status).toBe(200);
     const feed = (await ok.json()) as Array<{ id: string; summary: string }>;
     expect(feed.length).toBe(1);
-    expect(feed[0]!.id).toBe(exId);
+    expect(feed[0]!.id).toBe(callId);
   });
 
   test("non-local Origin is rejected (DNS-rebinding defense)", async () => {
@@ -145,9 +145,9 @@ describe("ViewerServer hardening (design §6.8)", () => {
     }
   });
 
-  test("exchange detail endpoint returns decoded payloads with credential", async () => {
+  test("call detail endpoint returns decoded payloads with credential", async () => {
     const cred = await getCredential();
-    const r = await fetch(`${origin()}/api/exchange/${exId}`, {
+    const r = await fetch(`${origin()}/api/call/${callId}`, {
       headers: { "x-beagle-token": cred },
     });
     expect(r.status).toBe(200);
