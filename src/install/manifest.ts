@@ -39,7 +39,7 @@ export class ChangeManifest {
     this.persist();
   }
 
-  removeFor(agent: string, undo: (e: ChangeEntry) => void): void {
+  removeFor(agent: string | null, undo: (e: ChangeEntry) => void): void {
     const keep: ChangeEntry[] = [];
     for (let i = this.entries.length - 1; i >= 0; i--) {
       const e = this.entries[i]!;
