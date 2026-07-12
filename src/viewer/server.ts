@@ -209,11 +209,11 @@ export class ViewerServer {
       if (path === "/api/feed" && req.method === "GET") {
         this.json(res, 200, listCalls(store, 500));
       } else if (path.startsWith("/api/call/") && req.method === "GET") {
-        const ex = store.getCall(path.slice("/api/call/".length));
-        if (!ex) return this.json(res, 404, { error: "no such call" });
+        const call = store.getCall(path.slice("/api/call/".length));
+        if (!call) return this.json(res, 404, { error: "no such call" });
         // Reassemble the response, structure the request, and recover the
         // secret strings to highlight (detail.ts, UI fixes 1 + 2).
-        this.json(res, 200, buildDetail(ex, leakSpansFor(store, ex.id)));
+        this.json(res, 200, buildDetail(call, leakSpansFor(store, call.id)));
       } else if (path === "/api/search" && req.method === "POST") {
         deferredClose = true;
         void this.readJson(req).then((body) => {

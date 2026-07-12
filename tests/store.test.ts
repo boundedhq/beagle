@@ -86,12 +86,12 @@ describe("Store lifecycle", () => {
     // Populate a real store, then rewind its on-disk schema to look like a v1
     // store (no v2 columns, user_version=1) so Store.open exercises migrate().
     const store = Store.open(dir);
-    const ex = fakeCall();
-    store.insertCall(ex);
+    const call = fakeCall();
+    store.insertCall(call);
     store.upsertLeakEvent({
       fingerprint: "fp1", sessionId: "sess-1", detector: "d", secretType: "t",
       severity: "high", confidenceTier: "structured",
-      destination: "anthropic/m", callId: ex.id, ts: Date.now(),
+      destination: "anthropic/m", callId: call.id, ts: Date.now(),
     });
     store.close();
 
@@ -106,7 +106,7 @@ describe("Store lifecycle", () => {
     const migrated = Store.open(dir);
     expect(migrated.pragma("user_version")).toBe(SCHEMA_VERSION);
     // Pre-migration rows survived.
-    expect(migrated.getCall(ex.id)?.provider).toBe("anthropic");
+    expect(migrated.getCall(call.id)?.provider).toBe("anthropic");
     expect(listLeakEvents(migrated).length).toBe(1);
     // The re-added columns now accept writes (the redact-on-capture flag).
     const ex2 = fakeCall({ redacted: true });
@@ -122,9 +122,9 @@ describe("Call write/read", () => {
 
   test("insert then read back full call with payload", () => {
     const store = Store.open(dir);
-    const ex = fakeCall();
-    store.insertCall(ex);
-    const got = store.getCall(ex.id);
+    const call = fakeCall();
+    store.insertCall(call);
+    const got = store.getCall(call.id);
     expect(got?.provider).toBe("anthropic");
     expect(new TextDecoder().decode(got!.requestBody!)).toContain("secret-xyz");
     expect(got?.requestHeaders).toEqual([["content-type", "application/json"]]);
@@ -133,9 +133,9 @@ describe("Call write/read", () => {
 
   test("getCall supports unambiguous id prefix", () => {
     const store = Store.open(dir);
-    const ex = fakeCall();
-    store.insertCall(ex);
-    expect(store.getCall(ex.id.slice(0, 8))?.id).toBe(ex.id);
+    const call = fakeCall();
+    store.insertCall(call);
+    expect(store.getCall(call.id.slice(0, 8))?.id).toBe(call.id);
     store.close();
   });
 
@@ -167,18 +167,18 @@ describe("Leak events", () => {
 
   test("upsert: first insert reports fresh, second same-key increments", () => {
     const store = Store.open(dir);
-    const ex = fakeCall();
-    store.insertCall(ex);
+    const call = fakeCall();
+    store.insertCall(call);
     const first = store.upsertLeakEvent({
       fingerprint: "fp1", sessionId: "sess-1", detector: "aws-access-key",
       secretType: "aws-key", severity: "high", confidenceTier: "structured",
-      destination: "anthropic/claude-sonnet-5", callId: ex.id, ts: Date.now(),
+      destination: "anthropic/claude-sonnet-5", callId: call.id, ts: Date.now(),
     });
     expect(first.fresh).toBe(true);
     const second = store.upsertLeakEvent({
       fingerprint: "fp1", sessionId: "sess-1", detector: "aws-access-key",
       secretType: "aws-key", severity: "high", confidenceTier: "structured",
-      destination: "anthropic/claude-sonnet-5", callId: ex.id, ts: Date.now(),
+      destination: "anthropic/claude-sonnet-5", callId: call.id, ts: Date.now(),
     });
     expect(second.fresh).toBe(false);
     const events = listLeakEvents(store);
@@ -189,11 +189,11 @@ describe("Leak events", () => {
 
   test("same fingerprint, new destination is a fresh event", () => {
     const store = Store.open(dir);
-    const ex = fakeCall();
-    store.insertCall(ex);
+    const call = fakeCall();
+    store.insertCall(call);
     const base = {
       fingerprint: "fp1", sessionId: "sess-1", detector: "d", secretType: "t",
-      severity: "high", confidenceTier: "structured", callId: ex.id, ts: Date.now(),
+      severity: "high", confidenceTier: "structured", callId: call.id, ts: Date.now(),
     };
     store.upsertLeakEvent({ ...base, destination: "anthropic/m" });
     const r = store.upsertLeakEvent({ ...base, destination: "openai/m" });
@@ -269,15 +269,15 @@ describe("Retention & purge", () => {
 
   test("panic purge erases everything including leak events and FTS", () => {
     const store = Store.open(dir);
-    const ex = fakeCall();
-    store.insertCall(ex);
+    const call = fakeCall();
+    store.insertCall(call);
     store.upsertLeakEvent({
-      fingerprint: "fp", sessionId: ex.sessionId, detector: "d", secretType: "t",
+      fingerprint: "fp", sessionId: call.sessionId, detector: "d", secretType: "t",
       severity: "high", confidenceTier: "structured", destination: "x",
-      callId: ex.id, ts: Date.now(),
+      callId: call.id, ts: Date.now(),
     });
     store.panicPurge();
-    expect(store.getCall(ex.id)).toBeNull();
+    expect(store.getCall(call.id)).toBeNull();
     expect(listLeakEvents(store)).toEqual([]);
     expect(store.searchLiteral("secret-xyz")).toEqual([]);
     store.close();

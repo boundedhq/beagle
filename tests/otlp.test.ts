@@ -40,28 +40,28 @@ describe("OTLP → Call mapping (Mode B)", () => {
   test("maps GenAI log attributes to a canonical Call with source=otel", () => {
     const calls = mapOtlpLogsToCalls(otlpLogsBody("tok"), { agent: "claude-code", provider: "anthropic" });
     expect(calls.length).toBe(1);
-    const ex = calls[0]!;
-    expect(ex.source).toBe("otel");
-    expect(ex.provider).toBe("anthropic");
-    expect(ex.model).toBe("claude-sonnet-5");
-    expect(ex.meta.tokensIn).toBe(120);
-    expect(ex.meta.tokensOut).toBe(8);
+    const call = calls[0]!;
+    expect(call.source).toBe("otel");
+    expect(call.provider).toBe("anthropic");
+    expect(call.model).toBe("claude-sonnet-5");
+    expect(call.meta.tokensIn).toBe(120);
+    expect(call.meta.tokensOut).toBe(8);
     // prompt content is scannable in bodyBytes
-    expect(new TextDecoder().decode(ex.request.bodyBytes)).toContain("read the config file");
-    expect(ex.response.text).toContain("done");
+    expect(new TextDecoder().decode(call.request.bodyBytes)).toContain("read the config file");
+    expect(call.response.text).toContain("done");
   });
 
   test("carries the session id for tier-1 resolution", () => {
-    const ex = mapOtlpLogsToCalls(otlpLogsBody("tok", { sessionId: "conv-xyz" }), { agent: "claude-code", provider: "anthropic" })[0]!;
-    expect(ex.convId).toBe("conv-xyz");
+    const call = mapOtlpLogsToCalls(otlpLogsBody("tok", { sessionId: "conv-xyz" }), { agent: "claude-code", provider: "anthropic" })[0]!;
+    expect(call.convId).toBe("conv-xyz");
   });
 
   test("a secret in the reported prompt is present in bodyBytes for scanning", () => {
-    const ex = mapOtlpLogsToCalls(
+    const call = mapOtlpLogsToCalls(
       otlpLogsBody("tok", { prompt: "here: AKIAZQ3DRSTUVWXY2345" }),
       { agent: "claude-code", provider: "anthropic" },
     )[0]!;
-    expect(new TextDecoder().decode(ex.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
+    expect(new TextDecoder().decode(call.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
   });
 
   test("malformed payload yields no calls, never throws", () => {
@@ -91,9 +91,9 @@ describe("OTel shape robustness (real-world variants — Gap 3 hardening)", () =
         ],
       }] }] }],
     };
-    const ex = mapOtlpLogsToCalls(body, { agent: "claude-code", provider: "anthropic" })[0]!;
-    expect(ex.meta.tokensIn).toBe(1200);
-    expect(ex.meta.tokensOut).toBe(34);
+    const call = mapOtlpLogsToCalls(body, { agent: "claude-code", provider: "anthropic" })[0]!;
+    expect(call.meta.tokensIn).toBe(1200);
+    expect(call.meta.tokensOut).toBe(34);
   });
 
   test("alternate token attribute names (prompt_tokens/completion_tokens) are accepted", () => {
@@ -108,9 +108,9 @@ describe("OTel shape robustness (real-world variants — Gap 3 hardening)", () =
         }),
       }] }] }],
     };
-    const ex = mapOtlpLogsToCalls(body, { agent: "claude-code", provider: "anthropic" })[0]!;
-    expect(ex.meta.tokensIn).toBe(90);
-    expect(ex.meta.tokensOut).toBe(7);
+    const call = mapOtlpLogsToCalls(body, { agent: "claude-code", provider: "anthropic" })[0]!;
+    expect(call.meta.tokensIn).toBe(90);
+    expect(call.meta.tokensOut).toBe(7);
   });
 
   test("GenAI carried as spans (resourceSpans) is mapped too", () => {
@@ -150,9 +150,9 @@ describe("OTel shape robustness (real-world variants — Gap 3 hardening)", () =
         ],
       }] }] }],
     };
-    const ex = mapOtlpLogsToCalls(body, { agent: "claude-code", provider: "anthropic" })[0]!;
-    expect(new TextDecoder().decode(ex.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
-    expect(new TextDecoder().decode(ex.request.bodyBytes)).toContain("You are Claude Code.");
+    const call = mapOtlpLogsToCalls(body, { agent: "claude-code", provider: "anthropic" })[0]!;
+    expect(new TextDecoder().decode(call.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
+    expect(new TextDecoder().decode(call.request.bodyBytes)).toContain("You are Claude Code.");
   });
 
   test("a secret in a nested tool_result block is in bodyBytes for scanning (raw, not lossy-flattened)", () => {
@@ -171,8 +171,8 @@ describe("OTel shape robustness (real-world variants — Gap 3 hardening)", () =
         ],
       }] }] }],
     };
-    const ex = mapOtlpLogsToCalls(body, { agent: "claude-code", provider: "anthropic" })[0]!;
-    expect(new TextDecoder().decode(ex.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
+    const call = mapOtlpLogsToCalls(body, { agent: "claude-code", provider: "anthropic" })[0]!;
+    expect(new TextDecoder().decode(call.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
   });
 
   test("mixed resourceLogs + resourceSpans in one payload both map", () => {
@@ -265,7 +265,7 @@ describe("OtlpReceiver HTTP endpoint", () => {
     });
     expect(r.status).toBe(200);
     expect(got.length).toBe(1);
-    const ex = got[0] as { request: { bodyBytes: Uint8Array } };
-    expect(new TextDecoder().decode(ex.request.bodyBytes)).toBe(prompt);
+    const call = got[0] as { request: { bodyBytes: Uint8Array } };
+    expect(new TextDecoder().decode(call.request.bodyBytes)).toBe(prompt);
   });
 });

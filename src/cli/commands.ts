@@ -162,20 +162,20 @@ export function cmdLeaks(stateDir: string): string {
 export function cmdShow(stateDir: string, idPrefix: string): string {
   const store = openStore(stateDir);
   if (isStoreError(store)) return store.error;
-  const ex = store?.getCall(idPrefix) ?? null;
+  const call = store?.getCall(idPrefix) ?? null;
   store?.close();
-  if (!ex) return `no call matches '${idPrefix}' (prefix may be ambiguous or unknown).`;
+  if (!call) return `no call matches '${idPrefix}' (prefix may be ambiguous or unknown).`;
   const lines = [
-    `call ${ex.id}`,
-    `  ${clean(ex.agent ?? "?")} → ${clean(ex.provider ?? "?")}${ex.model ? `/${clean(ex.model)}` : ""}  ${clean(ex.endpoint ?? "")}`,
-    `  at ${new Date(ex.tsRequest).toISOString()}  status ${ex.status ?? "?"}  tokens ${ex.tokensIn ?? "?"}→${ex.tokensOut ?? "?"}`,
-    `  session ${ex.sessionId.slice(0, 8)} (keyed by ${ex.sessionTier})  run ${clean(ex.runId)}`,
-    `  summary: ${clean(ex.summary ?? "—")}`,
+    `call ${call.id}`,
+    `  ${clean(call.agent ?? "?")} → ${clean(call.provider ?? "?")}${call.model ? `/${clean(call.model)}` : ""}  ${clean(call.endpoint ?? "")}`,
+    `  at ${new Date(call.tsRequest).toISOString()}  status ${call.status ?? "?"}  tokens ${call.tokensIn ?? "?"}→${call.tokensOut ?? "?"}`,
+    `  session ${call.sessionId.slice(0, 8)} (keyed by ${call.sessionTier})  run ${clean(call.runId)}`,
+    `  summary: ${clean(call.summary ?? "—")}`,
   ];
-  if (ex.scanState !== "ok") {
+  if (call.scanState !== "ok") {
     lines.push("  ⚠ scan timed out — treated as unverified, not clean");
   }
-  if (ex.captureState !== "ok") {
+  if (call.captureState !== "ok") {
     lines.push("  ⚠ capture truncated — the stream to the agent was complete; the stored copy is not");
   }
   return lines.join("\n");

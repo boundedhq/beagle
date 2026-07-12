@@ -132,16 +132,16 @@ export function mapOtlpLogsToCalls(payload: unknown, ctx: OtlpContext): OtelCall
     for (const rl of p?.resourceLogs ?? []) {
       for (const sl of rl.scopeLogs ?? []) {
         for (const rec of sl.logRecords ?? []) {
-          const ex = recordToCall(rec, ctx);
-          if (ex) out.push(ex);
+          const call = recordToCall(rec, ctx);
+          if (call) out.push(call);
         }
       }
     }
     for (const rs of p?.resourceSpans ?? []) {
       for (const ss of rs.scopeSpans ?? []) {
         for (const span of ss.spans ?? []) {
-          const ex = recordToCall(span, ctx);
-          if (ex) out.push(ex);
+          const call = recordToCall(span, ctx);
+          if (call) out.push(call);
         }
       }
     }

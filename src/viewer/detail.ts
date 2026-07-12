@@ -63,44 +63,44 @@ export interface CallDetail {
 
 const REDACTED_RE = /\[REDACTED:[^\]]+\]/g;
 
-export function buildDetail(ex: CallRecord, spans: LeakSpan[]): CallDetail {
+export function buildDetail(call: CallRecord, spans: LeakSpan[]): CallDetail {
   const dec = new TextDecoder("utf-8", { fatal: false });
-  const requestRaw = ex.requestBody ? dec.decode(ex.requestBody) : "";
-  const responseRaw = ex.responseBody ? dec.decode(ex.responseBody) : "";
-  const sseRaw = ex.sseRaw ? dec.decode(ex.sseRaw) : null;
-  const format = detectFormat(ex.endpoint ?? "");
+  const requestRaw = call.requestBody ? dec.decode(call.requestBody) : "";
+  const responseRaw = call.responseBody ? dec.decode(call.responseBody) : "";
+  const sseRaw = call.sseRaw ? dec.decode(call.sseRaw) : null;
+  const format = detectFormat(call.endpoint ?? "");
 
-  const parsedReq = ex.requestBody ? parseRequest(format, ex.requestBody) : null;
+  const parsedReq = call.requestBody ? parseRequest(format, call.requestBody) : null;
   // Reassemble from the decoded body; fall back to the raw SSE for streamed
   // responses whose decoded body is the event stream.
   const parsedResp =
-    ex.responseBody ? parseResponse(format, ex.responseBody)
-    : ex.sseRaw ? parseResponse(format, ex.sseRaw)
+    call.responseBody ? parseResponse(format, call.responseBody)
+    : call.sseRaw ? parseResponse(format, call.sseRaw)
     : null;
 
   return {
-    id: ex.id,
-    agent: ex.agent,
-    provider: ex.provider,
-    model: ex.model,
-    endpoint: ex.endpoint,
-    sessionId: ex.sessionId,
-    sessionTier: ex.sessionTier,
-    summary: ex.summary,
-    tsRequest: ex.tsRequest,
-    status: ex.status,
-    tokensIn: ex.tokensIn,
-    tokensOut: ex.tokensOut,
-    scanState: ex.scanState,
-    captureState: ex.captureState,
-    source: ex.source,
+    id: call.id,
+    agent: call.agent,
+    provider: call.provider,
+    model: call.model,
+    endpoint: call.endpoint,
+    sessionId: call.sessionId,
+    sessionTier: call.sessionTier,
+    summary: call.summary,
+    tsRequest: call.tsRequest,
+    status: call.status,
+    tokensIn: call.tokensIn,
+    tokensOut: call.tokensOut,
+    scanState: call.scanState,
+    captureState: call.captureState,
+    source: call.source,
     system: parsedReq?.system ?? null,
     messages: parsedReq?.messages ?? [],
     responseText: parsedResp?.text ?? null,
     requestRaw,
     responseRaw,
     sseRaw,
-    leaks: extractLeaks(requestRaw, spans, ex.redacted ?? false),
+    leaks: extractLeaks(requestRaw, spans, call.redacted ?? false),
   };
 }
 

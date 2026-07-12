@@ -66,10 +66,10 @@ describe("Mode B end-to-end through the daemon", () => {
     const store = Store.openReadOnly(stateDir);
     const hits = store.searchLiteral("please read the readme");
     expect(hits.length).toBe(1);
-    const ex = store.getCall(hits[0]!.callId)!;
-    expect(ex.source).toBe("otel");
-    expect(ex.model).toBe("claude-sonnet-5");
-    expect(ex.tokensOut).toBe(4);
+    const call = store.getCall(hits[0]!.callId)!;
+    expect(call.source).toBe("otel");
+    expect(call.model).toBe("claude-sonnet-5");
+    expect(call.tokensOut).toBe(4);
     store.close();
   });
 

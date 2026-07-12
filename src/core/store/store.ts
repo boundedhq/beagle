@@ -12,6 +12,11 @@ export { SCHEMA_VERSION };
 
 export class StoreVersionError extends Error {}
 
+// Naming note: the domain type is `Call`, but the physical SQLite table stays
+// `exchanges` (and its columns `exchange_id` / `first_exchange`). The rename to
+// "call" was UI/code-only — keeping the schema names avoids a data migration.
+// The SQL below aliases the columns back to the Call shape (e.g. `exchange_id
+// AS callId`), so the storage layer and the type stay decoupled on purpose.
 export interface CallRecord {
   id: string;
   sessionId: string;
@@ -146,27 +151,27 @@ export class Store {
     }
   }
 
-  insertCall(ex: CallRecord): void {
+  insertCall(call: CallRecord): void {
     this.inTx(() => {
       this.db.run(
         `INSERT INTO exchanges (id, session_id, run_id, source, agent, provider, model,
            endpoint, ts_request, ts_response, status, tokens_in, tokens_out,
            bytes_req, bytes_resp, summary, scan_state, capture_state, session_tier, redacted)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [ex.id, ex.sessionId, ex.runId, ex.source, ex.agent ?? null, ex.provider ?? null,
-         ex.model ?? null, ex.endpoint ?? null, ex.tsRequest, ex.tsResponse ?? null,
-         ex.status ?? null, ex.tokensIn ?? null, ex.tokensOut ?? null, ex.bytesReq ?? null,
-         ex.bytesResp ?? null, ex.summary ?? null, ex.scanState, ex.captureState, ex.sessionTier,
-         ex.redacted ? 1 : null],
+        [call.id, call.sessionId, call.runId, call.source, call.agent ?? null, call.provider ?? null,
+         call.model ?? null, call.endpoint ?? null, call.tsRequest, call.tsResponse ?? null,
+         call.status ?? null, call.tokensIn ?? null, call.tokensOut ?? null, call.bytesReq ?? null,
+         call.bytesResp ?? null, call.summary ?? null, call.scanState, call.captureState, call.sessionTier,
+         call.redacted ? 1 : null],
       );
       this.db.run(
         `INSERT INTO payloads (exchange_id, request_body, request_headers,
            response_body, response_headers, sse_raw) VALUES (?,?,?,?,?,?)`,
-        [ex.id, ex.requestBody, ex.requestHeaders ? JSON.stringify(ex.requestHeaders) : null,
-         ex.responseBody, ex.responseHeaders ? JSON.stringify(ex.responseHeaders) : null, ex.sseRaw],
+        [call.id, call.requestBody, call.requestHeaders ? JSON.stringify(call.requestHeaders) : null,
+         call.responseBody, call.responseHeaders ? JSON.stringify(call.responseHeaders) : null, call.sseRaw],
       );
       this.db.run(`INSERT INTO exchanges_fts (content, exchange_id) VALUES (?,?)`,
-        [ex.searchText, ex.id]);
+        [call.searchText, call.id]);
     });
   }
 

@@ -120,7 +120,7 @@ export class Daemon {
     d.proxy = new ProxyServer({
       registry: d.registry,
       scan: (bytes, ctx) => d.scanPipeline(bytes, ctx),
-      onCall: (ex) => void d.captureCall(ex).catch(() => {}),
+      onCall: (call) => void d.captureCall(call).catch(() => {}),
       captureBufferCap: 8 << 20,
     });
     await d.proxy.listen(0);
@@ -214,25 +214,25 @@ export class Daemon {
     );
   }
 
-  private async captureCall(ex: CapturedCall): Promise<void> {
-    const stash = this.pending.get(ex.id);
+  private async captureCall(call: CapturedCall): Promise<void> {
+    const stash = this.pending.get(call.id);
     // redact-on-capture (R11): await the scan verdict and substitute the raw
     // secret BEFORE the first write, so no raw value ever lands in the WAL.
     if (this.config.redactOnCapture && stash) {
       await stash.scanDone;
     }
-    this.pending.delete(ex.id);
-    if (this.paused || this.config.excludedAgents.includes(ex.agent ?? "")) return;
-    const format = stash?.format ?? detectFormat(ex.endpoint);
+    this.pending.delete(call.id);
+    if (this.paused || this.config.excludedAgents.includes(call.agent ?? "")) return;
+    const format = stash?.format ?? detectFormat(call.endpoint);
     const parsed = stash?.parsed ?? null;
-    const respBytes = ex.response.bodyBytes ?? ex.response.sseRaw;
+    const respBytes = call.response.bodyBytes ?? call.response.sseRaw;
     const respParsed = format !== "unknown" && respBytes ? parseResponse(format, respBytes) : null;
     const respActions = format !== "unknown" && respBytes ? extractActions(format, respBytes) : [];
     const resolution =
       stash?.resolution ??
       this.resolver.resolve({
-        agent: ex.agent, provider: ex.provider, runId: ex.runId,
-        ts: ex.meta.tsRequest, messages: parsed?.messages, systemPrompt: parsed?.system,
+        agent: call.agent, provider: call.provider, runId: call.runId,
+        ts: call.meta.tsRequest, messages: parsed?.messages, systemPrompt: parsed?.system,
       });
     if (respParsed?.text || respParsed?.responseId) {
       const history: Message[] = [
@@ -249,10 +249,10 @@ export class Daemon {
     // redact-on-capture: substitute secret spans in the persisted body. If the
     // scan came back incomplete we can't trust the spans, so we hold the raw
     // value out entirely and mark it (never write raw-and-hope, §4).
-    let requestBody: Uint8Array | null = ex.request.bodyBytes;
-    let responseBody: Uint8Array | null = ex.response.bodyBytes ?? null;
-    let sseRaw: Uint8Array | null = ex.response.sseRaw ?? null;
-    let searchText = buildSearchText(parsed, respParsed?.text, ex);
+    let requestBody: Uint8Array | null = call.request.bodyBytes;
+    let responseBody: Uint8Array | null = call.response.bodyBytes ?? null;
+    let sseRaw: Uint8Array | null = call.response.sseRaw ?? null;
+    let searchText = buildSearchText(parsed, respParsed?.text, call);
     // True only when the stored body was actually rewritten (viewer highlight).
     let redacted = false;
     if (this.config.redactOnCapture && stash) {
@@ -264,7 +264,7 @@ export class Daemon {
         searchText = "";
       } else if (stash.findings.length > 0) {
         redacted = true;
-        const scrubbed = redactBody(ex.request.bodyBytes, stash.findings);
+        const scrubbed = redactBody(call.request.bodyBytes, stash.findings);
         requestBody = scrubbed.bytes;
         // Scrub the same secret values from the response AND the raw stream, in
         // case the model echoed a leaked key back (request-side redaction alone
@@ -273,7 +273,7 @@ export class Daemon {
         // A content-encoded raw stream is compressed bytes — a literal scrub
         // can't find the secret in it, so keeping it would silently retain an
         // echoed value. Drop it; the decoded (scrubbed) body remains.
-        const contentEncoded = ex.response.headers?.some(
+        const contentEncoded = call.response.headers?.some(
           ([n, v]) =>
             n.toLowerCase() === "content-encoding" &&
             v.trim() !== "" &&
@@ -288,51 +288,51 @@ export class Daemon {
     }
 
     this.store.insertCall({
-      id: ex.id,
+      id: call.id,
       sessionId: resolution.sessionId,
-      runId: ex.runId,
-      source: ex.source,
-      agent: ex.agent,
-      provider: ex.provider,
+      runId: call.runId,
+      source: call.source,
+      agent: call.agent,
+      provider: call.provider,
       model: parsed?.model ?? respParsed?.model,
-      endpoint: ex.endpoint,
-      tsRequest: ex.meta.tsRequest,
-      tsResponse: ex.meta.tsResponse,
-      status: ex.response.status,
+      endpoint: call.endpoint,
+      tsRequest: call.meta.tsRequest,
+      tsResponse: call.meta.tsResponse,
+      status: call.response.status,
       tokensIn: respParsed?.tokensIn,
       tokensOut: respParsed?.tokensOut,
-      bytesReq: ex.request.bodyBytes.byteLength,
-      bytesResp: ex.response.bodyBytes?.byteLength,
+      bytesReq: call.request.bodyBytes.byteLength,
+      bytesResp: call.response.bodyBytes?.byteLength,
       summary: buildSummary(parsed, respParsed?.text, respActions),
       scanState: stash?.scanState ?? "ok",
-      captureState: ex.meta.captureState,
+      captureState: call.meta.captureState,
       sessionTier: resolution.tier,
       redacted,
       requestBody,
-      requestHeaders: ex.request.headers ?? null,
+      requestHeaders: call.request.headers ?? null,
       responseBody,
-      responseHeaders: ex.response.headers
-        ? scrubAuthHeaders(ex.response.headers, undefined, ex.provider)
+      responseHeaders: call.response.headers
+        ? scrubAuthHeaders(call.response.headers, undefined, call.provider)
         : null,
       sseRaw,
       searchText,
     });
     this.viewer?.broadcast("call", {
-      id: ex.id,
+      id: call.id,
       sessionId: resolution.sessionId,
-      agent: ex.agent,
-      provider: ex.provider,
+      agent: call.agent,
+      provider: call.provider,
       model: parsed?.model ?? respParsed?.model,
-      tsRequest: ex.meta.tsRequest,
-      status: ex.response.status,
+      tsRequest: call.meta.tsRequest,
+      status: call.response.status,
       tokensIn: respParsed?.tokensIn,
       tokensOut: respParsed?.tokensOut,
-      bytesReq: ex.request.bodyBytes.byteLength,
+      bytesReq: call.request.bodyBytes.byteLength,
       summary: buildSummary(parsed, respParsed?.text, respActions),
       scanState: stash?.scanState ?? "ok",
-      captureState: ex.meta.captureState,
+      captureState: call.meta.captureState,
       sessionTier: resolution.tier,
-      source: ex.source,
+      source: call.source,
       hasLeak: false, // the alert event corrects this if a leak lands
     });
   }
@@ -342,84 +342,84 @@ export class Daemon {
   // surfaced as the agent-reported badge (R7).
   private async ingestOtel(calls: OtelCall[]): Promise<void> {
     this.lastActivityTs = Date.now();
-    for (const ex of calls) {
-      if (this.paused || this.config.excludedAgents.includes(ex.agent ?? "")) continue;
+    for (const call of calls) {
+      if (this.paused || this.config.excludedAgents.includes(call.agent ?? "")) continue;
       const resolution = this.resolver.resolve({
-        agent: ex.agent,
-        provider: ex.provider,
-        runId: ex.runId,
-        ts: ex.meta.tsRequest,
-        convId: ex.convId,
-        messages: ex.request.messages,
+        agent: call.agent,
+        provider: call.provider,
+        runId: call.runId,
+        ts: call.meta.tsRequest,
+        convId: call.convId,
+        messages: call.request.messages,
       });
-      const scanResult = await this.scanHost.scan(ex.request.bodyBytes, {});
+      const scanResult = await this.scanHost.scan(call.request.bodyBytes, {});
       // Keep session chaining state current, same as the wire path — so a
       // Mode B session without an explicit id still chains across turns.
-      if (ex.request.messages?.length || ex.response.text) {
+      if (call.request.messages?.length || call.response.text) {
         this.resolver.recordResponse({
           sessionId: resolution.sessionId,
           messages: [
-            ...(ex.request.messages ?? []),
-            ...(ex.response.text ? [{ role: "assistant", content: ex.response.text }] : []),
+            ...(call.request.messages ?? []),
+            ...(call.response.text ? [{ role: "assistant", content: call.response.text }] : []),
           ],
-          responseId: ex.convId,
+          responseId: call.convId,
         });
       }
       this.store.insertCall({
-        id: ex.id,
+        id: call.id,
         sessionId: resolution.sessionId,
-        runId: ex.runId,
+        runId: call.runId,
         source: "otel",
-        agent: ex.agent,
-        provider: ex.provider,
-        model: ex.model,
-        endpoint: ex.endpoint,
-        tsRequest: ex.meta.tsRequest,
-        tsResponse: ex.meta.tsResponse,
+        agent: call.agent,
+        provider: call.provider,
+        model: call.model,
+        endpoint: call.endpoint,
+        tsRequest: call.meta.tsRequest,
+        tsResponse: call.meta.tsResponse,
         status: 200,
-        tokensIn: ex.meta.tokensIn,
-        tokensOut: ex.meta.tokensOut,
-        bytesReq: ex.request.bodyBytes.byteLength,
-        bytesResp: ex.response.bodyBytes?.byteLength,
+        tokensIn: call.meta.tokensIn,
+        tokensOut: call.meta.tokensOut,
+        bytesReq: call.request.bodyBytes.byteLength,
+        bytesResp: call.response.bodyBytes?.byteLength,
         summary: buildSummary(
-          { model: ex.model, messages: ex.request.messages ?? [] } as ParsedRequest,
-          ex.response.text,
+          { model: call.model, messages: call.request.messages ?? [] } as ParsedRequest,
+          call.response.text,
         ),
         scanState: scanResult.state,
         captureState: "ok",
         sessionTier: resolution.tier,
-        requestBody: ex.request.bodyBytes,
+        requestBody: call.request.bodyBytes,
         requestHeaders: null,
-        responseBody: ex.response.bodyBytes ?? null,
+        responseBody: call.response.bodyBytes ?? null,
         responseHeaders: null,
         sseRaw: null,
         searchText:
-          (ex.request.messages?.map((m) => m.content).join("\n") ?? "") + "\n" + (ex.response.text ?? ""),
+          (call.request.messages?.map((m) => m.content).join("\n") ?? "") + "\n" + (call.response.text ?? ""),
       });
       this.alertEngine.process(
         {
-          id: ex.id,
+          id: call.id,
           sessionId: resolution.sessionId,
-          agent: ex.agent,
-          provider: ex.provider,
-          model: ex.model,
+          agent: call.agent,
+          provider: call.provider,
+          model: call.model,
         },
         scanResult.findings,
       );
       this.viewer?.broadcast("call", {
-        id: ex.id,
+        id: call.id,
         sessionId: resolution.sessionId,
-        agent: ex.agent,
-        provider: ex.provider,
-        model: ex.model,
-        tsRequest: ex.meta.tsRequest,
+        agent: call.agent,
+        provider: call.provider,
+        model: call.model,
+        tsRequest: call.meta.tsRequest,
         status: 200,
-        tokensIn: ex.meta.tokensIn,
-        tokensOut: ex.meta.tokensOut,
-        bytesReq: ex.request.bodyBytes.byteLength,
+        tokensIn: call.meta.tokensIn,
+        tokensOut: call.meta.tokensOut,
+        bytesReq: call.request.bodyBytes.byteLength,
         summary: buildSummary(
-          { model: ex.model, messages: ex.request.messages ?? [] } as ParsedRequest,
-          ex.response.text,
+          { model: call.model, messages: call.request.messages ?? [] } as ParsedRequest,
+          call.response.text,
         ),
         scanState: scanResult.state,
         captureState: "ok",
@@ -625,7 +625,7 @@ function firstLine(s: string, max: number): string {
 function buildSearchText(
   parsed: ParsedRequest | null,
   responseText: string | undefined,
-  ex: CapturedCall,
+  call: CapturedCall,
 ): string {
   // Parsed text where a parser ran (finds secrets that appear \"-escaped in
   // raw JSON); decoded raw text otherwise (R8 / schema note).
@@ -636,8 +636,8 @@ function buildSearchText(
   }
   const dec = new TextDecoder("utf-8", { fatal: false });
   return (
-    dec.decode(ex.request.bodyBytes) +
+    dec.decode(call.request.bodyBytes) +
     "\n" +
-    (ex.response.bodyBytes ? dec.decode(ex.response.bodyBytes) : "")
+    (call.response.bodyBytes ? dec.decode(call.response.bodyBytes) : "")
   );
 }

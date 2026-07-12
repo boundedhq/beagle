@@ -29,31 +29,31 @@ export class AlertEngine {
     private sink: AlertSink,
   ) {}
 
-  process(ex: CallMeta, findings: Finding[]): void {
+  process(call: CallMeta, findings: Finding[]): void {
     // Dedup keys on the destination PROVIDER (R6) — a mid-session model
     // switch is the same destination and must not re-alert. The model only
     // enriches the human-facing copy.
-    const displayDestination = ex.model ? `${ex.provider}/${ex.model}` : ex.provider;
+    const displayDestination = call.model ? `${call.provider}/${call.model}` : call.provider;
     for (const f of findings) {
       const seenBefore = this.store.fingerprintKnown(f.fingerprint);
       const { fresh, eventId } = this.store.upsertLeakEvent({
         fingerprint: f.fingerprint,
-        sessionId: ex.sessionId,
+        sessionId: call.sessionId,
         detector: f.detector,
         secretType: f.secretType,
         severity: f.severity,
         confidenceTier: f.tier,
-        destination: ex.provider,
-        callId: ex.id,
+        destination: call.provider,
+        callId: call.id,
         ts: Date.now(),
         spanStart: f.start, spanEnd: f.end,
       });
       if (fresh && f.tier === "structured") {
         this.sink({
           eventId,
-          callId: ex.id,
+          callId: call.id,
           seenBefore,
-          ...alertCopy(f, ex, displayDestination, seenBefore),
+          ...alertCopy(f, call, displayDestination, seenBefore),
         });
       }
     }
@@ -62,7 +62,7 @@ export class AlertEngine {
 
 function alertCopy(
   f: Finding,
-  ex: CallMeta,
+  call: CallMeta,
   destination: string,
   seenBefore: boolean,
 ): { title: string; body: string } {
@@ -70,10 +70,10 @@ function alertCopy(
   const ownKey = f.destinationOwnKey
     ? " (this destination's own API key appeared in the message body)" : "";
   const body =
-    `${f.secretType} sent to ${destination} by ${ex.agent ?? "unknown agent"}${ownKey}. ` +
+    `${f.secretType} sent to ${destination} by ${call.agent ?? "unknown agent"}${ownKey}. ` +
     `The data has already been sent — Beagle observes, it does not block. ` +
     // 12 chars: same-millisecond ULIDs share their first 8, so an 8-char
     // prefix can be ambiguous exactly when a burst of calls lands.
-    `Details: beagle show ${ex.id.slice(0, 12)}`;
+    `Details: beagle show ${call.id.slice(0, 12)}`;
   return { title, body };
 }

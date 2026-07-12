@@ -98,7 +98,7 @@ describe("proxy", () => {
     proxy = new ProxyServer({
       registry,
       scan: (bytes) => { scanned.push(bytes); return new Promise(() => {}); }, // never resolves
-      onCall: (ex) => myCalls.push(ex),
+      onCall: (call) => myCalls.push(call),
       captureBufferCap: 1 << 20,
     });
     await proxy.listen(0);
@@ -302,7 +302,7 @@ describe("proxy", () => {
     proxy = new ProxyServer({
       registry,
       scan: () => new Promise(() => {}),
-      onCall: (ex) => calls.push(ex),
+      onCall: (call) => calls.push(call),
       captureBufferCap: 10, // tiny cap
     });
     await proxy.listen(0);
@@ -361,7 +361,7 @@ describe("proxy", () => {
     proxy = new ProxyServer({
       registry,
       scan: () => Promise.reject(new Error("scanner exploded")),
-      onCall: (ex) => calls.push(ex),
+      onCall: (call) => calls.push(call),
       captureBufferCap: 1 << 20,
     });
     await proxy.listen(0);

@@ -31,7 +31,7 @@ export interface CapturedCall extends Call {
 export interface ProxyOptions {
   registry: RunRegistry;
   scan: (bytes: Uint8Array, ctx: ScanContext) => Promise<unknown>;
-  onCall: (ex: CapturedCall) => void;
+  onCall: (call: CapturedCall) => void;
   captureBufferCap: number;
 }
 
@@ -230,7 +230,7 @@ export class ProxyServer {
     // duplicate. (Content-encoded streams keep raw too; the decoded form is
     // in bodyBytes.)
     const isStream = contentType.toLowerCase().includes("event-stream");
-    const ex: CapturedCall = {
+    const call: CapturedCall = {
       id: callId,
       runId: run.id,
       source: "wire",
@@ -253,7 +253,7 @@ export class ProxyServer {
         captureState: truncated ? "truncated" : "ok",
       },
     };
-    this.opts.onCall(ex);
+    this.opts.onCall(call);
   }
 }
 
