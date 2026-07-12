@@ -1,6 +1,6 @@
 // CLI command surface (design §6.9): the whole product headless. Reads open
 // the store read-only (work daemon-down); live actions ride the socket.
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -13,7 +13,8 @@ import { detectAgents, knownExtraLocations, pathDirsFromEnv } from "../install/d
 import { watchAgent, unwatchAgent, type WatchEnv } from "../install/watch";
 import { ChangeManifest } from "../install/manifest";
 import { buildOtelEnv } from "../parsers/otlp-map";
-import { AGENTS, buildRunEnv } from "./agents";
+import { buildRedirectConfig, readFirstConfig, writeRedirectConfig } from "../install/config-redirect";
+import { AGENTS, buildRunEnv, runBaseUrl } from "./agents";
 
 // Everything printed by these commands can embed traffic-derived text
 // (summaries, session ids from parsed content) — sanitize at the boundary,
@@ -348,9 +349,10 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
     console.error("--telemetry (agent self-report capture) is supported for claude only in v1.");
     return 2;
   }
-  if (!telemetry && !spec.baseUrlEnv) {
+  if (!telemetry && !spec.baseUrlEnv && !spec.config) {
     console.error(
-      `${agentName} is config-driven; wrapper support arrives with 'beagle watch' — coming in a following release.`,
+      `${agentName} is config-driven and its config-override mechanism isn't confirmed yet — ` +
+        `point it at Beagle manually for now (see the README).`,
     );
     return 2;
   }
@@ -390,34 +392,66 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
         extraHeaders: spec.extraHeaders,
       },
     });
-    modeEnv = buildRunEnv(agentName, daemon.proxyPort, runId);
+    let redirectCfg: string | null = null;
+    if (spec.config) {
+      // Config-driven agent (opencode): write a Beagle-owned config that
+      // merges the user's real settings with the proxy baseURL, and point the
+      // agent at it — the user's real config is never touched.
+      const baseUrl = runBaseUrl(daemon.proxyPort, runId);
+      const userCfg = readFirstConfig(spec.config.realConfigCandidates(homedir()));
+      const merged = buildRedirectConfig(userCfg, spec.config.baseUrlPath, baseUrl);
+      redirectCfg = writeRedirectConfig(stateDir, agentName, merged);
+      modeEnv = { [spec.config.configEnv]: redirectCfg };
+    } else {
+      modeEnv = buildRunEnv(agentName, daemon.proxyPort, runId);
+    }
+    return await execAgent(daemon.socketPath, realBinary, agentArgs, modeEnv, stateDir, agentName, redirectCfg);
   }
 
+  return await execAgent(daemon.socketPath, realBinary, agentArgs, modeEnv, stateDir, agentName, null);
+}
+
+async function execAgent(
+  socketPath: string,
+  realBinary: string,
+  agentArgs: string[],
+  modeEnv: Record<string, string>,
+  stateDir: string,
+  agentName: string,
+  redirectCfg: string | null,
+): Promise<number> {
   const grad = new GraduationTracker(stateDir);
   const shouldNudge = grad.recordRunAndCheck(agentName);
 
   // Hold a lease for the agent's lifetime so an auto-started ephemeral daemon
   // stays up while we're watching, then winds down after we exit (§6.7). Both
   // wire and telemetry modes need this — Mode B registers no run.
-  const lease = await openLease(daemon.socketPath).catch(() => null);
+  const lease = await openLease(socketPath).catch(() => null);
 
-  const child = Bun.spawn([realBinary, ...agentArgs], {
-    env: { ...process.env, ...modeEnv },
-    stdio: ["inherit", "inherit", "inherit"],
-  });
-  const exitCode = await child.exited;
-  lease?.end();
+  try {
+    const child = Bun.spawn([realBinary, ...agentArgs], {
+      env: { ...process.env, ...modeEnv },
+      stdio: ["inherit", "inherit", "inherit"],
+    });
+    const exitCode = await child.exited;
 
-  // Graduation nudge AFTER the agent exits (R2): full-screen TUIs wipe
-  // anything printed before they start; after exit the terminal is ours.
-  if (shouldNudge) {
-    process.stderr.write(
-      `\nbeagle: you've run ${agentName} under Beagle a few times.\n` +
-        `  Watch it automatically so you never have to prefix again? Run: beagle watch ${agentName}\n` +
-        `  (one-time nudge; it won't ask again)\n\n`,
-    );
+    // Graduation nudge AFTER the agent exits (R2): full-screen TUIs wipe
+    // anything printed before they start; after exit the terminal is ours.
+    if (shouldNudge) {
+      process.stderr.write(
+        `\nbeagle: you've run ${agentName} under Beagle a few times.\n` +
+          `  Watch it automatically so you never have to prefix again? Run: beagle watch ${agentName}\n` +
+          `  (one-time nudge; it won't ask again)\n\n`,
+      );
+    }
+    return exitCode;
+  } finally {
+    lease?.end(); // release the daemon liveness hold
+    // The redirect config merged in the user's real provider key — it is only
+    // needed for the agent's lifetime, so delete it even if the spawn failed,
+    // rather than leave a plaintext secret in the state dir between runs.
+    if (redirectCfg) rmSync(redirectCfg, { force: true });
   }
-  return exitCode;
 }
 
 function notifyProxyDown(agent: string): void {

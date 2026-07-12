@@ -139,4 +139,38 @@ describe("run env mapping", () => {
   test("agent registry covers the four v1 CLI agents", () => {
     expect(Object.keys(AGENTS).sort()).toEqual(["claude", "codex", "opencode", "pi"]);
   });
+
+  test("opencode is config-driven (OPENCODE_CONFIG), not env-base-URL", () => {
+    expect(AGENTS.opencode!.baseUrlEnv).toBeUndefined();
+    expect(AGENTS.opencode!.config?.configEnv).toBe("OPENCODE_CONFIG");
+    expect(AGENTS.opencode!.config?.baseUrlPath).toEqual(["provider", "openai", "options", "baseURL"]);
+    // env-base-URL helper returns nothing for config-driven agents
+    expect(buildRunEnv("opencode", 1, "x")).toEqual({});
+  });
+
+  test("pi has no confirmed config mechanism yet (spike-pending)", () => {
+    expect(AGENTS.pi!.baseUrlEnv).toBeUndefined();
+    expect(AGENTS.pi!.config).toBeUndefined();
+  });
+});
+
+describe("config-driven run redirect (opencode)", () => {
+  const { buildRedirectConfig, readFirstConfig } =
+    require("../src/install/config-redirect") as typeof import("../src/install/config-redirect");
+
+  test("merges an existing opencode config and injects the proxy baseURL", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-oc-"));
+    const cfgDir = join(dir, ".config", "opencode");
+    require("node:fs").mkdirSync(cfgDir, { recursive: true });
+    require("node:fs").writeFileSync(
+      join(cfgDir, "opencode.json"),
+      JSON.stringify({ provider: { openai: { options: { apiKey: "sk-mine" } } }, theme: "dark" }),
+    );
+    const spec = AGENTS.opencode!.config!;
+    const user = readFirstConfig(spec.realConfigCandidates(dir));
+    const merged = buildRedirectConfig(user, spec.baseUrlPath, "http://127.0.0.1:9/run/r") as any;
+    expect(merged.provider.openai.options.baseURL).toBe("http://127.0.0.1:9/run/r");
+    expect(merged.provider.openai.options.apiKey).toBe("sk-mine"); // preserved
+    expect(merged.theme).toBe("dark"); // preserved
+  });
 });

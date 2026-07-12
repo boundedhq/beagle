@@ -75,12 +75,19 @@ describe("watchAgent", () => {
     expect(watchAgent("claude", makeEnv({ resolveReal: () => null })).applied).toBe(false);
   });
 
-  test("config-driven agent (opencode) is refused rather than getting a broken shim", () => {
+  test("config-driven opencode is now shimmable (shim execs `beagle run opencode`)", () => {
     const env = makeEnv({ resolveReal: () => "/opt/homebrew/bin/opencode" });
     const r = watchAgent("opencode", env);
+    expect(r.applied).toBe(true);
+    const shim = readFileSync(join(env.shimDir, "opencode"), "utf8");
+    expect(shim).toContain("run opencode");
+  });
+
+  test("pi (no confirmed config knob) is still refused", () => {
+    const env = makeEnv({ resolveReal: () => "/opt/homebrew/bin/pi" });
+    const r = watchAgent("pi", env);
     expect(r.applied).toBe(false);
-    expect(r.message.toLowerCase()).toContain("config-driven");
-    expect(existsSync(join(env.shimDir, "opencode"))).toBe(false);
+    expect(existsSync(join(env.shimDir, "pi"))).toBe(false);
   });
 });
 
