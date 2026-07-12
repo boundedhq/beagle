@@ -59,14 +59,14 @@ describe("Mode B end-to-end through the daemon", () => {
     });
   }
 
-  test("OTel-reported exchange is captured, labeled otel, and scanned", async () => {
+  test("OTel-reported call is captured, labeled otel, and scanned", async () => {
     const r = await post(otlpBody(token, "please read the readme"));
     expect(r.status).toBe(200);
     await Bun.sleep(100);
     const store = Store.openReadOnly(stateDir);
     const hits = store.searchLiteral("please read the readme");
     expect(hits.length).toBe(1);
-    const ex = store.getExchange(hits[0]!.exchangeId)!;
+    const ex = store.getCall(hits[0]!.callId)!;
     expect(ex.source).toBe("otel");
     expect(ex.model).toBe("claude-sonnet-5");
     expect(ex.tokensOut).toBe(4);

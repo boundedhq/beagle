@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mapOtlpLogsToExchanges, buildOtelEnv } from "../src/parsers/otlp-map";
+import { mapOtlpLogsToCalls, buildOtelEnv } from "../src/parsers/otlp-map";
 import { OtlpReceiver } from "../src/core/otlp/receiver";
 
 // A minimal OTLP/HTTP logs payload shaped like Claude Code's GenAI export.
@@ -36,11 +36,11 @@ function otlpLogsBody(token: string, opts: { sessionId?: string; prompt?: string
   };
 }
 
-describe("OTLP → Exchange mapping (Mode B)", () => {
-  test("maps GenAI log attributes to a canonical Exchange with source=otel", () => {
-    const exchanges = mapOtlpLogsToExchanges(otlpLogsBody("tok"), { agent: "claude-code", provider: "anthropic" });
-    expect(exchanges.length).toBe(1);
-    const ex = exchanges[0]!;
+describe("OTLP → Call mapping (Mode B)", () => {
+  test("maps GenAI log attributes to a canonical Call with source=otel", () => {
+    const calls = mapOtlpLogsToCalls(otlpLogsBody("tok"), { agent: "claude-code", provider: "anthropic" });
+    expect(calls.length).toBe(1);
+    const ex = calls[0]!;
     expect(ex.source).toBe("otel");
     expect(ex.provider).toBe("anthropic");
     expect(ex.model).toBe("claude-sonnet-5");
@@ -52,21 +52,21 @@ describe("OTLP → Exchange mapping (Mode B)", () => {
   });
 
   test("carries the session id for tier-1 resolution", () => {
-    const ex = mapOtlpLogsToExchanges(otlpLogsBody("tok", { sessionId: "conv-xyz" }), { agent: "claude-code", provider: "anthropic" })[0]!;
+    const ex = mapOtlpLogsToCalls(otlpLogsBody("tok", { sessionId: "conv-xyz" }), { agent: "claude-code", provider: "anthropic" })[0]!;
     expect(ex.convId).toBe("conv-xyz");
   });
 
   test("a secret in the reported prompt is present in bodyBytes for scanning", () => {
-    const ex = mapOtlpLogsToExchanges(
+    const ex = mapOtlpLogsToCalls(
       otlpLogsBody("tok", { prompt: "here: AKIAZQ3DRSTUVWXY2345" }),
       { agent: "claude-code", provider: "anthropic" },
     )[0]!;
     expect(new TextDecoder().decode(ex.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
   });
 
-  test("malformed payload yields no exchanges, never throws", () => {
-    expect(mapOtlpLogsToExchanges({ garbage: true }, { agent: "x", provider: "y" })).toEqual([]);
-    expect(mapOtlpLogsToExchanges(null, { agent: "x", provider: "y" })).toEqual([]);
+  test("malformed payload yields no calls, never throws", () => {
+    expect(mapOtlpLogsToCalls({ garbage: true }, { agent: "x", provider: "y" })).toEqual([]);
+    expect(mapOtlpLogsToCalls(null, { agent: "x", provider: "y" })).toEqual([]);
   });
 });
 
@@ -91,7 +91,7 @@ describe("OTel shape robustness (real-world variants — Gap 3 hardening)", () =
         ],
       }] }] }],
     };
-    const ex = mapOtlpLogsToExchanges(body, { agent: "claude-code", provider: "anthropic" })[0]!;
+    const ex = mapOtlpLogsToCalls(body, { agent: "claude-code", provider: "anthropic" })[0]!;
     expect(ex.meta.tokensIn).toBe(1200);
     expect(ex.meta.tokensOut).toBe(34);
   });
@@ -108,7 +108,7 @@ describe("OTel shape robustness (real-world variants — Gap 3 hardening)", () =
         }),
       }] }] }],
     };
-    const ex = mapOtlpLogsToExchanges(body, { agent: "claude-code", provider: "anthropic" })[0]!;
+    const ex = mapOtlpLogsToCalls(body, { agent: "claude-code", provider: "anthropic" })[0]!;
     expect(ex.meta.tokensIn).toBe(90);
     expect(ex.meta.tokensOut).toBe(7);
   });
@@ -127,13 +127,13 @@ describe("OTel shape robustness (real-world variants — Gap 3 hardening)", () =
         }),
       }] }] }],
     };
-    const exchanges = mapOtlpLogsToExchanges(body, { agent: "claude-code", provider: "anthropic" });
-    expect(exchanges.length).toBe(1);
-    expect(exchanges[0]!.source).toBe("otel");
-    expect(exchanges[0]!.model).toBe("claude-sonnet-5");
-    expect(exchanges[0]!.convId).toBe("span-sess-1");
+    const calls = mapOtlpLogsToCalls(body, { agent: "claude-code", provider: "anthropic" });
+    expect(calls.length).toBe(1);
+    expect(calls[0]!.source).toBe("otel");
+    expect(calls[0]!.model).toBe("claude-sonnet-5");
+    expect(calls[0]!.convId).toBe("span-sess-1");
     // the secret in the reported prompt is scannable
-    expect(new TextDecoder().decode(exchanges[0]!.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
+    expect(new TextDecoder().decode(calls[0]!.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
   });
 
   test("a JSON-array gen_ai.prompt (message list) is flattened into scannable text", () => {
@@ -150,7 +150,7 @@ describe("OTel shape robustness (real-world variants — Gap 3 hardening)", () =
         ],
       }] }] }],
     };
-    const ex = mapOtlpLogsToExchanges(body, { agent: "claude-code", provider: "anthropic" })[0]!;
+    const ex = mapOtlpLogsToCalls(body, { agent: "claude-code", provider: "anthropic" })[0]!;
     expect(new TextDecoder().decode(ex.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
     expect(new TextDecoder().decode(ex.request.bodyBytes)).toContain("You are Claude Code.");
   });
@@ -171,7 +171,7 @@ describe("OTel shape robustness (real-world variants — Gap 3 hardening)", () =
         ],
       }] }] }],
     };
-    const ex = mapOtlpLogsToExchanges(body, { agent: "claude-code", provider: "anthropic" })[0]!;
+    const ex = mapOtlpLogsToCalls(body, { agent: "claude-code", provider: "anthropic" })[0]!;
     expect(new TextDecoder().decode(ex.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
   });
 
@@ -186,9 +186,9 @@ describe("OTel shape robustness (real-world variants — Gap 3 hardening)", () =
         attributes: attrs({ "gen_ai.prompt": "from-span", "gen_ai.completion": "b" }),
       }] }] }],
     };
-    const exchanges = mapOtlpLogsToExchanges(body, { agent: "claude-code", provider: "anthropic" });
-    expect(exchanges.length).toBe(2);
-    const prompts = exchanges.map((e) => new TextDecoder().decode(e.request.bodyBytes)).sort();
+    const calls = mapOtlpLogsToCalls(body, { agent: "claude-code", provider: "anthropic" });
+    expect(calls.length).toBe(2);
+    const prompts = calls.map((e) => new TextDecoder().decode(e.request.bodyBytes)).sort();
     expect(prompts).toEqual(["from-log", "from-span"]);
   });
 });
@@ -214,14 +214,14 @@ describe("OtlpReceiver HTTP endpoint", () => {
     got = [];
     receiver = new OtlpReceiver({
       token: "secret-run-token",
-      onExchanges: (exs) => got.push(...exs),
+      onCalls: (exs) => got.push(...exs),
     });
     port = await receiver.listen(0);
   });
 
   afterEach(() => receiver.close());
 
-  test("accepts json logs with the run token and yields an exchange", async () => {
+  test("accepts json logs with the run token and yields an call", async () => {
     const r = await fetch(`http://127.0.0.1:${port}/v1/logs`, {
       method: "POST",
       headers: { "content-type": "application/json", "x-beagle-run": "secret-run-token" },

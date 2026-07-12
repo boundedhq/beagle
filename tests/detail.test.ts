@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { buildDetail, type LeakSpan } from "../src/viewer/detail";
-import type { ExchangeRecord } from "../src/core/store/store";
+import type { CallRecord } from "../src/core/store/store";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 
-function ex(overrides: Partial<ExchangeRecord> = {}): ExchangeRecord {
+function ex(overrides: Partial<CallRecord> = {}): CallRecord {
   return {
     id: "01EX", sessionId: "s1", runId: "r1", source: "wire",
     agent: "claude-code", provider: "anthropic", model: "claude-sonnet-5",

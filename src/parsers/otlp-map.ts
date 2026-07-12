@@ -1,7 +1,7 @@
 // OTLP GenAI mapping (design §6.2, Mode B). Claude Code's OTel export (with
-// content flags on) → canonical Exchange. Marked source='otel' → the
+// content flags on) → canonical Call. Marked source='otel' → the
 // agent-reported badge (R7): this is the agent's self-report, not wire bytes.
-import type { Exchange } from "../core/exchange";
+import type { Call } from "../core/call";
 import { ulid } from "../core/store/ulid";
 
 interface OtlpContext {
@@ -16,7 +16,7 @@ interface AttrValue {
   boolValue?: boolean;
 }
 
-export interface OtelExchange extends Exchange {
+export interface OtelCall extends Call {
   convId?: string;
   runToken?: string;
 }
@@ -79,7 +79,7 @@ interface OtelRecord {
   startTimeUnixNano?: string | number;
 }
 
-function recordToExchange(rec: OtelRecord, ctx: OtlpContext): OtelExchange | null {
+function recordToCall(rec: OtelRecord, ctx: OtlpContext): OtelCall | null {
   const a = attrMap(rec.attributes);
   // Only inference records carry prompt/completion content.
   if (!a.has("gen_ai.prompt") && !a.has("gen_ai.completion")) return null;
@@ -122,8 +122,8 @@ function recordToExchange(rec: OtelRecord, ctx: OtlpContext): OtelExchange | nul
 // Accepts OTLP logs (resourceLogs/scopeLogs/logRecords) AND spans
 // (resourceSpans/scopeSpans/spans) — Claude Code's GenAI export may use either
 // depending on version. Malformed input degrades to [] (R3).
-export function mapOtlpLogsToExchanges(payload: unknown, ctx: OtlpContext): OtelExchange[] {
-  const out: OtelExchange[] = [];
+export function mapOtlpLogsToCalls(payload: unknown, ctx: OtlpContext): OtelCall[] {
+  const out: OtelCall[] = [];
   try {
     const p = payload as {
       resourceLogs?: Array<Record<string, any>>;
@@ -132,7 +132,7 @@ export function mapOtlpLogsToExchanges(payload: unknown, ctx: OtlpContext): Otel
     for (const rl of p?.resourceLogs ?? []) {
       for (const sl of rl.scopeLogs ?? []) {
         for (const rec of sl.logRecords ?? []) {
-          const ex = recordToExchange(rec, ctx);
+          const ex = recordToCall(rec, ctx);
           if (ex) out.push(ex);
         }
       }
@@ -140,7 +140,7 @@ export function mapOtlpLogsToExchanges(payload: unknown, ctx: OtlpContext): Otel
     for (const rs of p?.resourceSpans ?? []) {
       for (const ss of rs.scopeSpans ?? []) {
         for (const span of ss.spans ?? []) {
-          const ex = recordToExchange(span, ctx);
+          const ex = recordToCall(span, ctx);
           if (ex) out.push(ex);
         }
       }

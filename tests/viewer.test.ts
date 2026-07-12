@@ -4,13 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ViewerServer } from "../src/viewer/server";
 import { findViewerSafetyViolations } from "../scripts/lint-viewer-safety";
-import { Store, type ExchangeRecord } from "../src/core/store/store";
+import { Store, type CallRecord } from "../src/core/store/store";
 import { ulid } from "../src/core/store/ulid";
 
 function seedStore(stateDir: string): string {
   const store = Store.open(stateDir);
   const id = ulid();
-  const ex: ExchangeRecord = {
+  const ex: CallRecord = {
     id, sessionId: "s1", runId: "r1", source: "wire",
     agent: "claude-code", provider: "anthropic", model: "claude-sonnet-5",
     endpoint: "/v1/messages", tsRequest: Date.now(), tsResponse: Date.now(),
@@ -20,7 +20,7 @@ function seedStore(stateDir: string): string {
     responseBody: new TextEncoder().encode("{}"), responseHeaders: [], sseRaw: null,
     searchText: "hello secret-content world",
   };
-  store.insertExchange(ex);
+  store.insertCall(ex);
   store.close();
   return id;
 }
@@ -145,9 +145,9 @@ describe("ViewerServer hardening (design §6.8)", () => {
     }
   });
 
-  test("exchange detail endpoint returns decoded payloads with credential", async () => {
+  test("call detail endpoint returns decoded payloads with credential", async () => {
     const cred = await getCredential();
-    const r = await fetch(`${origin()}/api/exchange/${exId}`, {
+    const r = await fetch(`${origin()}/api/call/${exId}`, {
       headers: { "x-beagle-token": cred },
     });
     expect(r.status).toBe(200);

@@ -5,7 +5,7 @@
 import type { Finding } from "../scanner/engine";
 import type { Store } from "../store/store";
 
-export interface ExchangeMeta {
+export interface CallMeta {
   id: string;
   sessionId: string;
   agent?: string;
@@ -15,7 +15,7 @@ export interface ExchangeMeta {
 
 export interface AlertEvent {
   eventId: string;
-  exchangeId: string;
+  callId: string;
   title: string;
   body: string;
   seenBefore: boolean;
@@ -29,7 +29,7 @@ export class AlertEngine {
     private sink: AlertSink,
   ) {}
 
-  process(ex: ExchangeMeta, findings: Finding[]): void {
+  process(ex: CallMeta, findings: Finding[]): void {
     // Dedup keys on the destination PROVIDER (R6) — a mid-session model
     // switch is the same destination and must not re-alert. The model only
     // enriches the human-facing copy.
@@ -44,14 +44,14 @@ export class AlertEngine {
         severity: f.severity,
         confidenceTier: f.tier,
         destination: ex.provider,
-        exchangeId: ex.id,
+        callId: ex.id,
         ts: Date.now(),
         spanStart: f.start, spanEnd: f.end,
       });
       if (fresh && f.tier === "structured") {
         this.sink({
           eventId,
-          exchangeId: ex.id,
+          callId: ex.id,
           seenBefore,
           ...alertCopy(f, ex, displayDestination, seenBefore),
         });
@@ -62,7 +62,7 @@ export class AlertEngine {
 
 function alertCopy(
   f: Finding,
-  ex: ExchangeMeta,
+  ex: CallMeta,
   destination: string,
   seenBefore: boolean,
 ): { title: string; body: string } {
@@ -73,7 +73,7 @@ function alertCopy(
     `${f.secretType} sent to ${destination} by ${ex.agent ?? "unknown agent"}${ownKey}. ` +
     `The data has already been sent — Beagle observes, it does not block. ` +
     // 12 chars: same-millisecond ULIDs share their first 8, so an 8-char
-    // prefix can be ambiguous exactly when a burst of exchanges lands.
+    // prefix can be ambiguous exactly when a burst of calls lands.
     `Details: beagle show ${ex.id.slice(0, 12)}`;
   return { title, body };
 }

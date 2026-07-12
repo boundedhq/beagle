@@ -3,7 +3,7 @@
 // capture buffer, and the pre-forward seam (v1: dispatch scan, don't await).
 import { createServer, type Server, type Socket } from "node:net";
 import { ulid } from "../store/ulid";
-import type { Exchange } from "../exchange";
+import type { Call } from "../call";
 import { decodeBody, scrubAuthHeaders } from "../normalize/normalize";
 import {
   ConnectionPool,
@@ -14,9 +14,9 @@ import {
 import type { RunRegistry, ResolvedRun } from "./registry";
 
 export interface ScanContext {
-  /** Assigned at request start so alerts can reference the exchange before
-   *  the response completes; onExchange delivers the same id. */
-  exchangeId: string;
+  /** Assigned at request start so alerts can reference the call before
+   *  the response completes; onCall delivers the same id. */
+  callId: string;
   endpoint: string;
   runId: string;
   provider: string;
@@ -24,14 +24,14 @@ export interface ScanContext {
   authValue?: string;
 }
 
-export interface CapturedExchange extends Exchange {
-  meta: Exchange["meta"] & { captureState: "ok" | "truncated" };
+export interface CapturedCall extends Call {
+  meta: Call["meta"] & { captureState: "ok" | "truncated" };
 }
 
 export interface ProxyOptions {
   registry: RunRegistry;
   scan: (bytes: Uint8Array, ctx: ScanContext) => Promise<unknown>;
-  onExchange: (ex: CapturedExchange) => void;
+  onCall: (ex: CapturedCall) => void;
   captureBufferCap: number;
 }
 
@@ -112,7 +112,7 @@ export class ProxyServer {
     }
     const upstreamPath = m[2]!;
     const tsRequest = Date.now();
-    const exchangeId = ulid(tsRequest);
+    const callId = ulid(tsRequest);
 
     // Rewrite authority; preserve everything else byte-for-byte, in order.
     const headers: HeaderList = req.headers.map(([n, v]) =>
@@ -130,7 +130,7 @@ export class ProxyServer {
     )?.[1];
     this.opts
       .scan(new Uint8Array(req.body), {
-        exchangeId,
+        callId,
         endpoint: upstreamPath,
         runId: run.id,
         provider: run.provider,
@@ -230,8 +230,8 @@ export class ProxyServer {
     // duplicate. (Content-encoded streams keep raw too; the decoded form is
     // in bodyBytes.)
     const isStream = contentType.toLowerCase().includes("event-stream");
-    const ex: CapturedExchange = {
-      id: exchangeId,
+    const ex: CapturedCall = {
+      id: callId,
       runId: run.id,
       source: "wire",
       agent: run.agent,
@@ -253,7 +253,7 @@ export class ProxyServer {
         captureState: truncated ? "truncated" : "ok",
       },
     };
-    this.opts.onExchange(ex);
+    this.opts.onCall(ex);
   }
 }
 

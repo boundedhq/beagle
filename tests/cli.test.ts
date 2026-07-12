@@ -4,13 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cmdLeaks, cmdSearch, cmdShow, cmdStatus } from "../src/cli/commands";
 import { buildRunEnv, AGENTS } from "../src/cli/agents";
-import { Store, type ExchangeRecord } from "../src/core/store/store";
+import { Store, type CallRecord } from "../src/core/store/store";
 import { ulid } from "../src/core/store/ulid";
 
 function seed(stateDir: string): { exId: string } {
   const store = Store.open(stateDir);
   const exId = ulid();
-  const ex: ExchangeRecord = {
+  const ex: CallRecord = {
     id: exId, sessionId: "s1", runId: "r1", source: "wire",
     agent: "claude-code", provider: "anthropic", model: "claude-sonnet-5",
     endpoint: "/v1/messages", tsRequest: Date.now(), tsResponse: Date.now(),
@@ -23,11 +23,11 @@ function seed(stateDir: string): { exId: string } {
     responseHeaders: [], sseRaw: null,
     searchText: "my password is hunter2 ok",
   };
-  store.insertExchange(ex);
+  store.insertCall(ex);
   store.upsertLeakEvent({
     fingerprint: "fp1", sessionId: "s1", detector: "generic-api-key",
     secretType: "generic-api-key", severity: "medium", confidenceTier: "possible",
-    destination: "anthropic", exchangeId: exId, ts: Date.now(),
+    destination: "anthropic", callId: exId, ts: Date.now(),
   });
   store.close();
   return { exId };
@@ -73,7 +73,7 @@ describe("CLI commands (headless loop, R12)", () => {
   test("show: traffic-derived text is stripped of terminal escapes", () => {
     const store = Store.open(stateDir);
     const id = ulid();
-    store.insertExchange({
+    store.insertCall({
       id, sessionId: "s2", runId: "r1", source: "wire", agent: "claude-code",
       provider: "anthropic", model: "m", endpoint: "/v1/messages",
       tsRequest: Date.now(), scanState: "ok", captureState: "ok", sessionTier: "run",

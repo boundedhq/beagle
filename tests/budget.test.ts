@@ -100,7 +100,7 @@ describe("proxy added-latency budget (R9: p50 ≤ ~5ms over direct)", () => {
     proxy = new ProxyServer({
       registry,
       scan: () => Promise.resolve(),
-      onExchange: () => {},
+      onCall: () => {},
       captureBufferCap: 1 << 20,
     });
     await proxy.listen(0);

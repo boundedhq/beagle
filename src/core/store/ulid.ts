@@ -1,5 +1,5 @@
 // Minimal ULID: 10 chars Crockford-base32 timestamp + 16 chars randomness.
-// Time-sortable exchange ids (design §4), stdlib-only.
+// Time-sortable call ids (design §4), stdlib-only.
 const B32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 export function ulid(now: number = Date.now()): string {

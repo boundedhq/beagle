@@ -7,8 +7,8 @@ import { randomBytes } from "node:crypto";
 import type { Server, Socket } from "node:net";
 import { AlertEngine, type AlertEvent } from "../core/alert/engine";
 import { loadConfig, saveConfig, loadOrCreateInstallKey, type BeagleConfig } from "../core/config/config";
-import type { Message } from "../core/exchange";
-import { ProxyServer, type CapturedExchange, type ScanContext } from "../core/proxy/server";
+import type { Message } from "../core/call";
+import { ProxyServer, type CapturedCall, type ScanContext } from "../core/proxy/server";
 import { RunRegistry, type RunRegistration } from "../core/proxy/registry";
 import { SessionResolver, type Resolution } from "../core/session/resolver";
 import { Store } from "../core/store/store";
@@ -21,7 +21,7 @@ import { detectFormat, extractActions, parseRequest, parseResponse, type Format,
 import { startControlServer, type ControlRequest, type ControlResponse } from "./control";
 import { ViewerServer } from "../viewer/server";
 import { OtlpReceiver } from "../core/otlp/receiver";
-import type { OtelExchange } from "../parsers/otlp-map";
+import type { OtelCall } from "../parsers/otlp-map";
 // Embedded at build time so the compiled binary needs no repo checkout.
 // (bun-types types *.json as a parsed object; with { type: "text" } the
 // runtime value is the raw string — required for the sha256 pin to verify.)
@@ -45,7 +45,7 @@ export interface DaemonOptions {
   exitProcessOnIdle?: boolean;
 }
 
-interface PendingExchange {
+interface PendingCall {
   resolution: Resolution;
   parsed: ParsedRequest | null;
   format: Format;
@@ -81,7 +81,7 @@ export class Daemon {
   private otlp: OtlpReceiver | null = null;
   otlpPort = 0;
   private otlpToken = "";
-  private pending = new Map<string, PendingExchange>();
+  private pending = new Map<string, PendingCall>();
   private paused = false;
   private sweeper: ReturnType<typeof setInterval> | null = null;
   private leases = 0;
@@ -120,7 +120,7 @@ export class Daemon {
     d.proxy = new ProxyServer({
       registry: d.registry,
       scan: (bytes, ctx) => d.scanPipeline(bytes, ctx),
-      onExchange: (ex) => void d.captureExchange(ex).catch(() => {}),
+      onCall: (ex) => void d.captureCall(ex).catch(() => {}),
       captureBufferCap: 8 << 20,
     });
     await d.proxy.listen(0);
@@ -130,7 +130,7 @@ export class Daemon {
     d.otlpToken = randomBytes(24).toString("hex");
     d.otlp = new OtlpReceiver({
       token: d.otlpToken,
-      onExchanges: (exs) => d.ingestOtel(exs),
+      onCalls: (exs) => d.ingestOtel(exs),
     });
     d.otlpPort = await d.otlp.listen(0);
     d.control = await startControlServer(d.socketPath, (req, sock) => d.handleControl(req, sock));
@@ -189,22 +189,22 @@ export class Daemon {
     });
     let resolveScan!: () => void;
     const scanDone = new Promise<void>((r) => (resolveScan = r));
-    const entry: PendingExchange = {
+    const entry: PendingCall = {
       resolution, parsed, format, scanState: "ok", findings: [], scanDone,
       createdTs: Date.now(),
     };
-    this.pending.set(ctx.exchangeId, entry);
+    this.pending.set(ctx.callId, entry);
 
     const result = await this.scanHost.scan(bytes, { authValue: ctx.authValue });
     entry.findings = result.findings;
     if (result.state === "incomplete") {
       entry.scanState = "incomplete";
-      this.store.updateExchangeScanState(ctx.exchangeId, "incomplete"); // no-op if not yet inserted
+      this.store.updateCallScanState(ctx.callId, "incomplete"); // no-op if not yet inserted
     }
     resolveScan();
     this.alertEngine.process(
       {
-        id: ctx.exchangeId,
+        id: ctx.callId,
         sessionId: resolution.sessionId,
         agent: ctx.agent,
         provider: ctx.provider,
@@ -214,7 +214,7 @@ export class Daemon {
     );
   }
 
-  private async captureExchange(ex: CapturedExchange): Promise<void> {
+  private async captureCall(ex: CapturedCall): Promise<void> {
     const stash = this.pending.get(ex.id);
     // redact-on-capture (R11): await the scan verdict and substitute the raw
     // secret BEFORE the first write, so no raw value ever lands in the WAL.
@@ -287,7 +287,7 @@ export class Daemon {
       }
     }
 
-    this.store.insertExchange({
+    this.store.insertCall({
       id: ex.id,
       sessionId: resolution.sessionId,
       runId: ex.runId,
@@ -317,7 +317,7 @@ export class Daemon {
       sseRaw,
       searchText,
     });
-    this.viewer?.broadcast("exchange", {
+    this.viewer?.broadcast("call", {
       id: ex.id,
       sessionId: resolution.sessionId,
       agent: ex.agent,
@@ -337,12 +337,12 @@ export class Daemon {
     });
   }
 
-  // Mode B ingest (design §6.2): OTel-reported exchanges run the identical
+  // Mode B ingest (design §6.2): OTel-reported calls run the identical
   // scanner/session/alert/store path — source='otel' is the only difference,
   // surfaced as the agent-reported badge (R7).
-  private async ingestOtel(exchanges: OtelExchange[]): Promise<void> {
+  private async ingestOtel(calls: OtelCall[]): Promise<void> {
     this.lastActivityTs = Date.now();
-    for (const ex of exchanges) {
+    for (const ex of calls) {
       if (this.paused || this.config.excludedAgents.includes(ex.agent ?? "")) continue;
       const resolution = this.resolver.resolve({
         agent: ex.agent,
@@ -365,7 +365,7 @@ export class Daemon {
           responseId: ex.convId,
         });
       }
-      this.store.insertExchange({
+      this.store.insertCall({
         id: ex.id,
         sessionId: resolution.sessionId,
         runId: ex.runId,
@@ -406,7 +406,7 @@ export class Daemon {
         },
         scanResult.findings,
       );
-      this.viewer?.broadcast("exchange", {
+      this.viewer?.broadcast("call", {
         id: ex.id,
         sessionId: resolution.sessionId,
         agent: ex.agent,
@@ -532,7 +532,7 @@ export class Daemon {
             proxyPort: this.proxyPort,
             otlpPort: this.otlpPort,
             otlpToken: this.otlpToken,
-            exchanges: this.store.countExchanges(),
+            calls: this.store.countCalls(),
             leaks: this.store.countLeakEvents(),
           },
         };
@@ -625,7 +625,7 @@ function firstLine(s: string, max: number): string {
 function buildSearchText(
   parsed: ParsedRequest | null,
   responseText: string | undefined,
-  ex: CapturedExchange,
+  ex: CapturedCall,
 ): string {
   // Parsed text where a parser ran (finds secrets that appear \"-escaped in
   // raw JSON); decoded raw text otherwise (R8 / schema note).

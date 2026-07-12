@@ -106,13 +106,13 @@ export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null):
   }
   const store = openStore(stateDir);
   if (isStoreError(store)) return lines.concat(store.error).join("\n");
-  const exchanges = store?.countExchanges() ?? 0;
+  const calls = store?.countCalls() ?? 0;
   const leaks = store?.countLeakEvents() ?? 0;
   store?.close();
   const dbPath = join(stateDir, "beagle.db");
   const sizeMb = existsSync(dbPath) ? (statSync(dbPath).size / (1 << 20)).toFixed(1) : "0.0";
   const cfg = loadConfig(stateDir);
-  lines.push(`calls: ${exchanges} · leaks: ${leaks} · store: ${sizeMb} MB`);
+  lines.push(`calls: ${calls} · leaks: ${leaks} · store: ${sizeMb} MB`);
   lines.push(
     `retention: ${cfg.payloadWindowDays}d / ${cfg.sizeCapMB} MB payloads · ${cfg.eventWindowDays}d leak events`,
   );
@@ -136,7 +136,7 @@ export function cmdSearch(stateDir: string, term: string): string {
     `found in ${hits.length} call${hits.length === 1 ? "" : "s"} across ${sessions.size} session${sessions.size === 1 ? "" : "s"}:`,
   ];
   for (const h of hits) {
-    lines.push(`  ${h.exchangeId.slice(0, 8)}  ${new Date(h.tsRequest).toISOString()}  session ${clean(h.sessionId).slice(0, 8)}`);
+    lines.push(`  ${h.callId.slice(0, 8)}  ${new Date(h.tsRequest).toISOString()}  session ${clean(h.sessionId).slice(0, 8)}`);
   }
   return lines.join("\n");
 }
@@ -153,7 +153,7 @@ export function cmdLeaks(stateDir: string): string {
     const tier = e.confidenceTier === "structured" ? "" : " (possible)";
     lines.push(
       `  ${new Date(e.firstTs).toISOString()}  ${clean(e.secretType)}${tier} → ${clean(e.destination)}` +
-        `  ×${e.occurrences}${e.firstExchange ? `  first: ${e.firstExchange.slice(0, 8)}` : ""}`,
+        `  ×${e.occurrences}${e.firstCall ? `  first: ${e.firstCall.slice(0, 8)}` : ""}`,
     );
   }
   return lines.join("\n");
@@ -162,7 +162,7 @@ export function cmdLeaks(stateDir: string): string {
 export function cmdShow(stateDir: string, idPrefix: string): string {
   const store = openStore(stateDir);
   if (isStoreError(store)) return store.error;
-  const ex = store?.getExchange(idPrefix) ?? null;
+  const ex = store?.getCall(idPrefix) ?? null;
   store?.close();
   if (!ex) return `no call matches '${idPrefix}' (prefix may be ambiguous or unknown).`;
   const lines = [

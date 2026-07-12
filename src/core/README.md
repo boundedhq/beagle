@@ -11,7 +11,7 @@ Planned modules (design §2):
 |---|---|---|
 | `proxy/` | listen, strip `/run/<uuid>`, upstream pool, forward raw, read-once pump | 340 |
 | `otlp/` | local OTLP/HTTP receiver (Mode B) | 120 |
-| `normalize/` | proxy/OTLP input → canonical `Exchange`; auth-header scrub | 120 |
+| `normalize/` | proxy/OTLP input → canonical `Call`; auth-header scrub | 120 |
 | `scanner/` | keyword prescan → regex → entropy → checksum → tier → fingerprint | 350 |
 | `session/` | conversation-key derivation (R4 ladder) | 120 |
 | `alert/` | fingerprint dedup, event upsert, alert emission | 120 |

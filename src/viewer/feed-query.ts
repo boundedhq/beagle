@@ -15,7 +15,7 @@ export interface LeakEvent {
   occurrences: number;
   firstTs: number;
   lastTs: number;
-  firstExchange: string | null;
+  firstCall: string | null;
 }
 
 // The leak log (CLI `leaks` + viewer /api/leaks). Display query, non-core.
@@ -38,7 +38,7 @@ export function listLeakEvents(store: Store): LeakEvent[] {
       occurrences: r.occurrences as number,
       firstTs: r.first_ts as number,
       lastTs: r.last_ts as number,
-      firstExchange: (r.first_exchange as string) ?? null,
+      firstCall: (r.first_exchange as string) ?? null,
     }));
 }
 
@@ -61,7 +61,7 @@ export interface FeedRow {
   hasLeak: boolean;
 }
 
-export function listExchanges(store: Store, limit: number): FeedRow[] {
+export function listCalls(store: Store, limit: number): FeedRow[] {
   return store
     .queryAll<Record<string, unknown>>(
       `SELECT e.id, e.session_id, e.agent, e.provider, e.model, e.ts_request,

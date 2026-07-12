@@ -1,4 +1,4 @@
-// Canonical Exchange — the source-pluggable seam (design §5). Both capture
+// Canonical Call — the source-pluggable seam (design §5). Both capture
 // sources (wire proxy, OTLP receiver) converge on this shape; scanner,
 // session resolver, store, and UI stay source-agnostic.
 
@@ -9,7 +9,7 @@ export interface Message {
   content: string;
 }
 
-export interface Exchange {
+export interface Call {
   id: string;
   runId: string;
   source: CaptureSource;

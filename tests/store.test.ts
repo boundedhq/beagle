@@ -5,14 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store, SCHEMA_VERSION, StoreVersionError } from "../src/core/store/store";
 import { listLeakEvents } from "../src/viewer/feed-query";
-import type { ExchangeRecord } from "../src/core/store/store";
+import type { CallRecord } from "../src/core/store/store";
 import { ulid } from "../src/core/store/ulid";
 
 function tmpRoot(): string {
   return mkdtempSync(join(tmpdir(), "beagle-store-"));
 }
 
-function fakeExchange(overrides: Partial<ExchangeRecord> = {}): ExchangeRecord {
+function fakeCall(overrides: Partial<CallRecord> = {}): CallRecord {
   return {
     id: ulid(),
     sessionId: "sess-1",
@@ -86,12 +86,12 @@ describe("Store lifecycle", () => {
     // Populate a real store, then rewind its on-disk schema to look like a v1
     // store (no v2 columns, user_version=1) so Store.open exercises migrate().
     const store = Store.open(dir);
-    const ex = fakeExchange();
-    store.insertExchange(ex);
+    const ex = fakeCall();
+    store.insertCall(ex);
     store.upsertLeakEvent({
       fingerprint: "fp1", sessionId: "sess-1", detector: "d", secretType: "t",
       severity: "high", confidenceTier: "structured",
-      destination: "anthropic/m", exchangeId: ex.id, ts: Date.now(),
+      destination: "anthropic/m", callId: ex.id, ts: Date.now(),
     });
     store.close();
 
@@ -106,44 +106,44 @@ describe("Store lifecycle", () => {
     const migrated = Store.open(dir);
     expect(migrated.pragma("user_version")).toBe(SCHEMA_VERSION);
     // Pre-migration rows survived.
-    expect(migrated.getExchange(ex.id)?.provider).toBe("anthropic");
+    expect(migrated.getCall(ex.id)?.provider).toBe("anthropic");
     expect(listLeakEvents(migrated).length).toBe(1);
     // The re-added columns now accept writes (the redact-on-capture flag).
-    const ex2 = fakeExchange({ redacted: true });
-    migrated.insertExchange(ex2);
-    expect(migrated.getExchange(ex2.id)?.redacted).toBe(true);
+    const ex2 = fakeCall({ redacted: true });
+    migrated.insertCall(ex2);
+    expect(migrated.getCall(ex2.id)?.redacted).toBe(true);
     migrated.close();
   });
 });
 
-describe("Exchange write/read", () => {
+describe("Call write/read", () => {
   let dir: string;
   beforeEach(() => (dir = tmpRoot()));
 
-  test("insert then read back full exchange with payload", () => {
+  test("insert then read back full call with payload", () => {
     const store = Store.open(dir);
-    const ex = fakeExchange();
-    store.insertExchange(ex);
-    const got = store.getExchange(ex.id);
+    const ex = fakeCall();
+    store.insertCall(ex);
+    const got = store.getCall(ex.id);
     expect(got?.provider).toBe("anthropic");
     expect(new TextDecoder().decode(got!.requestBody!)).toContain("secret-xyz");
     expect(got?.requestHeaders).toEqual([["content-type", "application/json"]]);
     store.close();
   });
 
-  test("getExchange supports unambiguous id prefix", () => {
+  test("getCall supports unambiguous id prefix", () => {
     const store = Store.open(dir);
-    const ex = fakeExchange();
-    store.insertExchange(ex);
-    expect(store.getExchange(ex.id.slice(0, 8))?.id).toBe(ex.id);
+    const ex = fakeCall();
+    store.insertCall(ex);
+    expect(store.getCall(ex.id.slice(0, 8))?.id).toBe(ex.id);
     store.close();
   });
 
-  test("literal search finds content and reports exchange/session grouping", () => {
+  test("literal search finds content and reports call/session grouping", () => {
     const store = Store.open(dir);
-    store.insertExchange(fakeExchange({ sessionId: "s1" }));
-    store.insertExchange(fakeExchange({ sessionId: "s1" }));
-    store.insertExchange(fakeExchange({ sessionId: "s2", searchText: "nothing here" }));
+    store.insertCall(fakeCall({ sessionId: "s1" }));
+    store.insertCall(fakeCall({ sessionId: "s1" }));
+    store.insertCall(fakeCall({ sessionId: "s2", searchText: "nothing here" }));
     const hits = store.searchLiteral("secret-xyz");
     expect(hits.length).toBe(2);
     expect(new Set(hits.map((h) => h.sessionId))).toEqual(new Set(["s1"]));
@@ -154,7 +154,7 @@ describe("Exchange write/read", () => {
   test("literal search is safe for FTS metacharacters in credentials", () => {
     const store = Store.open(dir);
     const cred = 'p@ss"word-*with(chars)';
-    store.insertExchange(fakeExchange({ searchText: `leading ${cred} trailing` }));
+    store.insertCall(fakeCall({ searchText: `leading ${cred} trailing` }));
     const hits = store.searchLiteral(cred);
     expect(hits.length).toBe(1);
     store.close();
@@ -167,18 +167,18 @@ describe("Leak events", () => {
 
   test("upsert: first insert reports fresh, second same-key increments", () => {
     const store = Store.open(dir);
-    const ex = fakeExchange();
-    store.insertExchange(ex);
+    const ex = fakeCall();
+    store.insertCall(ex);
     const first = store.upsertLeakEvent({
       fingerprint: "fp1", sessionId: "sess-1", detector: "aws-access-key",
       secretType: "aws-key", severity: "high", confidenceTier: "structured",
-      destination: "anthropic/claude-sonnet-5", exchangeId: ex.id, ts: Date.now(),
+      destination: "anthropic/claude-sonnet-5", callId: ex.id, ts: Date.now(),
     });
     expect(first.fresh).toBe(true);
     const second = store.upsertLeakEvent({
       fingerprint: "fp1", sessionId: "sess-1", detector: "aws-access-key",
       secretType: "aws-key", severity: "high", confidenceTier: "structured",
-      destination: "anthropic/claude-sonnet-5", exchangeId: ex.id, ts: Date.now(),
+      destination: "anthropic/claude-sonnet-5", callId: ex.id, ts: Date.now(),
     });
     expect(second.fresh).toBe(false);
     const events = listLeakEvents(store);
@@ -189,11 +189,11 @@ describe("Leak events", () => {
 
   test("same fingerprint, new destination is a fresh event", () => {
     const store = Store.open(dir);
-    const ex = fakeExchange();
-    store.insertExchange(ex);
+    const ex = fakeCall();
+    store.insertCall(ex);
     const base = {
       fingerprint: "fp1", sessionId: "sess-1", detector: "d", secretType: "t",
-      severity: "high", confidenceTier: "structured", exchangeId: ex.id, ts: Date.now(),
+      severity: "high", confidenceTier: "structured", callId: ex.id, ts: Date.now(),
     };
     store.upsertLeakEvent({ ...base, destination: "anthropic/m" });
     const r = store.upsertLeakEvent({ ...base, destination: "openai/m" });
@@ -209,34 +209,34 @@ describe("Retention & purge", () => {
 
   test("sweep deletes payloads+exchanges past the age window, keeps leak events", () => {
     const store = Store.open(dir);
-    const old = fakeExchange({ tsRequest: Date.now() - 8 * 24 * 3600_000 });
-    const fresh = fakeExchange();
-    store.insertExchange(old);
-    store.insertExchange(fresh);
+    const old = fakeCall({ tsRequest: Date.now() - 8 * 24 * 3600_000 });
+    const fresh = fakeCall();
+    store.insertCall(old);
+    store.insertCall(fresh);
     store.upsertLeakEvent({
       fingerprint: "fp", sessionId: old.sessionId, detector: "d", secretType: "t",
       severity: "high", confidenceTier: "structured", destination: "x",
-      exchangeId: old.id, ts: old.tsRequest,
+      callId: old.id, ts: old.tsRequest,
     });
     store.sweep({ payloadWindowMs: 7 * 24 * 3600_000, eventWindowMs: 90 * 24 * 3600_000, sizeCapBytes: 1 << 30 });
-    expect(store.getExchange(old.id)).toBeNull();
-    expect(store.getExchange(fresh.id)).not.toBeNull();
+    expect(store.getCall(old.id)).toBeNull();
+    expect(store.getCall(fresh.id)).not.toBeNull();
     const events = listLeakEvents(store);
     expect(events.length).toBe(1);
-    expect(events[0]?.firstExchange).toBeNull(); // FK set null, event survives
+    expect(events[0]?.firstCall).toBeNull(); // FK set null, event survives
     store.close();
   });
 
   test("sweep enforces size cap oldest-first", () => {
     const store = Store.open(dir);
     const big = () => new Uint8Array(200_000);
-    const a = fakeExchange({ tsRequest: Date.now() - 3000, requestBody: big() });
-    const b = fakeExchange({ tsRequest: Date.now() - 2000, requestBody: big() });
-    const c = fakeExchange({ tsRequest: Date.now() - 1000, requestBody: big() });
-    for (const e of [a, b, c]) store.insertExchange(e);
+    const a = fakeCall({ tsRequest: Date.now() - 3000, requestBody: big() });
+    const b = fakeCall({ tsRequest: Date.now() - 2000, requestBody: big() });
+    const c = fakeCall({ tsRequest: Date.now() - 1000, requestBody: big() });
+    for (const e of [a, b, c]) store.insertCall(e);
     store.sweep({ payloadWindowMs: Infinity, eventWindowMs: Infinity, sizeCapBytes: 450_000 });
-    expect(store.getExchange(a.id)).toBeNull();
-    expect(store.getExchange(c.id)).not.toBeNull();
+    expect(store.getCall(a.id)).toBeNull();
+    expect(store.getCall(c.id)).not.toBeNull();
     store.close();
   });
 
@@ -257,27 +257,27 @@ describe("Retention & purge", () => {
 
   test("purge by session removes that session only", () => {
     const store = Store.open(dir);
-    const a = fakeExchange({ sessionId: "s1" });
-    const b = fakeExchange({ sessionId: "s2" });
-    store.insertExchange(a);
-    store.insertExchange(b);
+    const a = fakeCall({ sessionId: "s1" });
+    const b = fakeCall({ sessionId: "s2" });
+    store.insertCall(a);
+    store.insertCall(b);
     store.purge({ kind: "session", sessionId: "s1" });
-    expect(store.getExchange(a.id)).toBeNull();
-    expect(store.getExchange(b.id)).not.toBeNull();
+    expect(store.getCall(a.id)).toBeNull();
+    expect(store.getCall(b.id)).not.toBeNull();
     store.close();
   });
 
   test("panic purge erases everything including leak events and FTS", () => {
     const store = Store.open(dir);
-    const ex = fakeExchange();
-    store.insertExchange(ex);
+    const ex = fakeCall();
+    store.insertCall(ex);
     store.upsertLeakEvent({
       fingerprint: "fp", sessionId: ex.sessionId, detector: "d", secretType: "t",
       severity: "high", confidenceTier: "structured", destination: "x",
-      exchangeId: ex.id, ts: Date.now(),
+      callId: ex.id, ts: Date.now(),
     });
     store.panicPurge();
-    expect(store.getExchange(ex.id)).toBeNull();
+    expect(store.getCall(ex.id)).toBeNull();
     expect(listLeakEvents(store)).toEqual([]);
     expect(store.searchLiteral("secret-xyz")).toEqual([]);
     store.close();
