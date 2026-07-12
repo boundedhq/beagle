@@ -87,6 +87,10 @@ export class Daemon {
   private leases = 0;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private persistent = false;
+  // Last time the pipeline saw traffic. The idle check consults this so a
+  // daemon actively relaying (even with a lost/failed lease) never stops
+  // mid-agent-session — leases are the primary signal, this is the backstop.
+  private lastActivityTs = Date.now();
 
   private constructor(private opts: DaemonOptions) {
     this.socketPath = join(opts.stateDir, "control.sock");
@@ -167,6 +171,7 @@ export class Daemon {
   // ---- pipeline ----
 
   private async scanPipeline(bytes: Uint8Array, ctx: ScanContext): Promise<void> {
+    this.lastActivityTs = Date.now();
     if (this.paused || this.config.excludedAgents.includes(ctx.agent ?? "")) return;
     const format = detectFormat(ctx.endpoint);
     const parsed = format === "unknown" ? null : parseRequest(format, bytes);
@@ -319,6 +324,7 @@ export class Daemon {
   // scanner/session/alert/store path — source='otel' is the only difference,
   // surfaced as the agent-reported badge (R7).
   private async ingestOtel(exchanges: OtelExchange[]): Promise<void> {
+    this.lastActivityTs = Date.now();
     for (const ex of exchanges) {
       if (this.paused || this.config.excludedAgents.includes(ex.agent ?? "")) continue;
       const resolution = this.resolver.resolve({
@@ -437,15 +443,20 @@ export class Daemon {
     if (this.persistent || !this.isRunning) return;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     if (this.leases > 0 || this.viewer?.isRunning) return;
+    const idleMs = this.opts.idleTimeoutMs ?? DEFAULT_IDLE_MS;
     this.idleTimer = setTimeout(() => {
-      if (this.leases > 0 || this.viewer?.isRunning) {
-        this.armIdleExit(); // something reappeared; re-check later
+      const recentTraffic = Date.now() - this.lastActivityTs < idleMs;
+      if (this.leases > 0 || this.viewer?.isRunning || recentTraffic) {
+        // Something reappeared — or the proxy is actively relaying (a lost
+        // lease must never let us stop mid-agent-session). Re-check later.
+        this.idleTimer = null;
+        this.armIdleExit();
         return;
       }
       void this.stop().then(() => {
         if (this.opts.exitProcessOnIdle !== false) process.exit(0);
       });
-    }, this.opts.idleTimeoutMs ?? DEFAULT_IDLE_MS);
+    }, idleMs);
     this.idleTimer.unref?.();
   }
 

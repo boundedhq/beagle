@@ -74,4 +74,42 @@ describe("daemon idle-exit (design §6.7)", () => {
     const r = await controlRequest(d.socketPath, { cmd: "ping" });
     expect(r.ok).toBe(true);
   });
+
+  test("active proxy traffic blocks idle-exit even with NO lease (lost-lease backstop)", async () => {
+    const { createServer, connect } = await import("node:net");
+    const upstream = createServer((sock) => {
+      sock.on("data", () => sock.write("HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}"));
+      sock.on("error", () => {});
+    });
+    await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", () => r()));
+    const upPort = (upstream.address() as { port: number }).port;
+
+    const d = await start({ idleTimeoutMs: 250 });
+    await controlRequest(d.socketPath, {
+      cmd: "register-run",
+      args: { id: "busy", agent: "a", provider: "anthropic", upstream: `http://127.0.0.1:${upPort}` },
+    });
+
+    const fire = () =>
+      new Promise<void>((resolve) => {
+        const s = connect(d.proxyPort, "127.0.0.1", () =>
+          s.write("POST /run/busy/v1/messages HTTP/1.1\r\nHost: h\r\nContent-Length: 2\r\n\r\n{}"),
+        );
+        s.on("data", () => s.end());
+        s.on("close", () => resolve());
+        s.on("error", () => resolve());
+      });
+
+    // traffic every ~120ms for ~700ms, well past the 250ms idle window
+    for (let i = 0; i < 6; i++) {
+      await fire();
+      await Bun.sleep(120);
+    }
+    expect(d.isRunning).toBe(true); // traffic held it open without any lease
+
+    // traffic stops → winds down within a couple idle windows
+    await Bun.sleep(700);
+    expect(d.isRunning).toBe(false);
+    upstream.close();
+  });
 });

@@ -63,8 +63,23 @@ export function openLease(socketPath: string, timeoutMs = 3000): Promise<Socket>
     let buf = "";
     sock.on("data", (d) => {
       buf += d.toString("utf8");
-      if (buf.indexOf("\n") === -1) return;
+      const nl = buf.indexOf("\n");
+      if (nl === -1) return;
       clearTimeout(timer);
+      // Validate the grant: a daemon that doesn't understand `lease` answers
+      // ok:false, and treating that as a lease would let it idle-exit mid-run.
+      try {
+        const resp = JSON.parse(buf.slice(0, nl)) as ControlResponse;
+        if (!resp.ok) {
+          sock.destroy();
+          reject(new Error(`lease refused: ${resp.error ?? "unknown"}`));
+          return;
+        }
+      } catch (e) {
+        sock.destroy();
+        reject(e as Error);
+        return;
+      }
       // keep the socket OPEN — it is the lease
       resolve(sock);
     });
