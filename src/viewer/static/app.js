@@ -197,10 +197,19 @@ function Detail({ id }) {
   return html`
     <div class="detail">
       <div class="meta">
-        ${detail.id} · ${detail.agent} → ${detail.provider}${detail.model ? "/" + detail.model : ""}
-        · session ${detail.sessionId.slice(0, 8)} (${detail.sessionTier})
-        ${detail.captureState !== "ok" ? " · ⚠ capture truncated" : ""}
-        ${detail.scanState !== "ok" ? " · ⚠ scan incomplete — unverified, not clean" : ""}
+        <div><span class="k">exchange</span> ${detail.id}</div>
+        <div>
+          <span class="k">from</span> ${detail.agent}${" "}
+          <span class="k">to</span> ${detail.provider}${detail.model ? " / " + detail.model : ""}
+        </div>
+        <div>
+          <span class="k">session</span> ${detail.sessionId.slice(0, 8)} ·${" "}
+          <span class="k">grouped by</span> ${groupedBy(detail.sessionTier)}
+        </div>
+        ${detail.captureState !== "ok" &&
+        html`<div class="warn">⚠ capture truncated — the stored bytes are incomplete</div>`}
+        ${detail.scanState !== "ok" &&
+        html`<div class="warn">⚠ scan incomplete — this body was not fully verified, not marked clean</div>`}
       </div>
       ${leaks.length > 0 &&
       html`<div class="leakbar">
@@ -312,6 +321,20 @@ function SearchResults({ hits, term, onClear, onOpen }) {
       )}
     </div>
   `;
+}
+
+// Plain-language read of HOW this exchange was grouped into its session (the
+// resolver's tier), with the confidence that grouping carries — so the label
+// says what it means, not an internal tag like "conv-id".
+function groupedBy(tier) {
+  switch (tier) {
+    case "conv-id": return "the provider's conversation id (high confidence)";
+    case "prefix": return "matching message history (high confidence)";
+    case "compaction-link": return "history matched across a compaction (medium confidence)";
+    case "run": return "the same run, no history match (lower confidence)";
+    case "time-gap": return "recent activity — a best guess (low confidence)";
+    default: return tier;
+  }
 }
 
 function pretty(s) {
