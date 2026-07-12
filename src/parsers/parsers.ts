@@ -163,6 +163,79 @@ function parseSse(format: Format, raw: string): ParsedResponse | null {
   return out.text || out.model || out.responseId ? out : null;
 }
 
+export interface ToolAction {
+  tool: string;
+  detail?: string; // e.g. the shell command or a file path
+}
+
+// Extract the tool calls the assistant made in its response, for a plain-English
+// "what the turn did" summary. Best-effort; streamed tool inputs may be partial.
+export function extractActions(format: Format, bytes: Uint8Array): ToolAction[] {
+  try {
+    const text = new TextDecoder().decode(bytes);
+    let body: Record<string, any>;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      return extractActionsSse(format, text);
+    }
+    const out: ToolAction[] = [];
+    if (format === "anthropic-messages") {
+      for (const b of body.content ?? []) {
+        if (b?.type === "tool_use") out.push(toolAction(b.name, b.input));
+      }
+    } else if (format === "openai-chat") {
+      for (const tc of body.choices?.[0]?.message?.tool_calls ?? []) {
+        out.push(toolAction(tc.function?.name, safeJson(tc.function?.arguments)));
+      }
+    } else if (format === "openai-responses") {
+      for (const item of body.output ?? []) {
+        if (item?.type === "function_call") out.push(toolAction(item.name, safeJson(item.arguments)));
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+function extractActionsSse(format: Format, raw: string): ToolAction[] {
+  const out: ToolAction[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.startsWith("data:")) continue;
+    const payload = line.slice(5).trim();
+    if (!payload || payload === "[DONE]") continue;
+    let ev: Record<string, any>;
+    try { ev = JSON.parse(payload); } catch { continue; }
+    if (format === "anthropic-messages" && ev.type === "content_block_start" && ev.content_block?.type === "tool_use") {
+      out.push(toolAction(ev.content_block.name, ev.content_block.input));
+    } else if (format === "openai-chat") {
+      for (const tc of ev.choices?.[0]?.delta?.tool_calls ?? []) {
+        if (tc.function?.name) out.push(toolAction(tc.function.name, undefined));
+      }
+    }
+  }
+  return out;
+}
+
+function safeJson(s: unknown): Record<string, unknown> | undefined {
+  if (typeof s !== "string") return undefined;
+  try { return JSON.parse(s); } catch { return undefined; }
+}
+
+function toolAction(name: unknown, input: unknown): ToolAction {
+  const tool = String(name ?? "tool");
+  const inp = (input ?? {}) as Record<string, unknown>;
+  // Pull a short, useful detail for the common coding-agent tools.
+  const detail =
+    (typeof inp.command === "string" && inp.command) ||
+    (typeof inp.file_path === "string" && inp.file_path) ||
+    (typeof inp.path === "string" && inp.path) ||
+    (typeof inp.pattern === "string" && inp.pattern) ||
+    undefined;
+  return detail ? { tool, detail: String(detail) } : { tool };
+}
+
 function toMessage(m: Record<string, unknown>): Message {
   return {
     role: String(m.role ?? "unknown"),

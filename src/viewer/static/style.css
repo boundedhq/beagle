@@ -43,8 +43,8 @@ main { flex: 1; padding: 8px 16px; }
 .row .time { color: var(--muted); flex: 0 0 60px; }
 .row .agent { color: var(--accent); flex: 0 0 90px; overflow: hidden; text-overflow: ellipsis; }
 .row .model { color: var(--muted); flex: 0 0 130px; overflow: hidden; text-overflow: ellipsis; }
-.row .summary { flex: 1; overflow: hidden; text-overflow: ellipsis; }
-.row .weight { color: var(--muted); flex: 0 0 90px; text-align: right; }
+.row .summary { flex: 1 1 auto; min-width: 120px; overflow: hidden; text-overflow: ellipsis; }
+.row .weight { color: var(--muted); flex: 0 0 auto; text-align: right; white-space: nowrap; }
 .dot { flex: 0 0 8px; height: 8px; border-radius: 50%; background: var(--ok); align-self: center; }
 .dot.err { background: var(--leak); }
 .chip {
@@ -53,6 +53,12 @@ main { flex: 1; padding: 8px 16px; }
 }
 .chip.leak { background: #3b1420; border-color: var(--leak); color: #ffb3b3; }
 .chip.otel { border-color: #b98c2e; color: #e6c36b; }
+.chip.wire { border-color: #2e6f4e; color: #7fd0a3; }
+.leakbar {
+  background: #3b1420; border: 1px solid var(--leak); color: #ffcaca;
+  padding: 8px 10px; border-radius: 6px; margin: 8px 0; font-size: 13px;
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
 .detail {
   background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
   margin: 4px 0 10px; padding: 12px; overflow-x: auto;
@@ -67,6 +73,10 @@ main { flex: 1; padding: 8px 16px; }
 }
 .folded { color: var(--muted); cursor: pointer; padding: 4px 0; }
 mark { background: #5b4a12; color: #ffe28a; border-radius: 2px; }
+mark.leak {
+  background: var(--leak); color: #1a0000; font-weight: 600;
+  padding: 0 3px; border-radius: 3px;
+}
 footer {
   padding: 8px 16px; color: var(--muted); font-size: 12px;
   border-top: 1px solid var(--border); background: var(--panel);

@@ -50,6 +50,8 @@ export interface LeakEventInput {
   destination: string;
   exchangeId: string;
   ts: number;
+  spanStart?: number; // char span of the secret in the request body (R7 highlight)
+  spanEnd?: number;
 }
 
 export interface LeakEvent extends Omit<LeakEventInput, "exchangeId" | "ts"> {
@@ -219,8 +221,10 @@ export class Store {
          input.severity, input.confidenceTier, input.destination, input.ts, input.ts, input.exchangeId],
       );
     }
-    this.db.run(`INSERT OR IGNORE INTO leak_occurrences (event_id, exchange_id) VALUES (?,?)`,
-      [eventId, input.exchangeId]);
+    this.db.run(
+      `INSERT OR IGNORE INTO leak_occurrences (event_id, exchange_id, span_start, span_end) VALUES (?,?,?,?)`,
+      [eventId, input.exchangeId, input.spanStart ?? null, input.spanEnd ?? null],
+    );
     return { fresh, eventId };
   }
 
@@ -230,13 +234,8 @@ export class Store {
     return this.db.all<T>(sql, params);
   }
 
-  countExchanges(): number {
-    return this.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM exchanges`)?.n ?? 0;
-  }
-
-  countLeakEvents(): number {
-    return this.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM leak_events`)?.n ?? 0;
-  }
+  countExchanges(): number { return this.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM exchanges`)?.n ?? 0; }
+  countLeakEvents(): number { return this.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM leak_events`)?.n ?? 0; }
 
   updateExchangeScanState(id: string, state: "ok" | "incomplete"): void {
     this.db.run(`UPDATE exchanges SET scan_state=? WHERE id=?`, [state, id]);

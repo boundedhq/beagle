@@ -162,7 +162,9 @@ function Row({ x, onToggle, onSession }) {
       <span class="model">${x.model ?? ""}</span>
       <span class="summary">${x.summary ?? "(no summary)"}</span>
       ${x.hasLeak && html`<span class="chip leak">leak</span>`}
-      ${x.source === "otel" && html`<span class="chip otel">agent-reported</span>`}
+      ${x.source === "wire"
+        ? html`<span class="chip wire" title="wire-verified — observed on the wire">✓ wire</span>`
+        : html`<span class="chip otel" title="agent-reported — the agent's own self-report">agent</span>`}
       ${x.scanState !== "ok" && html`<span class="chip">scan incomplete</span>`}
       <span class="weight">${kb} ${tok}</span>
       <span class="chip" onClick=${(e) => { e.stopPropagation(); onSession(); }}>
@@ -180,21 +182,16 @@ function Detail({ id }) {
   if (!detail) return html`<div class="detail">loading…</div>`;
   if (detail.error) return html`<div class="detail">${detail.error}</div>`;
 
-  let messages = [];
-  let system = null;
-  try {
-    const body = JSON.parse(detail.requestBody);
-    system = typeof body.system === "string" ? body.system : null;
-    // Anthropic uses `messages`; the Responses API uses `input` items.
-    const items = Array.isArray(body.messages) ? body.messages : body.input;
-    messages = Array.isArray(items) ? items : [];
-  } catch { /* raw only */ }
-
+  // The server assembles the readable structure (detail.ts): parsed messages,
+  // reassembled response text, and the secret strings to highlight.
+  const messages = detail.messages ?? [];
+  const system = detail.system;
+  const leaks = detail.leaks ?? [];
   const older = messages.slice(0, -1);
   const newest = messages.slice(-1);
-  // Nothing structured to show → raw is the only honest view; don't render
-  // an empty timeline with a toggle the user has to discover.
-  const hasStructure = messages.length > 0 || system !== null;
+  // Nothing structured → raw is the only honest view; don't show an empty
+  // timeline with a toggle the user has to discover.
+  const hasStructure = messages.length > 0 || system != null;
   const showRaw = raw || !hasStructure;
 
   return html`
@@ -205,6 +202,12 @@ function Detail({ id }) {
         ${detail.captureState !== "ok" ? " · ⚠ capture truncated" : ""}
         ${detail.scanState !== "ok" ? " · ⚠ scan incomplete — unverified, not clean" : ""}
       </div>
+      ${leaks.length > 0 &&
+      html`<div class="leakbar">
+        🔴 ${leaks.length} secret${leaks.length === 1 ? "" : "s"} sent in this exchange —
+        highlighted below:
+        ${leaks.map((l) => html`<span class="chip leak">${l.secretType}</span>`)}
+      </div>`}
       ${hasStructure &&
       html`<button class=${showRaw ? "active" : ""} onClick=${() => setRaw(!raw)}>
         ${showRaw ? "structured view" : "raw bytes"}
@@ -212,27 +215,49 @@ function Detail({ id }) {
       ${showRaw
         ? html`
             <h4>request</h4>
-            <pre>${pretty(detail.requestBody)}</pre>
+            <pre><${Highlighted} text=${pretty(detail.requestRaw)} leaks=${leaks} /></pre>
             <h4>response</h4>
-            <pre>${pretty(detail.responseBody)}</pre>
+            <pre>${pretty(detail.responseRaw)}</pre>
             ${detail.sseRaw &&
-            html`<h4>raw stream (as received)</h4>
-              <pre>${detail.sseRaw}</pre>`}
+            html`<h4>raw stream (as received)</h4><pre>${detail.sseRaw}</pre>`}
           `
         : html`
-            ${system !== null &&
+            ${system != null &&
             html`<${Chip} label=${`system · ${system.length} chars`} body=${system} />`}
             ${older.length > 0 &&
             html`<div class="folded" onClick=${() => setHistoryOpen(!historyOpen)}>
               ${historyOpen ? "▾" : "▸"} ${older.length} earlier message${older.length === 1 ? "" : "s"}
             </div>`}
-            ${historyOpen && older.map((m) => html`<${Msg} m=${m} />`)}
-            ${newest.map((m) => html`<${Msg} m=${m} />`)}
-            ${detail.responseBody &&
-            html`<${Msg} m=${{ role: "assistant", content: extractText(detail.responseBody) }} />`}
+            ${historyOpen && older.map((m) => html`<${Msg} m=${m} leaks=${leaks} />`)}
+            ${newest.map((m) => html`<${Msg} m=${m} leaks=${leaks} />`)}
+            ${detail.responseText != null &&
+            html`<${Msg} m=${{ role: "assistant", content: detail.responseText }} leaks=${leaks} />`}
           `}
     </div>
   `;
+}
+
+// Renders text, wrapping each detected secret value in a red <mark>. Splits on
+// values and builds text nodes only — never raw-HTML injection (§6.8).
+function Highlighted({ text, leaks }) {
+  if (!leaks || leaks.length === 0 || typeof text !== "string") return text ?? "";
+  const values = leaks.map((l) => l.value).filter(Boolean);
+  const out = [];
+  let rest = text;
+  let guard = 0;
+  while (rest && guard++ < 100000) {
+    let at = -1;
+    let hit = null;
+    for (const v of values) {
+      const i = rest.indexOf(v);
+      if (i !== -1 && (at === -1 || i < at)) { at = i; hit = v; }
+    }
+    if (at === -1) { out.push(rest); break; }
+    if (at > 0) out.push(rest.slice(0, at));
+    out.push(html`<mark class="leak" title="detected secret">${hit}</mark>`);
+    rest = rest.slice(at + hit.length);
+  }
+  return html`${out}`;
 }
 
 function Chip({ label, body }) {
@@ -245,13 +270,13 @@ function Chip({ label, body }) {
   `;
 }
 
-function Msg({ m }) {
+function Msg({ m, leaks }) {
   const content =
     typeof m.content === "string" ? m.content : JSON.stringify(m.content, null, 2);
   return html`
     <div class=${"msg " + m.role}>
       <div class="role">${m.role}</div>
-      <div>${content}</div>
+      <div><${Highlighted} text=${content} leaks=${leaks} /></div>
     </div>
   `;
 }
@@ -289,19 +314,6 @@ function pretty(s) {
     return JSON.stringify(JSON.parse(s), null, 2);
   } catch {
     return s;
-  }
-}
-
-function extractText(responseBody) {
-  try {
-    const body = JSON.parse(responseBody);
-    if (Array.isArray(body.content)) {
-      return body.content.map((b) => b.text ?? "").join("");
-    }
-    if (body.choices?.[0]?.message?.content) return body.choices[0].message.content;
-    return responseBody;
-  } catch {
-    return responseBody;
   }
 }
 

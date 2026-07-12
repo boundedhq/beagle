@@ -1,6 +1,6 @@
 // Schema from design §4. Version stamped in PRAGMA user_version; every
 // reader checks it before querying (two binaries share this file).
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2; // v2: leak_occurrences span columns (R7 highlight)
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS exchanges (
@@ -51,6 +51,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_leak_fp ON leak_events(fingerprint, destina
 CREATE TABLE IF NOT EXISTS leak_occurrences (
   event_id      TEXT REFERENCES leak_events(id) ON DELETE CASCADE,
   exchange_id   TEXT, -- no FK: may be linked before the exchange row lands
+  span_start    INTEGER, span_end INTEGER, -- secret's char span (R7 highlight)
   PRIMARY KEY (event_id, exchange_id)
 );
 

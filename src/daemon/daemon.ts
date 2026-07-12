@@ -17,7 +17,7 @@ import type { Finding } from "../core/scanner/engine";
 import { redactBody, redactValues } from "../transform/redact";
 import { scrubAuthHeaders } from "../core/normalize/normalize";
 import { Notifier } from "../notifier/notifier";
-import { detectFormat, parseRequest, parseResponse, type Format, type ParsedRequest } from "../parsers/parsers";
+import { detectFormat, extractActions, parseRequest, parseResponse, type Format, type ParsedRequest, type ToolAction } from "../parsers/parsers";
 import { startControlServer, type ControlRequest, type ControlResponse } from "./control";
 import { ViewerServer } from "../viewer/server";
 import { OtlpReceiver } from "../core/otlp/receiver";
@@ -225,10 +225,9 @@ export class Daemon {
     if (this.paused || this.config.excludedAgents.includes(ex.agent ?? "")) return;
     const format = stash?.format ?? detectFormat(ex.endpoint);
     const parsed = stash?.parsed ?? null;
-    const respParsed =
-      format !== "unknown" && ex.response.bodyBytes
-        ? parseResponse(format, ex.response.bodyBytes)
-        : null;
+    const respBytes = ex.response.bodyBytes ?? ex.response.sseRaw;
+    const respParsed = format !== "unknown" && respBytes ? parseResponse(format, respBytes) : null;
+    const respActions = format !== "unknown" && respBytes ? extractActions(format, respBytes) : [];
     const resolution =
       stash?.resolution ??
       this.resolver.resolve({
@@ -300,7 +299,7 @@ export class Daemon {
       tokensOut: respParsed?.tokensOut,
       bytesReq: ex.request.bodyBytes.byteLength,
       bytesResp: ex.response.bodyBytes?.byteLength,
-      summary: buildSummary(parsed, respParsed?.text),
+      summary: buildSummary(parsed, respParsed?.text, respActions),
       scanState: stash?.scanState ?? "ok",
       captureState: ex.meta.captureState,
       sessionTier: resolution.tier,
@@ -324,7 +323,7 @@ export class Daemon {
       tokensIn: respParsed?.tokensIn,
       tokensOut: respParsed?.tokensOut,
       bytesReq: ex.request.bodyBytes.byteLength,
-      summary: buildSummary(parsed, respParsed?.text),
+      summary: buildSummary(parsed, respParsed?.text, respActions),
       scanState: stash?.scanState ?? "ok",
       captureState: ex.meta.captureState,
       sessionTier: resolution.tier,
@@ -573,12 +572,44 @@ async function aliveDaemon(stateDir: string): Promise<{ pid: number } | null> {
   }
 }
 
-function buildSummary(parsed: ParsedRequest | null, responseText?: string): string {
+// A plain-English "what the turn did" line (R7). Leads with the assistant's
+// actions (tool calls) or reply — never the raw user message, which for a
+// leak turn would echo the secret into the always-visible feed.
+function buildSummary(
+  parsed: ParsedRequest | null,
+  responseText?: string,
+  actions?: ToolAction[],
+): string {
+  if (actions && actions.length > 0) return summarizeActions(actions);
+  if (responseText) return firstLine(responseText, 100);
   if (!parsed) return "unparsed exchange (raw view available)";
   const lastUser = [...parsed.messages].reverse().find((m) => m.role === "user");
-  const head = lastUser ? firstLine(lastUser.content, 80) : `${parsed.messages.length} messages`;
-  const tail = responseText ? ` → ${firstLine(responseText, 60)}` : "";
-  return head + tail;
+  return lastUser ? firstLine(lastUser.content, 100) : `${parsed.messages.length} messages`;
+}
+
+// Map coding-agent tools to verbs and group repeats: "read 3 files, ran `npm test`".
+function summarizeActions(actions: ToolAction[]): string {
+  const verb = (t: string): string => {
+    const l = t.toLowerCase();
+    if (l.includes("bash") || l.includes("shell") || l.includes("exec")) return "ran";
+    if (l === "read" || l.includes("readfile") || l.includes("cat")) return "read";
+    if (l.includes("write") || l.includes("edit") || l.includes("replace")) return "edited";
+    if (l.includes("grep") || l.includes("glob") || l.includes("search") || l.includes("find")) return "searched";
+    if (l.includes("web") || l.includes("fetch")) return "fetched";
+    return t;
+  };
+  const parts: string[] = [];
+  const files: string[] = [];
+  for (const a of actions) {
+    const v = verb(a.tool);
+    if (v === "ran" && a.detail) parts.push(`ran \`${firstLine(a.detail, 40)}\``);
+    else if (v === "read" && a.detail) files.push(a.detail.split("/").pop() ?? a.detail);
+    else if (a.detail) parts.push(`${v} \`${a.detail.split("/").pop() ?? a.detail}\``);
+    else parts.push(v);
+  }
+  if (files.length === 1) parts.unshift(`read ${files[0]}`);
+  else if (files.length > 1) parts.unshift(`read ${files.length} files`);
+  return parts.slice(0, 3).join(", ") || `${actions.length} tool calls`;
 }
 
 function firstLine(s: string, max: number): string {
