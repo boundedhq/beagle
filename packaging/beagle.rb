@@ -1,6 +1,7 @@
-# Homebrew formula (primary distribution channel, R1). Downloads the signed,
-# per-platform binary from GitHub releases — no build from source, no
-# post-install code fetch. Update url/sha256 per release (CI templates this).
+# Homebrew formula (primary distribution channel, R1). Downloads the
+# per-platform binary from GitHub releases, integrity-pinned by the sha256
+# below — no build from source, no post-install code fetch. Update
+# url/sha256 per release (CI templates this).
 class Beagle < Formula
   desc "Local transparency proxy for AI agents — see what they send, catch leaked secrets"
   homepage "https://github.com/boundedhq/beagle"
