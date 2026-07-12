@@ -225,18 +225,31 @@ export class Daemon {
     // value out entirely and mark it (never write raw-and-hope, §4).
     let requestBody: Uint8Array | null = ex.request.bodyBytes;
     let responseBody: Uint8Array | null = ex.response.bodyBytes ?? null;
+    let sseRaw: Uint8Array | null = ex.response.sseRaw ?? null;
     let searchText = buildSearchText(parsed, respParsed?.text, ex);
     if (this.config.redactOnCapture && stash) {
       if (stash.scanState === "incomplete") {
         requestBody = new TextEncoder().encode("[REDACTION INCOMPLETE: scan did not verify this body]");
         responseBody = null;
+        sseRaw = null; // the raw stream could hold the unverified value
         searchText = "";
       } else if (stash.findings.length > 0) {
         const redacted = redactBody(ex.request.bodyBytes, stash.findings);
         requestBody = redacted.bytes;
-        // Scrub the same secret values from the response too, in case the model
-        // echoed a leaked key back (request-side redaction alone would miss it).
+        // Scrub the same secret values from the response AND the raw stream, in
+        // case the model echoed a leaked key back (request-side redaction alone
+        // would miss it).
         responseBody = redactValues(responseBody, redacted.values);
+        // A content-encoded raw stream is compressed bytes — a literal scrub
+        // can't find the secret in it, so keeping it would silently retain an
+        // echoed value. Drop it; the decoded (scrubbed) body remains.
+        const contentEncoded = ex.response.headers?.some(
+          ([n, v]) =>
+            n.toLowerCase() === "content-encoding" &&
+            v.trim() !== "" &&
+            v.trim().toLowerCase() !== "identity",
+        );
+        sseRaw = contentEncoded ? null : redactValues(sseRaw, redacted.values);
         searchText =
           new TextDecoder().decode(requestBody) +
           "\n" +
@@ -270,7 +283,7 @@ export class Daemon {
       responseHeaders: ex.response.headers
         ? scrubAuthHeaders(ex.response.headers, undefined, ex.provider)
         : null,
-      sseRaw: null,
+      sseRaw,
       searchText,
     });
     this.viewer?.broadcast("exchange", {

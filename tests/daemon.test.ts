@@ -97,6 +97,40 @@ describe("Daemon end-to-end", () => {
       messages: [{ role: "user", content }],
     });
 
+  test("streaming exchange persists the raw SSE stream (sse_raw)", async () => {
+    // upstream in this rig returns a non-streamed JSON body, so drive a
+    // streaming upstream to exercise the fidelity column.
+    const streamServer = createServer((sock) => {
+      sock.on("data", () => {
+        sock.write("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n");
+        const e = 'event: content_block_delta\ndata: {"delta":{"type":"text_delta","text":"hi"}}\n\n';
+        sock.write(e.length.toString(16) + "\r\n" + e + "\r\n0\r\n\r\n");
+      });
+      sock.on("error", () => {});
+    });
+    await new Promise<void>((r) => streamServer.listen(0, "127.0.0.1", () => r()));
+    const sport = (streamServer.address() as { port: number }).port;
+    await controlRequest(daemon.socketPath, {
+      cmd: "register-run",
+      args: { id: "run-stream", agent: "claude-code", provider: "anthropic", upstream: `http://127.0.0.1:${sport}`, authLocation: "x-api-key" },
+    });
+    await sendThroughProxy(daemon.proxyPort, "run-stream", requestBody("stream please"));
+    // poll for the capture instead of guessing a delay
+    let hit: { exchangeId: string } | undefined;
+    let store = Store.openReadOnly(stateDir);
+    for (let i = 0; i < 40 && !hit; i++) {
+      await Bun.sleep(50);
+      store.close();
+      store = Store.openReadOnly(stateDir);
+      hit = store.searchLiteral("stream please")[0];
+    }
+    const ex = store.getExchange(hit!.exchangeId)!;
+    expect(ex.sseRaw).not.toBeNull();
+    expect(new TextDecoder().decode(ex.sseRaw!)).toContain("event: content_block_delta");
+    store.close();
+    streamServer.close();
+  });
+
   test("captures a full exchange: session, parse, summary, search text", async () => {
     const resp = await sendThroughProxy(daemon.proxyPort, "run-e2e", requestBody("read main.ts"));
     expect(resp).toContain("done!");

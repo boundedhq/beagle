@@ -223,6 +223,13 @@ export class ProxyServer {
 
     // ---- capture branch (off the relay path) ----
     const responseRaw = Buffer.concat(captured);
+    const contentType = reader.headerValue("content-type") ?? "";
+    // A streamed response: the raw event framing (event:/data: lines) is a
+    // fidelity artifact the reassembled body hides, so keep it for Layer 2.
+    // For a plain JSON body, bodyBytes already IS the raw bytes — don't
+    // duplicate. (Content-encoded streams keep raw too; the decoded form is
+    // in bodyBytes.)
+    const isStream = contentType.toLowerCase().includes("event-stream");
     const ex: CapturedExchange = {
       id: exchangeId,
       runId: run.id,
@@ -238,6 +245,7 @@ export class ProxyServer {
         status: reader.status,
         headers: reader.headers,
         bodyBytes: decodeBody(new Uint8Array(responseRaw), reader.headerValue("content-encoding")),
+        sseRaw: isStream ? new Uint8Array(responseRaw) : undefined,
       },
       meta: {
         tsRequest,

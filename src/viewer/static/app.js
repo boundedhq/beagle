@@ -215,6 +215,9 @@ function Detail({ id }) {
             <pre>${pretty(detail.requestBody)}</pre>
             <h4>response</h4>
             <pre>${pretty(detail.responseBody)}</pre>
+            ${detail.sseRaw &&
+            html`<h4>raw stream (as received)</h4>
+              <pre>${detail.sseRaw}</pre>`}
           `
         : html`
             ${system !== null &&
