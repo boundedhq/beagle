@@ -131,7 +131,7 @@ function App() {
       ${searchHits !== null && html`<${SearchResults} hits=${searchHits} term=${searchTerm}
         onClear=${() => setSearchHits(null)} onOpen=${(id) => setExpanded(id)} />`}
       ${visible.length === 0 && html`<div class="empty">
-        no exchanges${leaksOnly ? " with leaks" : ""} yet — run an agent under
+        no calls${leaksOnly ? " with leaks" : ""} yet — run an agent under
         ${" "}<code>beagle run</code> and its traffic appears here live
       </div>`}
       ${visible.map(
@@ -197,7 +197,7 @@ function Detail({ id }) {
   return html`
     <div class="detail">
       <div class="meta">
-        <div><span class="k">exchange</span> ${detail.id}</div>
+        <div><span class="k">call</span> ${detail.id}</div>
         <div>
           <span class="k">from</span> ${detail.agent}${" "}
           <span class="k">to</span> ${detail.provider}${detail.model ? " / " + detail.model : ""}
@@ -213,7 +213,7 @@ function Detail({ id }) {
       </div>
       ${leaks.length > 0 &&
       html`<div class="leakbar">
-        🔴 ${leaks.length} secret${leaks.length === 1 ? "" : "s"} sent in this exchange —
+        🔴 ${leaks.length} secret${leaks.length === 1 ? "" : "s"} sent in this call —
         highlighted below:
         ${leaks.map((l) => html`<span class="chip leak">${l.secretType}</span>`)}
       </div>`}
@@ -303,7 +303,7 @@ function SearchResults({ hits, term, onClear, onOpen }) {
         ${hits.length === 0
           ? html`<strong>no matches — never sent.</strong>`
           : html`<strong>
-              found in ${hits.length} exchange${hits.length === 1 ? "" : "s"} across
+              found in ${hits.length} call${hits.length === 1 ? "" : "s"} across
               ${" " + new Set(hits.map((h) => h.sessionId)).size} session(s)
             </strong>`}
         ${" "}<button onClick=${onClear}>clear</button>

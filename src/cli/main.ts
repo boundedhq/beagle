@@ -77,7 +77,7 @@ export async function run(argv: string[]): Promise<number> {
       console.log(cmdLeaks(stateDir));
       return 0;
     case "show": {
-      if (!rest[0]) { console.error("usage: beagle show <exchange-id-prefix>"); return 2; }
+      if (!rest[0]) { console.error("usage: beagle show <call-id-prefix>"); return 2; }
       console.log(cmdShow(stateDir, rest[0]));
       return 0;
     }
