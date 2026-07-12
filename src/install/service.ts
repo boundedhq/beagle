@@ -60,16 +60,19 @@ export function launchdPlist(i: ServiceInputs): string {
 }
 
 export function systemdUnit(i: ServiceInputs): string {
-  // Paths in Exec/Environment aren't shell-quoted by systemd; agents install
-  // to plain paths, so this is fine for the common case.
+  // systemd splits ExecStart on unquoted whitespace and treats an unquoted
+  // Environment value the same way, so a path with a space would break both.
+  // Quote defensively: the binary path on its own, and the whole KEY=value for
+  // Environment (systemd honors double quotes with backslash escapes).
+  const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   return `[Unit]
 Description=Beagle — local transparency proxy for AI agents
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=${i.beagleBinary} daemon
-Environment=BEAGLE_STATE_DIR=${i.stateDir}
+ExecStart="${esc(i.beagleBinary)}" daemon
+Environment="BEAGLE_STATE_DIR=${esc(i.stateDir)}"
 Restart=always
 RestartSec=2
 

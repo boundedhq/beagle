@@ -36,11 +36,17 @@ describe("service unit generation", () => {
 
   test("systemd unit runs the daemon with Restart=always and user WantedBy", () => {
     const unit = systemdUnit({ beagleBinary: "/usr/local/bin/beagle", stateDir: "/home/u/.state/beagle" });
-    expect(unit).toContain("ExecStart=/usr/local/bin/beagle daemon");
+    expect(unit).toContain(`ExecStart="/usr/local/bin/beagle" daemon`);
     expect(unit).toContain("Restart=always");
-    expect(unit).toContain("Environment=BEAGLE_STATE_DIR=/home/u/.state/beagle");
+    expect(unit).toContain(`Environment="BEAGLE_STATE_DIR=/home/u/.state/beagle"`);
     expect(unit).toContain("[Install]");
     expect(unit).toContain("WantedBy=default.target");
+  });
+
+  test("systemd unit quotes paths containing spaces (would otherwise break parsing)", () => {
+    const unit = systemdUnit({ beagleBinary: "/opt/My Tools/beagle", stateDir: "/home/a b/.state" });
+    expect(unit).toContain(`ExecStart="/opt/My Tools/beagle" daemon`);
+    expect(unit).toContain(`Environment="BEAGLE_STATE_DIR=/home/a b/.state"`);
   });
 });
 
