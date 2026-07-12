@@ -32,6 +32,7 @@ export interface ExchangeRecord {
   scanState: "ok" | "incomplete";
   captureState: "ok" | "truncated";
   sessionTier: string;
+  redacted?: boolean; // true when redact-on-capture rewrote the stored body
   requestBody: Uint8Array | null;
   requestHeaders: Array<[string, string]> | null;
   responseBody: Uint8Array | null;
@@ -52,14 +53,6 @@ export interface LeakEventInput {
   ts: number;
   spanStart?: number; // char span of the secret in the request body (R7 highlight)
   spanEnd?: number;
-}
-
-export interface LeakEvent extends Omit<LeakEventInput, "exchangeId" | "ts"> {
-  id: string;
-  occurrences: number;
-  firstTs: number;
-  lastTs: number;
-  firstExchange: string | null;
 }
 
 export interface SweepPolicy {
@@ -95,8 +88,9 @@ export class Store {
     db.exec("PRAGMA auto_vacuum=INCREMENTAL");
     db.exec("PRAGMA foreign_keys=ON");
     const v = pragmaNumber(db, "user_version");
-    if (v !== 0 && v !== SCHEMA_VERSION) throw versionError(v);
-    db.exec(SCHEMA_SQL);
+    if (v > SCHEMA_VERSION) throw versionError(v); // a newer store: upgrade beagle
+    db.exec(SCHEMA_SQL); // fresh DBs get every column
+    if (v > 0 && v < SCHEMA_VERSION) migrate(db, v); // bring old stores forward, data intact
     db.exec(`PRAGMA user_version=${SCHEMA_VERSION}`);
     return new Store(db);
   }
@@ -119,6 +113,10 @@ export class Store {
     const db = openDb(join(stateDir, DB_FILE), { readonly: true });
     db.exec("PRAGMA foreign_keys=ON");
     const v = pragmaNumber(db, "user_version");
+    // A read-only handle can't migrate. Require the exact schema and surface a
+    // clean version error otherwise — a newer store means "upgrade beagle", an
+    // older one means "restart the daemon" (Store.open migrates it in place).
+    // Never let a stale schema reach a query and throw a raw "no such column".
     if (v !== SCHEMA_VERSION) {
       db.close();
       throw versionError(v);
@@ -153,12 +151,13 @@ export class Store {
       this.db.run(
         `INSERT INTO exchanges (id, session_id, run_id, source, agent, provider, model,
            endpoint, ts_request, ts_response, status, tokens_in, tokens_out,
-           bytes_req, bytes_resp, summary, scan_state, capture_state, session_tier)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           bytes_req, bytes_resp, summary, scan_state, capture_state, session_tier, redacted)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [ex.id, ex.sessionId, ex.runId, ex.source, ex.agent ?? null, ex.provider ?? null,
          ex.model ?? null, ex.endpoint ?? null, ex.tsRequest, ex.tsResponse ?? null,
          ex.status ?? null, ex.tokensIn ?? null, ex.tokensOut ?? null, ex.bytesReq ?? null,
-         ex.bytesResp ?? null, ex.summary ?? null, ex.scanState, ex.captureState, ex.sessionTier],
+         ex.bytesResp ?? null, ex.summary ?? null, ex.scanState, ex.captureState, ex.sessionTier,
+         ex.redacted ? 1 : null],
       );
       this.db.run(
         `INSERT INTO payloads (exchange_id, request_body, request_headers,
@@ -248,27 +247,6 @@ export class Store {
         [fingerprint],
       )?.n ?? 0
     ) > 0;
-  }
-
-  listLeakEvents(): LeakEvent[] {
-    return this.db.all<Record<string, unknown>>(
-      `SELECT id, fingerprint, session_id, detector, secret_type, severity,
-              confidence_tier, destination, occurrences, first_ts, last_ts, first_exchange
-       FROM leak_events ORDER BY first_ts`,
-    ).map((r) => ({
-      id: r.id as string,
-      fingerprint: r.fingerprint as string,
-      sessionId: r.session_id as string,
-      detector: r.detector as string,
-      secretType: r.secret_type as string,
-      severity: r.severity as string,
-      confidenceTier: r.confidence_tier as string,
-      destination: r.destination as string,
-      occurrences: r.occurrences as number,
-      firstTs: r.first_ts as number,
-      lastTs: r.last_ts as number,
-      firstExchange: (r.first_exchange as string) ?? null,
-    }));
   }
 
   insertSession(s: {
@@ -447,6 +425,20 @@ function versionError(found: number): StoreVersionError {
   );
 }
 
+// Forward, in-place migrations (data-preserving; additive columns only). Each
+// ALTER is idempotent — a dup-column error on a partially-migrated store means
+// it's already applied.
+function migrate(db: Db, from: number): void {
+  const add = (t: string, c: string) => {
+    try { db.exec(`ALTER TABLE ${t} ADD COLUMN ${c}`); } catch { /* already applied */ }
+  };
+  if (from < 2) {
+    add("leak_occurrences", "span_start INTEGER");
+    add("leak_occurrences", "span_end INTEGER");
+    add("exchanges", "redacted INTEGER");
+  }
+}
+
 function escapeLike(s: string): string {
   return s.replace(/[\\%_]/g, (c) => "\\" + c);
 }
@@ -472,6 +464,7 @@ function rowToExchange(r: Record<string, unknown>): ExchangeRecord {
     scanState: r.scan_state as "ok" | "incomplete",
     captureState: r.capture_state as "ok" | "truncated",
     sessionTier: r.session_tier as string,
+    redacted: Boolean(r.redacted),
     requestBody: (r.request_body as Uint8Array) ?? null,
     requestHeaders: r.request_headers ? JSON.parse(r.request_headers as string) : null,
     responseBody: (r.response_body as Uint8Array) ?? null,

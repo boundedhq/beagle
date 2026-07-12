@@ -12,6 +12,7 @@ import { GraduationTracker } from "../install/graduation";
 import { detectAgents, knownExtraLocations, pathDirsFromEnv } from "../install/detect";
 import { watchAgent, unwatchAgent, type WatchEnv } from "../install/watch";
 import { ChangeManifest } from "../install/manifest";
+import { listLeakEvents } from "../viewer/feed-query";
 import { buildOtelEnv } from "../parsers/otlp-map";
 import { AGENTS, buildRunEnv } from "./agents";
 
@@ -143,7 +144,7 @@ export function cmdLeaks(stateDir: string): string {
   const store = openStore(stateDir);
   if (isStoreError(store)) return store.error;
   if (!store) return "no leaks recorded.";
-  const events = store.listLeakEvents();
+  const events = listLeakEvents(store);
   store.close();
   if (events.length === 0) return "no leaks recorded.";
   const lines = [`${events.length} leak event${events.length === 1 ? "" : "s"}:`];

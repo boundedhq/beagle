@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { AlertEngine, type AlertEvent } from "../src/core/alert/engine";
 import type { Finding } from "../src/core/scanner/engine";
 import { Store } from "../src/core/store/store";
+import { listLeakEvents } from "../src/viewer/feed-query";
 
 function finding(overrides: Partial<Finding> = {}): Finding {
   return {
@@ -45,7 +46,7 @@ describe("AlertEngine", () => {
     engine.process(exchangeMeta({ id: "01JZXKQ8WVXH5N4T2M9R7C3DFF" }), [finding()]);
     engine.process(exchangeMeta({ id: "01JZXKQ8WVXH5N4T2M9R7C3DGG" }), [finding()]);
     expect(alerts.length).toBe(1);
-    const events = store.listLeakEvents();
+    const events = listLeakEvents(store);
     expect(events.length).toBe(1);
     expect(events[0]?.occurrences).toBe(3);
   });
@@ -61,7 +62,7 @@ describe("AlertEngine", () => {
   test("possible tier records the event but never alerts", () => {
     engine.process(exchangeMeta(), [finding({ tier: "possible", secretType: "generic-api-key" })]);
     expect(alerts.length).toBe(0);
-    const events = store.listLeakEvents();
+    const events = listLeakEvents(store);
     expect(events.length).toBe(1);
     expect(events[0]?.confidenceTier).toBe("possible");
   });

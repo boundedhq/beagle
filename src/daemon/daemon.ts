@@ -253,19 +253,23 @@ export class Daemon {
     let responseBody: Uint8Array | null = ex.response.bodyBytes ?? null;
     let sseRaw: Uint8Array | null = ex.response.sseRaw ?? null;
     let searchText = buildSearchText(parsed, respParsed?.text, ex);
+    // True only when the stored body was actually rewritten (viewer highlight).
+    let redacted = false;
     if (this.config.redactOnCapture && stash) {
       if (stash.scanState === "incomplete") {
+        redacted = true;
         requestBody = new TextEncoder().encode("[REDACTION INCOMPLETE: scan did not verify this body]");
         responseBody = null;
         sseRaw = null; // the raw stream could hold the unverified value
         searchText = "";
       } else if (stash.findings.length > 0) {
-        const redacted = redactBody(ex.request.bodyBytes, stash.findings);
-        requestBody = redacted.bytes;
+        redacted = true;
+        const scrubbed = redactBody(ex.request.bodyBytes, stash.findings);
+        requestBody = scrubbed.bytes;
         // Scrub the same secret values from the response AND the raw stream, in
         // case the model echoed a leaked key back (request-side redaction alone
         // would miss it).
-        responseBody = redactValues(responseBody, redacted.values);
+        responseBody = redactValues(responseBody, scrubbed.values);
         // A content-encoded raw stream is compressed bytes — a literal scrub
         // can't find the secret in it, so keeping it would silently retain an
         // echoed value. Drop it; the decoded (scrubbed) body remains.
@@ -275,7 +279,7 @@ export class Daemon {
             v.trim() !== "" &&
             v.trim().toLowerCase() !== "identity",
         );
-        sseRaw = contentEncoded ? null : redactValues(sseRaw, redacted.values);
+        sseRaw = contentEncoded ? null : redactValues(sseRaw, scrubbed.values);
         searchText =
           new TextDecoder().decode(requestBody) +
           "\n" +
@@ -303,6 +307,7 @@ export class Daemon {
       scanState: stash?.scanState ?? "ok",
       captureState: ex.meta.captureState,
       sessionTier: resolution.tier,
+      redacted,
       requestBody,
       requestHeaders: ex.request.headers ?? null,
       responseBody,

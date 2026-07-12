@@ -68,10 +68,21 @@ describe("buildDetail — leak values to highlight (UI fix 2)", () => {
 
   test("redacted body: highlights the [REDACTED:...] placeholders instead of slicing", () => {
     const req = 'key [REDACTED:aws-access-key-id:a1b2c3] here';
-    // spans point at the ORIGINAL (pre-redaction) offsets — must be ignored
+    // spans point at the ORIGINAL (pre-redaction) offsets — must be ignored.
+    // The stored redacted flag (not a string sniff) drives placeholder mode.
     const spans: LeakSpan[] = [{ start: 4, end: 24, secretType: "aws-access-key-id", tier: "structured" }];
-    const d = buildDetail(ex({ requestBody: enc(req) }), spans);
+    const d = buildDetail(ex({ requestBody: enc(req), redacted: true }), spans);
     expect(d.leaks.map((l) => l.value)).toEqual(["[REDACTED:aws-access-key-id:a1b2c3]"]);
+  });
+
+  test("unredacted body that happens to contain [REDACTED: text is sliced, not placeholder-matched", () => {
+    // Without the stored flag we must not treat a literal "[REDACTED:" in a
+    // normal body as a redaction marker — slice the real span instead.
+    const req = 'talking about [REDACTED: foo] and AKIAZQ3DRSTUVWXY2345';
+    const start = req.indexOf("AKIA");
+    const spans: LeakSpan[] = [{ start, end: start + 20, secretType: "aws-access-key-id", tier: "structured" }];
+    const d = buildDetail(ex({ requestBody: enc(req) }), spans);
+    expect(d.leaks.map((l) => l.value)).toEqual(["AKIAZQ3DRSTUVWXY2345"]);
   });
 
   test("no spans, no leaks", () => {

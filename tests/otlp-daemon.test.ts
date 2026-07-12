@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { Daemon } from "../src/daemon/daemon";
 import { controlRequest } from "../src/daemon/control";
 import { Store } from "../src/core/store/store";
+import { listLeakEvents } from "../src/viewer/feed-query";
 import type { AlertEvent } from "../src/core/alert/engine";
 
 function otlpBody(token: string, prompt: string, sessionId = "otel-conv-1") {
@@ -78,7 +79,7 @@ describe("Mode B end-to-end through the daemon", () => {
     expect(alerts.length).toBe(1);
     expect(alerts[0]!.title).toContain("aws-access-key-id");
     const store = Store.openReadOnly(stateDir);
-    expect(store.listLeakEvents().length).toBe(1);
+    expect(listLeakEvents(store).length).toBe(1);
     store.close();
   });
 

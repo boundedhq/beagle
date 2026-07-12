@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS exchanges (
   summary       TEXT,
   scan_state    TEXT NOT NULL DEFAULT 'ok',
   capture_state TEXT NOT NULL DEFAULT 'ok',
-  session_tier  TEXT NOT NULL
+  session_tier  TEXT NOT NULL,
+  redacted      INTEGER -- 1 when redact-on-capture rewrote the body (viewer highlight)
 );
 CREATE INDEX IF NOT EXISTS ix_exch_session ON exchanges(session_id);
 CREATE INDEX IF NOT EXISTS ix_exch_ts ON exchanges(ts_request);

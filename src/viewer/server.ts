@@ -5,7 +5,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { Store } from "../core/store/store";
-import { listExchanges } from "./feed-query";
+import { listExchanges, listLeakEvents } from "./feed-query";
 import { buildDetail, leakSpansFor } from "./detail";
 // Statics embedded at build time (ships-what's-in-repo, and the compiled
 // binary has no filesystem view of the repo).
@@ -225,7 +225,7 @@ export class ViewerServer {
           }
         });
       } else if (path === "/api/leaks" && req.method === "GET") {
-        this.json(res, 200, store.listLeakEvents());
+        this.json(res, 200, listLeakEvents(store));
       } else {
         this.json(res, 404, { error: "no such endpoint" });
       }

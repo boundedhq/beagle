@@ -6,7 +6,7 @@ import { connect } from "node:net";
 import { Daemon } from "../src/daemon/daemon";
 import { controlRequest } from "../src/daemon/control";
 import { Store } from "../src/core/store/store";
-import { listExchanges } from "../src/viewer/feed-query";
+import { listExchanges, listLeakEvents } from "../src/viewer/feed-query";
 import type { AlertEvent } from "../src/core/alert/engine";
 import { createServer, type Server } from "node:net";
 
@@ -161,7 +161,7 @@ describe("Daemon end-to-end", () => {
     expect(alerts[0]!.title).toContain("aws-access-key-id");
 
     const store = Store.openReadOnly(stateDir);
-    const events = store.listLeakEvents();
+    const events = listLeakEvents(store);
     expect(events.length).toBe(1);
     expect(events[0]!.destination).toBe("anthropic");
     store.close();
@@ -188,7 +188,7 @@ describe("Daemon end-to-end", () => {
 
     expect(alerts.length).toBe(1); // deduped
     const store = Store.openReadOnly(stateDir);
-    const events = store.listLeakEvents();
+    const events = listLeakEvents(store);
     expect(events.length).toBe(1);
     expect(events[0]!.occurrences).toBe(2); // both exchanges marked
     const sessions = new Set(store.searchLiteral("AKIAZQ3DRSTUVWXY2345").map((h) => h.sessionId));
@@ -239,7 +239,7 @@ describe("Daemon end-to-end", () => {
     await Bun.sleep(200);
     const store = Store.openReadOnly(stateDir);
     // the leak event still exists (audit value kept)...
-    expect(store.listLeakEvents().length).toBe(1);
+    expect(listLeakEvents(store).length).toBe(1);
     // ...but the raw secret is gone from the stored payload and the index
     expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
     const anyEx = listExchanges(store, 10).find((e) => e.hasLeak);

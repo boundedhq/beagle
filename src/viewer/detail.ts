@@ -100,14 +100,16 @@ export function buildDetail(ex: ExchangeRecord, spans: LeakSpan[]): ExchangeDeta
     requestRaw,
     responseRaw,
     sseRaw,
-    leaks: extractLeaks(requestRaw, spans),
+    leaks: extractLeaks(requestRaw, spans, ex.redacted ?? false),
   };
 }
 
-function extractLeaks(requestText: string, spans: LeakSpan[]): DetailLeak[] {
+function extractLeaks(requestText: string, spans: LeakSpan[], redacted: boolean): DetailLeak[] {
   // A redacted body no longer holds the secret at the recorded offsets — the
-  // placeholders ARE the markers, so highlight those instead.
-  if (requestText.includes("[REDACTED:")) {
+  // placeholders ARE the markers, so highlight those instead. Driven by the
+  // stored redaction flag, not a string sniff (which could false-match a body
+  // that legitimately contains the literal "[REDACTED:").
+  if (redacted) {
     const seen = new Set<string>();
     const out: DetailLeak[] = [];
     for (const m of requestText.matchAll(REDACTED_RE)) {
