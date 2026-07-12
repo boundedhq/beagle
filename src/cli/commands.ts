@@ -211,8 +211,12 @@ function buildWatchEnv(stateDir: string, yes: boolean): WatchEnv {
   return {
     stateDir,
     shimDir: join(stateDir, "shims"),
+    // For the compiled binary, argv0 is the beagle executable — exactly what
+    // the shim and the service unit should invoke.
     beagleBinary: process.execPath,
     shell: process.env.SHELL ?? "/bin/sh",
+    platform: process.platform,
+    home: homedir(),
     resolveReal: (agent) => {
       const found = detectAgents({
         pathDirs: pathDirsFromEnv(process.env.PATH),
