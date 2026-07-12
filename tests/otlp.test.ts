@@ -70,6 +70,109 @@ describe("OTLP → Exchange mapping (Mode B)", () => {
   });
 });
 
+describe("OTel shape robustness (real-world variants — Gap 3 hardening)", () => {
+  function attrs(map: Record<string, unknown>) {
+    return Object.entries(map).map(([key, value]) => {
+      if (typeof value === "number") return { key, value: { intValue: value } };
+      return { key, value: { stringValue: String(value) } };
+    });
+  }
+
+  test("int64 attributes serialized as JSON strings are parsed (OTLP/JSON encodes int64 as string)", () => {
+    const body = {
+      resourceLogs: [{ scopeLogs: [{ logRecords: [{
+        timeUnixNano: "1720000000000000000",
+        attributes: [
+          { key: "gen_ai.system", value: { stringValue: "anthropic" } },
+          { key: "gen_ai.prompt", value: { stringValue: "hi" } },
+          { key: "gen_ai.completion", value: { stringValue: "ok" } },
+          { key: "gen_ai.usage.input_tokens", value: { intValue: "1200" } }, // string!
+          { key: "gen_ai.usage.output_tokens", value: { intValue: "34" } },
+        ],
+      }] }] }],
+    };
+    const ex = mapOtlpLogsToExchanges(body, { agent: "claude-code", provider: "anthropic" })[0]!;
+    expect(ex.meta.tokensIn).toBe(1200);
+    expect(ex.meta.tokensOut).toBe(34);
+  });
+
+  test("alternate token attribute names (prompt_tokens/completion_tokens) are accepted", () => {
+    const body = {
+      resourceLogs: [{ scopeLogs: [{ logRecords: [{
+        timeUnixNano: "1720000000000000000",
+        attributes: attrs({
+          "gen_ai.prompt": "hi",
+          "gen_ai.completion": "ok",
+          "gen_ai.usage.prompt_tokens": 90,
+          "gen_ai.usage.completion_tokens": 7,
+        }),
+      }] }] }],
+    };
+    const ex = mapOtlpLogsToExchanges(body, { agent: "claude-code", provider: "anthropic" })[0]!;
+    expect(ex.meta.tokensIn).toBe(90);
+    expect(ex.meta.tokensOut).toBe(7);
+  });
+
+  test("GenAI carried as spans (resourceSpans) is mapped too", () => {
+    const body = {
+      resourceSpans: [{ scopeSpans: [{ spans: [{
+        startTimeUnixNano: "1720000000000000000",
+        attributes: attrs({
+          "gen_ai.system": "anthropic",
+          "gen_ai.request.model": "claude-sonnet-5",
+          "gen_ai.prompt": "please read AKIAZQ3DRSTUVWXY2345",
+          "gen_ai.completion": "done",
+          "session.id": "span-sess-1",
+          "beagle.run_token": "tok",
+        }),
+      }] }] }],
+    };
+    const exchanges = mapOtlpLogsToExchanges(body, { agent: "claude-code", provider: "anthropic" });
+    expect(exchanges.length).toBe(1);
+    expect(exchanges[0]!.source).toBe("otel");
+    expect(exchanges[0]!.model).toBe("claude-sonnet-5");
+    expect(exchanges[0]!.convId).toBe("span-sess-1");
+    // the secret in the reported prompt is scannable
+    expect(new TextDecoder().decode(exchanges[0]!.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
+  });
+
+  test("a JSON-array gen_ai.prompt (message list) is flattened into scannable text", () => {
+    const promptJson = JSON.stringify([
+      { role: "system", content: "You are Claude Code." },
+      { role: "user", content: "key AKIAZQ3DRSTUVWXY2345" },
+    ]);
+    const body = {
+      resourceLogs: [{ scopeLogs: [{ logRecords: [{
+        timeUnixNano: "1720000000000000000",
+        attributes: [
+          { key: "gen_ai.prompt", value: { stringValue: promptJson } },
+          { key: "gen_ai.completion", value: { stringValue: "ok" } },
+        ],
+      }] }] }],
+    };
+    const ex = mapOtlpLogsToExchanges(body, { agent: "claude-code", provider: "anthropic" })[0]!;
+    expect(new TextDecoder().decode(ex.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
+    expect(new TextDecoder().decode(ex.request.bodyBytes)).toContain("You are Claude Code.");
+  });
+
+  test("mixed resourceLogs + resourceSpans in one payload both map", () => {
+    const body = {
+      resourceLogs: [{ scopeLogs: [{ logRecords: [{
+        timeUnixNano: "1720000000000000000",
+        attributes: attrs({ "gen_ai.prompt": "from-log", "gen_ai.completion": "a" }),
+      }] }] }],
+      resourceSpans: [{ scopeSpans: [{ spans: [{
+        startTimeUnixNano: "1720000000000000000",
+        attributes: attrs({ "gen_ai.prompt": "from-span", "gen_ai.completion": "b" }),
+      }] }] }],
+    };
+    const exchanges = mapOtlpLogsToExchanges(body, { agent: "claude-code", provider: "anthropic" });
+    expect(exchanges.length).toBe(2);
+    const prompts = exchanges.map((e) => new TextDecoder().decode(e.request.bodyBytes)).sort();
+    expect(prompts).toEqual(["from-log", "from-span"]);
+  });
+});
+
 describe("buildOtelEnv (vendor knobs only, R2)", () => {
   test("sets the documented Claude Code telemetry knobs, json protocol, token header", () => {
     const env = buildOtelEnv("http://127.0.0.1:4318", "run-token-abc");

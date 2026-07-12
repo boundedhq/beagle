@@ -49,8 +49,11 @@ The whole loop works headless — a skeptic never has to start the viewer.
 - **Real-time, deduped alerts.** One notification per distinct leaked secret,
   even as the agent re-sends history every turn — dashboard open or not.
 - **Subscription-safe (Mode B).** For Claude Code on a Claude.ai login, nothing
-  goes on the wire: capture arrives via Claude Code's own OpenTelemetry export,
-  labeled *agent-reported*.
+  goes on the wire: capture arrives via Claude Code's own OpenTelemetry export
+  (`beagle run claude --telemetry`), labeled *agent-reported*. Mode B is
+  implemented and unit-tested but **not yet validated against a real Claude
+  Code build** — treat it as best-effort until the
+  [Phase-0 spike checklist](docs/mode-b-spike.md) is complete.
 
 ## Budgets (published, enforced in CI)
 
