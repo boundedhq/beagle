@@ -49,6 +49,9 @@ if [ "$expected" != "$actual" ]; then
 fi
 
 chmod +x "$tmp/beagle"
+if [ ! -d "$PREFIX" ]; then
+  mkdir -p "$PREFIX" 2>/dev/null || sudo mkdir -p "$PREFIX"
+fi
 if [ -w "$PREFIX" ]; then
   mv "$tmp/beagle" "$PREFIX/beagle"
 else

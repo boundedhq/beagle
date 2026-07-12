@@ -32,7 +32,8 @@ found in 1 call across 1 session:
   01KXAK6K  2026-07-12T14:23:00Z  session a1b2c3d4
 
 $ beagle ui                        # or browse it in the dashboard
-dashboard: http://127.0.0.1:52341/?boot=…  (one-time link)
+dashboard: http://127.0.0.1:52341/?boot=…
+(the link is one-time; run `beagle ui` again for a fresh one)
 ```
 
 ## How it works (and what it is *not*)
@@ -199,9 +200,10 @@ interception.
 
 **Why should I trust the detector?**
 It's the gitleaks ruleset (vendored as data, sha256-pinned) run through a
-~350-line matcher you can read, with a published <5% false-positive gate in
-CI. Detection tiers are honest: structured hits alert loudly; entropy-only
-hits stay a quiet "possible."
+matcher of about 140 lines you can read in one sitting
+([`src/core/scanner/`](src/core/scanner/)), with a published <5%
+false-positive gate in CI. Detection tiers are honest: structured hits
+alert loudly; entropy-only hits stay a quiet "possible."
 
 **What happens if Beagle crashes mid-run?**
 The proxy fails open for observation, never blocking your agent: if

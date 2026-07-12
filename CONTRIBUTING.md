@@ -13,8 +13,9 @@ bun run check     # lint + LOC budget + typecheck + full test suite
 bun run build     # dist/beagle single binary
 ```
 
-`bun run check` is exactly what CI runs. If it's green locally, CI will be
-green.
+`bun run check` covers the same gates CI runs (CI additionally compiles the
+binary and checks its size). If `check` is green locally, CI almost
+certainly is too.
 
 ## The rules that make this project what it is
 
