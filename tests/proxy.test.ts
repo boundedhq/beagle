@@ -88,13 +88,17 @@ describe("proxy", () => {
     registry = new RunRegistry(store);
     exchanges = [];
     scanned = [];
+    // Bind to THIS test's array by value: a prior test's proxy could still be
+    // finishing a late capture, and onExchange closing over the `exchanges`
+    // variable would otherwise push it into the reassigned array.
+    const myExchanges = exchanges;
     upstream = await startFakeUpstream((_raw, sock) => {
       sock.write(OK_JSON('{"ok":true}'));
     });
     proxy = new ProxyServer({
       registry,
       scan: (bytes) => { scanned.push(bytes); return new Promise(() => {}); }, // never resolves
-      onExchange: (ex) => exchanges.push(ex),
+      onExchange: (ex) => myExchanges.push(ex),
       captureBufferCap: 1 << 20,
     });
     await proxy.listen(0);
@@ -260,6 +264,37 @@ describe("proxy", () => {
     });
     // first chunk arrived well before the 100ms-delayed second chunk
     expect(firstChunkAt).toBeLessThan(90);
+  });
+
+  test("keeps the raw SSE stream (event framing) for the fidelity view", async () => {
+    upstream.close();
+    upstream = await startFakeUpstream((_raw, sock) => {
+      sock.write("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n");
+      const e1 = 'event: content_block_delta\ndata: {"text":"hi"}\n\n';
+      const e2 = 'event: message_stop\ndata: {}\n\n';
+      sock.write(e1.length.toString(16) + "\r\n" + e1 + "\r\n");
+      sock.write(e2.length.toString(16) + "\r\n" + e2 + "\r\n");
+      sock.write("0\r\n\r\n");
+    });
+    register({ upstream: `http://127.0.0.1:${upstream.port}` });
+    await sendRaw(proxy.port,
+      `POST /run/run-abc/v1/messages HTTP/1.1\r\nHost: h\r\nContent-Length: 2\r\n\r\n{}`);
+    for (let i = 0; i < 40 && exchanges.length === 0; i++) await Bun.sleep(20);
+    const raw = exchanges[0]!.response.sseRaw;
+    expect(raw).toBeDefined();
+    const rawText = new TextDecoder().decode(raw!);
+    // exact event framing preserved (not reassembled into plain text)
+    expect(rawText).toContain("event: content_block_delta");
+    expect(rawText).toContain("event: message_stop");
+    expect(rawText).toContain('data: {"text":"hi"}');
+  });
+
+  test("non-streaming JSON response gets no sse_raw (body already is the raw bytes)", async () => {
+    register();
+    await sendRaw(proxy.port,
+      `POST /run/run-abc/v1/messages HTTP/1.1\r\nHost: h\r\nContent-Length: 2\r\n\r\n{}`);
+    await Bun.sleep(50);
+    expect(exchanges[0]!.response.sseRaw).toBeUndefined();
   });
 
   test("marks capture truncated past the buffer cap, stream unaffected", async () => {

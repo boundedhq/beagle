@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { Store, StoreVersionError } from "../core/store/store";
 import { loadConfig, saveConfig } from "../core/config/config";
-import { controlRequest } from "../daemon/control";
+import { controlRequest, openLease } from "../daemon/control";
 import { Notifier, stripControlChars } from "../notifier/notifier";
 import { GraduationTracker } from "../install/graduation";
 import { detectAgents, knownExtraLocations, pathDirsFromEnv } from "../install/detect";
@@ -81,7 +81,11 @@ async function ensureDaemon(stateDir: string): Promise<DaemonInfo | null> {
       ? [process.execPath, script, "daemon"]
       : [process.execPath, "daemon"];
   const child = Bun.spawn(argv, {
-    env: { ...process.env, BEAGLE_STATE_DIR: stateDir },
+    // BEAGLE_EPHEMERAL: this auto-started daemon idle-exits once no agent
+    // holds a lease and no viewer is open (§6.7), so a trial run leaves
+    // nothing behind. An explicit `beagle daemon` or the service unit does not
+    // set it and stays up.
+    env: { ...process.env, BEAGLE_STATE_DIR: stateDir, BEAGLE_EPHEMERAL: "1" },
     stdio: ["ignore", "ignore", "ignore"],
   });
   child.unref();
@@ -212,8 +216,12 @@ function buildWatchEnv(stateDir: string, yes: boolean): WatchEnv {
   return {
     stateDir,
     shimDir: join(stateDir, "shims"),
+    // For the compiled binary, argv0 is the beagle executable — exactly what
+    // the shim and the service unit should invoke.
     beagleBinary: process.execPath,
     shell: process.env.SHELL ?? "/bin/sh",
+    platform: process.platform,
+    home: homedir(),
     resolveReal: (agent) => {
       const found = detectAgents({
         pathDirs: pathDirsFromEnv(process.env.PATH),
@@ -397,13 +405,14 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
     } else {
       modeEnv = buildRunEnv(agentName, daemon.proxyPort, runId);
     }
-    return await execAgent(realBinary, agentArgs, modeEnv, stateDir, agentName, redirectCfg);
+    return await execAgent(daemon.socketPath, realBinary, agentArgs, modeEnv, stateDir, agentName, redirectCfg);
   }
 
-  return await execAgent(realBinary, agentArgs, modeEnv, stateDir, agentName, null);
+  return await execAgent(daemon.socketPath, realBinary, agentArgs, modeEnv, stateDir, agentName, null);
 }
 
 async function execAgent(
+  socketPath: string,
   realBinary: string,
   agentArgs: string[],
   modeEnv: Record<string, string>,
@@ -413,6 +422,11 @@ async function execAgent(
 ): Promise<number> {
   const grad = new GraduationTracker(stateDir);
   const shouldNudge = grad.recordRunAndCheck(agentName);
+
+  // Hold a lease for the agent's lifetime so an auto-started ephemeral daemon
+  // stays up while we're watching, then winds down after we exit (§6.7). Both
+  // wire and telemetry modes need this — Mode B registers no run.
+  const lease = await openLease(socketPath).catch(() => null);
 
   try {
     const child = Bun.spawn([realBinary, ...agentArgs], {
@@ -432,6 +446,7 @@ async function execAgent(
     }
     return exitCode;
   } finally {
+    lease?.end(); // release the daemon liveness hold
     // The redirect config merged in the user's real provider key — it is only
     // needed for the agent's lifetime, so delete it even if the spawn failed,
     // rather than leave a plaintext secret in the state dir between runs.

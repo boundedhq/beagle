@@ -39,7 +39,7 @@ describe("Mode B end-to-end through the daemon", () => {
   beforeEach(async () => {
     stateDir = mkdtempSync(join(tmpdir(), "beagle-modeb-"));
     alerts = [];
-    daemon = await Daemon.start({ stateDir, alertSinkForTest: (a) => alerts.push(a) });
+    daemon = await Daemon.start({ stateDir, alertSinkForTest: (a) => alerts.push(a), persistent: true });
     const status = await controlRequest(daemon.socketPath, { cmd: "status" });
     const data = status.data as { otlpPort: number; otlpToken: string };
     otlpPort = data.otlpPort;

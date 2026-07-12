@@ -26,6 +26,9 @@ export interface Exchange {
     status?: number;
     headers?: Array<[string, string]>;
     bodyBytes?: Uint8Array;
+    // Raw response stream exactly as received (event framing, pre-reassembly)
+    // — kept for streamed responses only, drives the R7 Layer-2 fidelity view.
+    sseRaw?: Uint8Array;
     text?: string;
   };
   meta: {

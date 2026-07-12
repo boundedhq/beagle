@@ -6,15 +6,26 @@ import { join } from "node:path";
 import { AGENTS } from "../cli/agents";
 import { ChangeManifest } from "./manifest";
 import { shimScript, parseCoverageVerdict, type CoverageVerdict } from "./shim";
+import {
+  installService,
+  removeService,
+  servicePlan,
+  osServiceRunner,
+  type ServiceKind,
+  type ServiceRunner,
+} from "./service";
 
 export interface WatchEnv {
   stateDir: string;
   shimDir: string; // a Beagle-owned dir placed early on PATH
   beagleBinary: string;
   shell: string; // $SHELL
+  platform: NodeJS.Platform;
+  home: string;
   resolveReal: (agent: string) => string | null; // where the real binary is
   runType: (agent: string) => string; // `$SHELL -ic 'type <agent>'` output
   confirm: (diff: string) => boolean; // interactive y/N (or --yes)
+  serviceRunner?: ServiceRunner; // injectable for tests; defaults to the OS one
 }
 
 export interface WatchResult {
@@ -47,12 +58,24 @@ export function watchAgent(agent: string, env: WatchEnv): WatchResult {
   if (!plan) {
     return { applied: false, message: `cannot watch ${agent}: not found or unsupported` };
   }
-  const diff =
-    `Beagle will make one change:\n` +
-    `  + create a PATH shim at ${plan.shimPath}\n` +
-    `    (execs the real ${agent} at ${plan.real} through Beagle)\n` +
-    `  Your ${agent} config is NOT touched. Undo any time with 'beagle unwatch ${agent}'.\n`;
-  if (!env.confirm(diff)) {
+  // The always-on daemon service is installed once, on the first graduation.
+  const svc = servicePlan(env.platform, env.home, env.beagleBinary, env.stateDir);
+  const svcAlreadyInstalled = svc ? existsSync(svc.path) : true;
+  const diffLines = [
+    `Beagle will make ${svc && !svcAlreadyInstalled ? "these changes" : "one change"}:`,
+    `  + create a PATH shim at ${plan.shimPath}`,
+    `    (execs the real ${agent} at ${plan.real} through Beagle)`,
+  ];
+  if (svc && !svcAlreadyInstalled) {
+    diffLines.push(
+      `  + install a background service (${svc.kind}) so watched agents stay covered across reboots`,
+      `    at ${svc.path}`,
+    );
+  }
+  diffLines.push(
+    `  Your ${agent} config is NOT touched. Undo any time with 'beagle unwatch ${agent}'.`,
+  );
+  if (!env.confirm(diffLines.join("\n") + "\n")) {
     return { applied: false, message: "cancelled — nothing changed." };
   }
 
@@ -63,6 +86,14 @@ export function watchAgent(agent: string, env: WatchEnv): WatchResult {
   writeFileSync(plan.shimPath, shimScript({ agent, realBinary: plan.real, beagleBinary: env.beagleBinary }), {
     mode: 0o755,
   });
+
+  // Install the always-on service on first graduation (§6.7). Recorded with a
+  // null agent (it's shared, not per-agent) so it's removed only at uninstall
+  // or when the last watched agent is unwatched.
+  if (svc && !svcAlreadyInstalled) {
+    manifest.record({ kind: "service", agent: null, path: svc.path, backup: svc.kind });
+    installService(svc, env.serviceRunner ?? osServiceRunner);
+  }
 
   // Verify coverage against the user's actual shell (the honesty clause).
   const verdict = parseCoverageVerdict(agent, plan.shimPath, env.runType(agent));
@@ -83,6 +114,7 @@ export function watchAgent(agent: string, env: WatchEnv): WatchResult {
 
 export function unwatchAgent(agent: string, env: WatchEnv): WatchResult {
   const manifest = new ChangeManifest(env.stateDir);
+  const runner = env.serviceRunner ?? osServiceRunner;
   let removed = false;
   manifest.removeFor(agent, (e) => {
     if (e.kind === "shim" && existsSync(e.path)) {
@@ -96,15 +128,28 @@ export function unwatchAgent(agent: string, env: WatchEnv): WatchResult {
       copyFileSync(e.backup, e.path);
       removed = true;
     }
-    if (e.kind === "service" && existsSync(e.path)) {
-      rmSync(e.path, { force: true });
-      removed = true;
-    }
   });
+
+  // The daemon service is shared across watched agents; tear it down only when
+  // the last one is unwatched (no shim/config-redirect entries remain).
+  const remaining = manifest.list();
+  const anyAgentLeft = remaining.some((e) => e.kind === "shim" || e.kind === "config-redirect");
+  let serviceRemoved = false;
+  if (!anyAgentLeft) {
+    manifest.removeFor(null, (e) => {
+      if (e.kind === "service") {
+        removeService(e.path, (e.backup as ServiceKind) ?? "systemd", runner);
+        serviceRemoved = true;
+      }
+    });
+  }
   chmodSyncSafe(env.stateDir);
+  if (!removed) return { applied: false, message: `${agent} was not being watched.` };
   return {
-    applied: removed,
-    message: removed ? `unwatched ${agent} — shim removed, config restored.` : `${agent} was not being watched.`,
+    applied: true,
+    message:
+      `unwatched ${agent} — shim removed, config restored.` +
+      (serviceRemoved ? " Background service removed (no agents left watched)." : ""),
   };
 }
 
