@@ -239,6 +239,16 @@ describe("opencodeAuthMode + auth-aware upstream (ChatGPT OAuth routes to the Co
     expect(opencodeAuthMode(ocHome("not json"))).toBe("unknown");
   });
 
+  test("honors XDG_DATA_HOME (opencode resolves its data dir through it) — else an OAuth login misroutes to api.openai.com and 401s", () => {
+    // auth.json lives under $XDG_DATA_HOME/opencode, NOT ~/.local/share.
+    const home = mkdtempSync(join(tmpdir(), "beagle-oc-home-"));
+    const xdg = mkdtempSync(join(tmpdir(), "beagle-oc-xdg-"));
+    mkdirSync(join(xdg, "opencode"), { recursive: true });
+    writeFileSync(join(xdg, "opencode", "auth.json"), '{"openai":{"type":"oauth"}}');
+    expect(opencodeAuthMode(home, xdg)).toBe("oauth"); // found via XDG_DATA_HOME
+    expect(opencodeAuthMode(home)).toBe("unknown"); // default location empty → would misroute without the override
+  });
+
   test("resolveUpstream picks the Codex backend for oauth, default /v1 otherwise", () => {
     const spec = AGENTS.opencode!;
     expect(spec.upstream).toBe("https://api.openai.com/v1");

@@ -70,7 +70,9 @@ export const AGENTS: Record<string, AgentSpec> = {
     // resolveUpstream picks per login (verified live both ways).
     upstream: "https://api.openai.com/v1",
     resolveUpstream: (home) =>
-      opencodeAuthMode(home) === "oauth" ? "https://chatgpt.com/backend-api/codex" : undefined,
+      opencodeAuthMode(home, process.env.XDG_DATA_HOME) === "oauth"
+        ? "https://chatgpt.com/backend-api/codex"
+        : undefined,
     authLocation: "authorization",
     // Config-driven (verified in the PRD): OPENCODE_CONFIG points at a config
     // file whose provider.openai.options.baseURL Beagle redirects.
@@ -86,8 +88,9 @@ export const AGENTS: Record<string, AgentSpec> = {
   pi: {
     command: "pi",
     provider: "openai",
-    // pi's openai provider appends /chat/completions to its base, whose
-    // default includes /v1.
+    // pi's builtin openai provider uses the Responses API — it appends
+    // /responses to its base (verified in @earendil-works/pi-ai: the openai
+    // provider is openAIResponsesApi with baseUrl "https://api.openai.com/v1").
     upstream: "https://api.openai.com/v1",
     authLocation: "authorization",
     // Verified against pi's docs (badlogic/pi-mono, coding-agent):
