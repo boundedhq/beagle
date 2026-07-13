@@ -10,7 +10,7 @@ export const VERSION = "0.1.0";
 const HELP = `beagle ${VERSION} — a local transparency proxy for AI agents
 
 usage:
-  beagle run <agent> [args...]   watch one agent run (claude, codex)
+  beagle run <agent> [args...]   watch one agent run (claude, codex, opencode)
   beagle run claude --telemetry  watch via Claude Code's own telemetry
                                  (for Claude.ai subscription logins — nothing
                                  sits on the wire; capture is agent-reported)

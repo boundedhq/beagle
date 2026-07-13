@@ -57,8 +57,8 @@ Just as important, what Beagle is **not**:
 
 - **Not a TLS man-in-the-middle.** No CA certificate is installed, no TLS is
   intercepted, no system proxy is configured. If an app doesn't honor the
-  base-URL variable, its traffic simply doesn't route through Beagle — it
-  can't silently observe anything else.
+  redirect (the env var or per-run config), its traffic simply doesn't
+  route through Beagle — it can't silently observe anything else.
 - **Not a cloud service.** No account, no server, no telemetry, no
   phone-home. The only outbound connections are the ones your agent was
   already making, forwarded verbatim.
@@ -79,16 +79,19 @@ under the proxy, and `beagle watch` shims its PATH entry:
 | Claude Code CLI (Claude.ai subscription) | Claude Code's own usage telemetry, received locally — see below | *agent-reported* (Mode B) |
 | Codex CLI (API key) | runs under the local proxy (via `OPENAI_BASE_URL`) | ✓ wire (full fidelity) |
 | opencode | runs under the local proxy (via a temporary Beagle-written config) | ✓ wire (full fidelity) |
-| pi | runs under the local proxy (via a temporary Beagle-written config) | ✓ wire (full fidelity) |
+| pi | detected, but not wired yet — see below | *not yet* |
 
 **How the wrapping works.** Claude Code and Codex honor a standard
 environment variable that changes where they send their API traffic;
 `beagle run` sets it to the local proxy for that run and nothing else.
-opencode and pi don't read such a variable — their endpoint lives in a
-config file — so for the duration of the run Beagle hands them a
-**temporary config file of its own** that points at the proxy. Your real
-config files are never modified, and the temporary one is deleted when the
-run ends.
+opencode doesn't read such a variable — its endpoint lives in a config
+file — so for the duration of the run Beagle hands it a **temporary config
+file of its own** (your real settings merged in, plus the proxy address).
+Your real config files are never modified, and the temporary one is
+deleted when the run ends. **pi** is config-driven too, but its
+config-override mechanism hasn't been verified yet — `beagle run pi` says
+so and refuses, rather than guessing and silently watching nothing.
+Support lands once the knob is confirmed.
 
 **Subscription logins are different.** A Claude.ai (Pro/Max) login only
 works over Anthropic's own client-server connection, so Beagle stays off

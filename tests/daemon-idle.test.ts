@@ -115,5 +115,5 @@ describe("daemon idle-exit (design §6.7)", () => {
     for (let i = 0; i < 40 && d.isRunning; i++) await Bun.sleep(100);
     expect(d.isRunning).toBe(false);
     upstream.close();
-  });
+  }, 15_000); // fires (~1.5s) + wind-down poll (≤4s) can brush bun's 5s default on a slow runner
 });
