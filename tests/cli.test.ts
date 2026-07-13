@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, otelCallsArrivedSince, runCallsArrived } from "../src/cli/commands";
+import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, otelCallsArrivedSince, parseRunArgs, resolveRunMode, runCallsArrived } from "../src/cli/commands";
 import { buildRunEnv, AGENTS } from "../src/cli/agents";
 import { Store, type CallRecord } from "../src/core/store/store";
 import { ulid } from "../src/core/store/ulid";
@@ -281,6 +281,29 @@ describe("__hook forwarder safety (Mode B tool-output hook)", () => {
     ]);
     expect(code).toBe(0); // exited on its own (not the 6s kill fallback)
     expect(Date.now() - t0).toBeLessThan(5000); // bounded by the 1.5s stdin deadline + fetch
+  });
+});
+
+describe("resolveRunMode (flag > saved > detected > ask > wire)", () => {
+  test("explicit flags always win", () => {
+    expect(resolveRunMode({ telemetry: true, wire: false }, "wire", "api-key", true)).toEqual({ mode: "telemetry", source: "flag" });
+    expect(resolveRunMode({ telemetry: false, wire: true }, "telemetry", "subscription", true)).toEqual({ mode: "wire", source: "flag" });
+  });
+
+  test("a remembered answer beats detection", () => {
+    expect(resolveRunMode({ telemetry: false, wire: false }, "telemetry", "api-key", true)).toEqual({ mode: "telemetry", source: "saved" });
+    expect(resolveRunMode({ telemetry: false, wire: false }, "wire", "subscription", true)).toEqual({ mode: "wire", source: "saved" });
+  });
+
+  test("detection decides when nothing is saved", () => {
+    expect(resolveRunMode({ telemetry: false, wire: false }, undefined, "subscription", false)).toEqual({ mode: "telemetry", source: "detected" });
+    expect(resolveRunMode({ telemetry: false, wire: false }, undefined, "api-key", false)).toEqual({ mode: "wire", source: "detected" });
+  });
+
+  test("unknown login: ask on a TTY, silently default to wire otherwise", () => {
+    // non-TTY (the PATH shim, scripts) must NEVER hang on a prompt
+    expect(resolveRunMode({ telemetry: false, wire: false }, undefined, "unknown", false)).toEqual({ mode: "wire", source: "default" });
+    expect(resolveRunMode({ telemetry: false, wire: false }, undefined, "unknown", true)).toEqual({ mode: "ask" });
   });
 });
 

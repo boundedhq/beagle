@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChangeManifest } from "../src/install/manifest";
 import { isBeagleShim, shimScript, parseCoverageVerdict } from "../src/install/shim";
-import { codexAuthMode, detectAgents, opencodeAuthMode } from "../src/install/detect";
+import { claudeAuthMode, codexAuthMode, detectAgents, opencodeAuthMode } from "../src/install/detect";
 import { AGENTS } from "../src/cli/agents";
 import { GraduationTracker } from "../src/install/graduation";
 import { detectSubscriptionFor, graduationNudge, parseWatchArgs } from "../src/cli/commands";
@@ -210,12 +210,16 @@ describe("parseWatchArgs (strict watch flag parsing)", () => {
 });
 
 describe("detectSubscriptionFor (the real auto-mode wiring)", () => {
-  test("codex with a ChatGPT auth.json is a subscription; claude never auto-detects", () => {
+  test("codex detects via auth.json; claude via the oauthAccount record", () => {
     const home = mkdtempSync(join(tmpdir(), "beagle-sub-"));
     mkdirSync(join(home, ".codex"), { recursive: true });
     writeFileSync(join(home, ".codex", "auth.json"), '{"auth_mode":"chatgpt"}');
     expect(detectSubscriptionFor("codex", home)).toBe(true);
-    expect(detectSubscriptionFor("claude", home)).toBe(false); // not statically detectable
+    expect(detectSubscriptionFor("claude", home)).toBe(false); // no .claude.json yet
+    writeFileSync(join(home, ".claude.json"), '{"oauthAccount":{"accountUuid":"u"}}');
+    expect(detectSubscriptionFor("claude", home)).toBe(true);
+    // an API key in the env overrides the on-disk oauth record
+    expect(detectSubscriptionFor("claude", home, { hasAnthropicApiKey: true })).toBe(false);
     writeFileSync(join(home, ".codex", "auth.json"), '{"auth_mode":"apikey","OPENAI_API_KEY":"sk-x"}');
     expect(detectSubscriptionFor("codex", home)).toBe(false);
   });
@@ -258,6 +262,34 @@ describe("opencodeAuthMode + auth-aware upstream (ChatGPT OAuth routes to the Co
     expect(AGENTS.codex!.upstream).toBe("https://api.openai.com/v1");
     expect(AGENTS.pi!.upstream).toBe("https://api.openai.com/v1");
     expect(AGENTS.claude!.upstream).toBe("https://api.anthropic.com"); // claude appends /v1/messages itself
+  });
+});
+
+describe("claudeAuthMode (login detection for run/watch auto-mode)", () => {
+  const cHome = (content: string | null) => {
+    const home = mkdtempSync(join(tmpdir(), "beagle-cl-"));
+    if (content !== null) writeFileSync(join(home, ".claude.json"), content);
+    return home;
+  };
+
+  test("ANTHROPIC_API_KEY in env wins - wire is higher fidelity and self-correcting", () => {
+    expect(claudeAuthMode(cHome('{"oauthAccount":{"accountUuid":"u"}}'), true)).toBe("api-key");
+  });
+
+  test("an oauthAccount record in ~/.claude.json means subscription", () => {
+    expect(claudeAuthMode(cHome('{"oauthAccount":{"accountUuid":"u","billingType":"stripe"}}'), false)).toBe("subscription");
+    expect(claudeAuthMode(cHome('{"oauthAccount":{}}'), false)).toBe("unknown");
+    expect(claudeAuthMode(cHome('{"customApiKeyResponses":{}}'), false)).toBe("unknown");
+    expect(claudeAuthMode(cHome(null), false)).toBe("unknown");
+    expect(claudeAuthMode(cHome("not json"), false)).toBe("unknown");
+  });
+
+  test("honors CLAUDE_CONFIG_DIR for the .claude.json location", () => {
+    const home = mkdtempSync(join(tmpdir(), "beagle-cl-"));
+    const cfgDir = mkdtempSync(join(tmpdir(), "beagle-cl-cfg-"));
+    writeFileSync(join(cfgDir, ".claude.json"), '{"oauthAccount":{"accountUuid":"u"}}');
+    expect(claudeAuthMode(home, false, cfgDir)).toBe("subscription");
+    expect(claudeAuthMode(home, false)).toBe("unknown");
   });
 });
 

@@ -579,6 +579,7 @@ export class Daemon {
         const args = (req.args ?? {}) as Partial<BeagleConfig>;
         if (typeof args.redactOnCapture === "boolean") this.config.redactOnCapture = args.redactOnCapture;
         if (Array.isArray(args.excludedAgents)) this.config.excludedAgents = args.excludedAgents;
+        if (args.agentRunMode && typeof args.agentRunMode === "object") this.config.agentRunMode = args.agentRunMode;
         saveConfig(this.opts.stateDir, this.config);
         return { ok: true, data: this.config };
       }

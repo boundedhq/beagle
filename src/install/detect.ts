@@ -28,6 +28,30 @@ export function opencodeAuthMode(home: string, xdgDataHome?: string): "oauth" | 
   }
 }
 
+// How Claude Code is signed in. An ANTHROPIC_API_KEY in the environment means
+// API-key traffic (wire-proxyable); a Claude.ai OAuth login leaves an
+// `oauthAccount` record in ~/.claude.json (honoring $CLAUDE_CONFIG_DIR). Only
+// key PRESENCE is read — account values (email, org) never leave the parse.
+// The env var wins when both exist: wire capture is higher fidelity, and the
+// zero-capture warning catches a wrong guess.
+export function claudeAuthMode(
+  home: string,
+  hasApiKeyEnv: boolean,
+  claudeConfigDir?: string,
+): "api-key" | "subscription" | "unknown" {
+  if (hasApiKeyEnv) return "api-key";
+  try {
+    const path = claudeConfigDir ? join(claudeConfigDir, ".claude.json") : join(home, ".claude.json");
+    const raw = JSON.parse(readFileSync(path, "utf8")) as { oauthAccount?: unknown };
+    if (raw?.oauthAccount && typeof raw.oauthAccount === "object" && Object.keys(raw.oauthAccount).length > 0) {
+      return "subscription";
+    }
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 // How codex is signed in — the input to `watch`'s wire-vs-telemetry choice: a
 // "Sign in with ChatGPT" login can't be wire-proxied, so watching it in wire
 // mode would capture nothing. Reads auth.json (honoring $CODEX_HOME, codex's
