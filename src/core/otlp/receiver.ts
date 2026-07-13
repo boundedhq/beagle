@@ -1,9 +1,11 @@
 // OTLP/HTTP receiver (design §6.2, Mode B). Minimal loopback endpoint that
 // accepts json-only OTel logs, gated by a per-run token. Protobuf is rejected
 // by construction — hand-decoding proto has no place in the zero-dep budget.
+// Two routes: /v1/logs (Claude Code's OTel export) and /v1/hook (its
+// PostToolUse hook, which carries the tool-output content the export omits).
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import { mapOtlpLogsToCalls, type OtelCall } from "../../parsers/otlp-map";
+import { mapHookToCall, mapOtlpLogsToCalls, type OtelCall } from "../../parsers/otlp-map";
 
 export interface OtlpReceiverOptions {
   token: string;
@@ -35,7 +37,9 @@ export class OtlpReceiver {
   }
 
   private handle(req: IncomingMessage, res: ServerResponse): void {
-    if (req.method !== "POST" || !(req.url ?? "").startsWith("/v1/logs")) {
+    const path = req.url ?? "";
+    const isHook = path.startsWith("/v1/hook");
+    if (req.method !== "POST" || !(path.startsWith("/v1/logs") || isHook)) {
       res.writeHead(404).end();
       return;
     }
@@ -76,10 +80,13 @@ export class OtlpReceiver {
         res.writeHead(400).end("invalid json");
         return;
       }
-      const calls = mapOtlpLogsToCalls(payload, {
+      const ctx = {
         agent: this.opts.agent ?? "claude-code",
         provider: this.opts.provider ?? "anthropic",
-      });
+      };
+      const calls = isHook
+        ? [mapHookToCall(payload, ctx)].filter((c): c is OtelCall => c !== null)
+        : mapOtlpLogsToCalls(payload, ctx);
       // Only deliver records whose embedded run token matches (defense in
       // depth: the header already gated the request).
       const verified = calls.filter((e) => !e.runToken || this.tokenOk(e.runToken));

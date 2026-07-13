@@ -106,3 +106,43 @@ describe("Mode B end-to-end through the daemon", () => {
     store.close();
   });
 });
+
+describe("Mode B tool-output capture (PostToolUse hook)", () => {
+  let stateDir: string;
+  let daemon: import("../src/daemon/daemon").Daemon;
+  let alerts: import("../src/core/alert/engine").AlertEvent[];
+  let otlpPort: number;
+  let token: string;
+
+  beforeEach(async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { Daemon } = await import("../src/daemon/daemon");
+    stateDir = mkdtempSync(join(tmpdir(), "beagle-hook-"));
+    alerts = [];
+    daemon = await Daemon.start({ stateDir, alertSinkForTest: (a) => alerts.push(a), persistent: true });
+    const status = await (await import("../src/daemon/control")).controlRequest(daemon.socketPath, { cmd: "status" });
+    const data = status.data as { otlpPort: number; otlpToken: string };
+    otlpPort = data.otlpPort;
+    token = data.otlpToken;
+  });
+  afterEach(async () => { await daemon.stop(); });
+
+  test("a secret in a TOOL OUTPUT (cat .env) fires an alert — the Mode B gap, closed", async () => {
+    // This is exactly what the OTel export can't see: the secret is only in the
+    // tool's RESULT, never in the prompt or the command.
+    const hook = { session_id: "sess-x", tool_name: "Bash",
+      tool_input: { command: "cat secrets.env" },
+      tool_response: "AWS_SECRET=AKIAZQ3DRSTUVWXY2345\n" };
+    const r = await fetch(`http://127.0.0.1:${otlpPort}/v1/hook`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-beagle-run": token },
+      body: JSON.stringify(hook),
+    });
+    expect(r.status).toBe(200);
+    await Bun.sleep(150);
+    expect(alerts.length).toBe(1);
+    expect(alerts[0]!.title).toContain("aws-access-key-id");
+  });
+});

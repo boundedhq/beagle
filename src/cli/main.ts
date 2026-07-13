@@ -1,8 +1,8 @@
 // CLI entry point (non-core). Headless loop per R12: run, status, search,
 // leaks, show, purge — the whole product without the viewer.
 import {
-  cmdConfig, cmdDetect, cmdLeaks, cmdPurge, cmdRun, cmdSearch, cmdShow, cmdStatus,
-  cmdUnwatch, cmdWatch, defaultStateDir, readLineSync,
+  cmdConfig, cmdDetect, cmdHookForward, cmdLeaks, cmdPurge, cmdRun, cmdSearch, cmdShow,
+  cmdStatus, cmdUnwatch, cmdWatch, defaultStateDir, readLineSync,
 } from "./commands";
 
 export const VERSION = "0.1.0";
@@ -120,6 +120,10 @@ export async function run(argv: string[]): Promise<number> {
       await new Promise(() => {}); // run until signaled
       return 0;
     }
+    case "__hook":
+      // Hidden: Claude Code's PostToolUse hook (Mode B tool-output capture)
+      // invokes this to forward the tool result to the loopback receiver.
+      return await cmdHookForward();
     default:
       console.log(HELP);
       if (!cmd) console.log(cmdDetect()); // R1: bare `beagle` tells you the next command

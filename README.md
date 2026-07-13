@@ -98,13 +98,17 @@ export) and receives those reports on a local port. That means you see what
 Claude Code *says* it sent rather than the bytes themselves — which is why
 those rows are badged **agent** (*agent-reported*) in the dashboard instead
 of **✓ wire**. This is **validated against Claude Code 2.1.193**: it
-captures your prompts, the assistant's responses, and tool inputs, and
-fires real leak alerts on them. One honest limitation — Claude Code does
-*not* export the *contents* of tool results, so a secret that appears only
-in a file the agent reads (never in a prompt or command) won't be seen in
-Mode B; and because reports are batched, alerts lag by seconds rather than
-being wire-instant. Details and the reproduction:
-[Phase-0 spike results](docs/mode-b-spike.md). Codex on a "Sign in with
+captures your prompts, the assistant's responses, tool inputs, **and tool
+outputs** — so a secret that appears only in a file the agent reads (the
+most common accidental leak) is caught too. Claude Code's telemetry omits
+tool-result content, so Beagle also registers a `PostToolUse` hook (via the
+vendor's own `--settings`, merged with your hooks, never replacing them)
+that forwards each tool result to the local receiver for scanning. It's
+still a self-report, so it differs from wire capture in a few honest ways:
+reports are batched (alerts lag seconds, not wire-instant), the tool-output
+hook is best-effort (a dropped report is a miss, never a block), and it
+relies on Claude Code's hook system (which `--bare` turns off). Details and
+the reproduction: [Phase-0 spike results](docs/mode-b-spike.md). Codex on a "Sign in with
 ChatGPT" login is designed to work as a pure passthrough (Beagle forwards
 the client's own login unchanged and never injects anything), but that path
 is **still pending validation** — until then, API-key mode is the supported

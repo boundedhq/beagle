@@ -240,3 +240,26 @@ describe("pi extension redirect (run-level)", () => {
     } catch { /* already gone */ }
   }, 20_000);
 });
+
+describe("__hook forwarder safety (Mode B tool-output hook)", () => {
+  const bin = () => ["bun", join(import.meta.dir, "..", "src", "cli", "main.ts"), "__hook"];
+
+  test("no telemetry env: silent no-op, exits 0 (a bare tool call never fails)", () => {
+    const run = Bun.spawnSync(bin(), { stdin: new TextEncoder().encode('{"tool_response":"x"}') });
+    expect(run.exitCode).toBe(0);
+    expect(run.stdout.toString()).toBe(""); // MUST be silent — output could reach the model
+    expect(run.stderr.toString()).toBe("");
+  });
+
+  test("unreachable receiver: still exits 0 promptly (best-effort; never stalls the agent)", () => {
+    const t0 = Date.now();
+    const run = Bun.spawnSync(bin(), {
+      stdin: new TextEncoder().encode('{"session_id":"s","tool_name":"Bash","tool_response":"AKIAZQ3DRSTUVWXY2345"}'),
+      // 127.0.0.1:1 refuses fast; the 2s fetch timeout bounds the worst case regardless
+      env: { ...process.env, BEAGLE_HOOK_ENDPOINT: "http://127.0.0.1:1/v1/hook", BEAGLE_HOOK_TOKEN: "t" },
+    });
+    expect(run.exitCode).toBe(0);
+    expect(run.stdout.toString()).toBe("");
+    expect(Date.now() - t0).toBeLessThan(4000); // bounded by the 2s AbortSignal, not hung
+  });
+});
