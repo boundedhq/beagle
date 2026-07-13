@@ -207,3 +207,30 @@ describe("config-driven run redirect (opencode)", () => {
     expect(merged.theme).toBe("dark"); // preserved
   });
 });
+
+describe("pi extension redirect (run-level)", () => {
+  test("run pi injects -e <beagle extension> before user args, deletes it after", async () => {
+    const { existsSync, readFileSync } = await import("node:fs");
+    const stateDir = mkdtempSync(join(tmpdir(), "beagle-pi-"));
+    // --real /bin/echo: the "agent" just prints its argv and exits — proving
+    // the injected flag/path without pi installed.
+    const run = Bun.spawnSync(
+      ["bun", join(import.meta.dir, "..", "src", "cli", "main.ts"),
+       "run", "pi", "--real", "/bin/echo", "--", "user-arg"],
+      { env: { ...process.env, BEAGLE_STATE_DIR: stateDir } },
+    );
+    const out = run.stdout.toString();
+    expect(out).toContain("-e ");
+    expect(out).toContain("agent-config/pi.ts");
+    expect(out.trim().endsWith("user-arg")).toBe(true); // user args come after
+    // the Beagle-owned extension is deleted once the agent exits
+    expect(existsSync(join(stateDir, "agent-config", "pi.ts"))).toBe(false);
+
+    // reap the auto-started ephemeral daemon
+    try {
+      const info = JSON.parse(readFileSync(join(stateDir, "daemon.json"), "utf8")) as { socketPath: string };
+      const { controlRequest } = await import("../src/daemon/control");
+      await controlRequest(info.socketPath, { cmd: "shutdown" });
+    } catch { /* already gone */ }
+  }, 20_000);
+});

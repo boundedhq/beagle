@@ -14,7 +14,7 @@ import { watchAgent, unwatchAgent, type WatchEnv } from "../install/watch";
 import { ChangeManifest } from "../install/manifest";
 import { listLeakEvents } from "../viewer/feed-query";
 import { buildOtelEnv } from "../parsers/otlp-map";
-import { buildRedirectConfig, readFirstConfig, writeRedirectConfig } from "../install/config-redirect";
+import { buildExtensionRedirect, buildRedirectConfig, readFirstConfig, writeRedirectConfig, writeRedirectExtension } from "../install/config-redirect";
 import { AGENTS, buildRunEnv, runBaseUrl } from "./agents";
 
 // Everything printed by these commands can embed traffic-derived text
@@ -367,7 +367,7 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
     console.error("--telemetry (agent self-report capture) is supported for claude only in v1.");
     return 2;
   }
-  if (!telemetry && !spec.baseUrlEnv && !spec.config) {
+  if (!telemetry && !spec.baseUrlEnv && !spec.config && !spec.extension) {
     console.error(
       `${agentName} is config-driven and its config-override mechanism isn't confirmed yet — ` +
         `point it at Beagle manually for now (see the README).`,
@@ -411,6 +411,7 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
       },
     });
     let redirectCfg: string | null = null;
+    let finalArgs = agentArgs;
     if (spec.config) {
       // Config-driven agent (opencode): write a Beagle-owned config that
       // merges the user's real settings with the proxy baseURL, and point the
@@ -420,10 +421,19 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
       const merged = buildRedirectConfig(userCfg, spec.config.baseUrlPath, baseUrl);
       redirectCfg = writeRedirectConfig(stateDir, agentName, merged);
       modeEnv = { [spec.config.configEnv]: redirectCfg };
+    } else if (spec.extension) {
+      // Extension-driven agent (pi): generate a one-run extension that
+      // re-points the provider at the proxy and load it via the agent's own
+      // per-run flag. No config or auth files are touched, ever.
+      const baseUrl = runBaseUrl(daemon.proxyPort, runId);
+      const source = buildExtensionRedirect(spec.extension.baseUrlProvider, baseUrl);
+      redirectCfg = writeRedirectExtension(stateDir, agentName, source);
+      finalArgs = [spec.extension.flag, redirectCfg, ...agentArgs];
+      modeEnv = {};
     } else {
       modeEnv = buildRunEnv(agentName, daemon.proxyPort, runId);
     }
-    return await execAgent(daemon.socketPath, realBinary, agentArgs, modeEnv, stateDir, agentName, redirectCfg);
+    return await execAgent(daemon.socketPath, realBinary, finalArgs, modeEnv, stateDir, agentName, redirectCfg);
   }
 
   return await execAgent(daemon.socketPath, realBinary, agentArgs, modeEnv, stateDir, agentName, null);

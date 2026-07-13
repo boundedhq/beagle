@@ -5,7 +5,9 @@ import { join } from "node:path";
 import {
   deepSet,
   buildRedirectConfig,
+  buildExtensionRedirect,
   writeRedirectConfig,
+  writeRedirectExtension,
   readFirstConfig,
 } from "../src/install/config-redirect";
 
@@ -75,5 +77,40 @@ describe("writeRedirectConfig", () => {
     expect(path).toContain("opencode");
     expect(statSync(path).mode & 0o777).toBe(0o600);
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ provider: { openai: {} } });
+  });
+});
+
+describe("buildExtensionRedirect (pi: -e extension override)", () => {
+  test("generates a default-export extension that re-points the provider", () => {
+    const src = buildExtensionRedirect("openai", "http://127.0.0.1:9/run/abc");
+    expect(src).toContain("export default function");
+    expect(src).toContain('registerProvider("openai"');
+    expect(src).toContain('"http://127.0.0.1:9/run/abc"');
+  });
+
+  test("has no imports — nothing for pi's loader to resolve", () => {
+    // The file is injected into a foreign process; a bare `pi: any` signature
+    // keeps it dependency-free so it can never fail to load on resolution.
+    const src = buildExtensionRedirect("openai", "http://x");
+    expect(src).not.toMatch(/^\s*import /m);
+    expect(src).not.toContain("require(");
+  });
+
+  test("provider id and URL are JSON-escaped into the source", () => {
+    const src = buildExtensionRedirect('we"ird', 'http://h/"q');
+    expect(src).toContain(JSON.stringify('we"ird'));
+    expect(src).toContain(JSON.stringify('http://h/"q'));
+  });
+});
+
+describe("writeRedirectExtension", () => {
+  test("writes a Beagle-owned .ts extension (0600) and returns its path", () => {
+    const dir = tmp();
+    const path = writeRedirectExtension(dir, "pi", "export default function (pi) {}");
+    expect(existsSync(path)).toBe(true);
+    expect(path).toContain("pi");
+    expect(path.endsWith(".ts")).toBe(true);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(readFileSync(path, "utf8")).toContain("export default");
   });
 });

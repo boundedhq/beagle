@@ -53,3 +53,27 @@ export function writeRedirectConfig(
   writeFileSync(path, JSON.stringify(config, null, 2), { mode: 0o600 });
   return path;
 }
+
+/** Source of a Beagle-owned pi extension that re-points one provider at the
+ *  proxy for this run. pi loads it via `-e <file>`; overriding only `baseUrl`
+ *  keeps every existing model on the provider (per pi's custom-provider docs).
+ *  Deliberately import-free (`pi: any`) — the file runs inside pi's own
+ *  loader, and a bare function can never fail module resolution there. */
+export function buildExtensionRedirect(provider: string, baseUrl: string): string {
+  return (
+    "// Beagle-owned redirect (generated per run; deleted when the run ends).\n" +
+    "// Points pi's provider at the local Beagle proxy — nothing else changes.\n" +
+    "export default function (pi: any) {\n" +
+    `  pi.registerProvider(${JSON.stringify(provider)}, { baseUrl: ${JSON.stringify(baseUrl)} });\n` +
+    "}\n"
+  );
+}
+
+/** Write the Beagle-owned extension into the state dir (0600); return its path. */
+export function writeRedirectExtension(stateDir: string, agent: string, source: string): string {
+  const dir = join(stateDir, "agent-config");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const path = join(dir, `${agent}.ts`);
+  writeFileSync(path, source, { mode: 0o600 });
+  return path;
+}
