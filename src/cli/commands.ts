@@ -412,6 +412,9 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
     });
     let redirectCfg: string | null = null;
     let finalArgs = agentArgs;
+    // Redirect files are named per RUN, not per agent: two concurrent runs of
+    // the same agent must not overwrite each other's redirect (or delete it
+    // out from under the slower run's startup).
     if (spec.config) {
       // Config-driven agent (opencode): write a Beagle-owned config that
       // merges the user's real settings with the proxy baseURL, and point the
@@ -419,7 +422,7 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
       const baseUrl = runBaseUrl(daemon.proxyPort, runId);
       const userCfg = readFirstConfig(spec.config.realConfigCandidates(homedir()));
       const merged = buildRedirectConfig(userCfg, spec.config.baseUrlPath, baseUrl);
-      redirectCfg = writeRedirectConfig(stateDir, agentName, merged);
+      redirectCfg = writeRedirectConfig(stateDir, `${agentName}-${runId}`, merged);
       modeEnv = { [spec.config.configEnv]: redirectCfg };
     } else if (spec.extension) {
       // Extension-driven agent (pi): generate a one-run extension that
@@ -427,7 +430,7 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
       // per-run flag. No config or auth files are touched, ever.
       const baseUrl = runBaseUrl(daemon.proxyPort, runId);
       const source = buildExtensionRedirect(spec.extension.baseUrlProvider, baseUrl);
-      redirectCfg = writeRedirectExtension(stateDir, agentName, source);
+      redirectCfg = writeRedirectExtension(stateDir, `${agentName}-${runId}`, source);
       finalArgs = [spec.extension.flag, redirectCfg, ...agentArgs];
       modeEnv = {};
     } else {

@@ -226,10 +226,11 @@ describe("pi extension redirect (run-level)", () => {
     );
     const argv = run.stdout.toString().trim().split("\n");
     expect(argv[0]).toBe("-e"); // beagle's flag first
-    expect(argv[1]).toContain("agent-config/pi.ts"); // then the extension path
+    expect(argv[1]).toMatch(/agent-config\/pi-[0-9a-f-]+\.ts$/); // per-RUN path (concurrent runs must not collide)
     expect(argv[2]).toBe("user-arg"); // user args after
     // the Beagle-owned extension is deleted once the agent exits
-    expect(existsSync(join(stateDir, "agent-config", "pi.ts"))).toBe(false);
+    const { readdirSync } = await import("node:fs");
+    expect(readdirSync(join(stateDir, "agent-config"))).toEqual([]);
 
     // reap the auto-started ephemeral daemon
     try {
