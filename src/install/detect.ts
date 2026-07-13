@@ -1,9 +1,33 @@
 // Agent detection (design §6.12): resolve each supported agent the way the
 // user's shell would (PATH walk) plus known install locations (e.g.
 // ~/.claude/local). R1's negative case is a specified experience.
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { AGENTS } from "../cli/agents";
+
+// How codex is signed in — the input to `watch`'s wire-vs-telemetry choice: a
+// "Sign in with ChatGPT" login can't be wire-proxied, so watching it in wire
+// mode would capture nothing. Reads ~/.codex/auth.json but ONLY the auth_mode
+// label and key PRESENCE — token values never leave the parse.
+export function codexAuthMode(home: string): "chatgpt" | "api-key" | "unknown" {
+  try {
+    const raw = JSON.parse(readFileSync(join(home, ".codex", "auth.json"), "utf8")) as {
+      auth_mode?: unknown;
+      OPENAI_API_KEY?: unknown;
+      tokens?: unknown;
+    };
+    // codex ≥0.4x writes an explicit label; trust it first.
+    const label = typeof raw?.auth_mode === "string" ? raw.auth_mode.toLowerCase() : "";
+    if (label.includes("chatgpt")) return "chatgpt";
+    if (label.includes("api")) return "api-key";
+    // Older files: infer from which credential is present.
+    if (raw?.OPENAI_API_KEY) return "api-key";
+    if (raw?.tokens && typeof raw.tokens === "object") return "chatgpt";
+    return "unknown";
+  } catch {
+    return "unknown"; // no auth.json / unreadable → never block, just don't auto-pick
+  }
+}
 
 export interface DetectedAgent {
   agent: string;

@@ -9,8 +9,8 @@ import { loadConfig, saveConfig } from "../core/config/config";
 import { controlRequest, openLease } from "../daemon/control";
 import { Notifier, stripControlChars } from "../notifier/notifier";
 import { GraduationTracker } from "../install/graduation";
-import { detectAgents, knownExtraLocations, pathDirsFromEnv } from "../install/detect";
-import { watchAgent, unwatchAgent, type WatchEnv } from "../install/watch";
+import { codexAuthMode, detectAgents, knownExtraLocations, pathDirsFromEnv } from "../install/detect";
+import { watchAgent, unwatchAgent, type WatchEnv, type WatchModeRequest } from "../install/watch";
 import { ChangeManifest } from "../install/manifest";
 import { listLeakEvents } from "../viewer/feed-query";
 import { buildCodexOtelArgs, buildCodexOtelEnv, buildHookSettings, buildOtelEnv } from "../parsers/otlp-map";
@@ -257,12 +257,22 @@ function buildWatchEnv(stateDir: string, yes: boolean): WatchEnv {
       const line = readLineSync();
       return /^y(es)?$/i.test(line.trim());
     },
+    // Codex records its login kind in ~/.codex/auth.json (label + key
+    // presence only — token values are never read). Claude Code's auth isn't
+    // statically detectable, so it stays wire unless --telemetry is passed;
+    // the wire tripwire in cmdRun catches the mismatch at run time.
+    detectSubscription: (agent) => agent === "codex" && codexAuthMode(homedir()) === "chatgpt",
   };
 }
 
-export function cmdWatch(stateDir: string, agent: string, yes: boolean): string {
+export function cmdWatch(
+  stateDir: string,
+  agent: string,
+  yes: boolean,
+  mode: WatchModeRequest = "auto",
+): string {
   const env = buildWatchEnv(stateDir, yes);
-  const r = watchAgent(agent, env);
+  const r = watchAgent(agent, env, mode);
   if (r.applied) new GraduationTracker(stateDir).markWatched(agent);
   return r.message;
 }
@@ -476,15 +486,33 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
     }
   }
   const otelBefore = telemetry ? countOtelCalls(stateDir) : -1;
+  const t0 = Date.now();
   const exitCode = await execAgent(daemon.socketPath, realBinary, finalArgs, modeEnv, stateDir, agentName, cleanupFile, telemetry);
-  // Telemetry capture has real silent-failure modes the wire path doesn't: an
-  // agent version without OTel export, a user env/config that displaces the
-  // exporter. The agent runs fine either way — so if nothing arrived, say so
-  // loudly rather than let the user believe the run was watched.
-  if (telemetry && !(await otelCallsArrived(stateDir, otelBefore))) {
+  // Both modes have silent zero-capture failure modes the agent itself never
+  // surfaces — say so loudly rather than let the user believe the run was
+  // watched.
+  if (telemetry) {
+    // Telemetry: agent version without OTel export, or a user env/config that
+    // displaces the exporter.
+    if (!(await otelCallsArrived(stateDir, otelBefore))) {
+      process.stderr.write(
+        `beagle ▲ nothing arrived from ${agentName}'s telemetry this run — it was likely NOT captured.\n` +
+          `  Check \`beagle status\`, and that your ${agentName} version supports telemetry export.\n`,
+      );
+    }
+  } else if (Date.now() - t0 >= 3_000 && !(await runCallsArrived(stateDir, runId))) {
+    // Wire: the big one is a subscription login — its traffic never crosses
+    // the proxy, so the run "works" while Beagle sees nothing. Skipped only
+    // for near-instant runs (--help, version checks) — a real model turn can
+    // finish in ~5s, so the bar must sit well under that. A rare false
+    // positive (e.g. `codex login`, which sends no model traffic) is the
+    // right trade against silently unwatched subscription runs.
+    const alt = spec.telemetry
+      ? `  If ${agentName} signs in with a subscription (not an API key), the proxy can't see its traffic —\n` +
+        `  use: beagle run ${agentName} --telemetry   (or: beagle watch ${agentName} --telemetry)\n`
+      : `  Check \`beagle status\` for coverage.\n`;
     process.stderr.write(
-      `beagle ▲ nothing arrived from ${agentName}'s telemetry this run — it was likely NOT captured.\n` +
-        `  Check \`beagle status\`, and that your ${agentName} version supports telemetry export.\n`,
+      `beagle ▲ no traffic from this ${agentName} run went through Beagle — it was NOT captured.\n` + alt,
     );
   }
   return exitCode;
@@ -517,6 +545,40 @@ async function otelCallsArrived(stateDir: string, before: number, deadlineMs = 4
     if (Date.now() - t0 >= deadlineMs) return false;
     await Bun.sleep(250);
   }
+}
+
+// Did any WIRE call land for this specific run? Rows are keyed by the run's
+// UUID, so no before/after dance is needed. Short poll to absorb write lag.
+async function runCallsArrived(stateDir: string, runId: string, deadlineMs = 2000): Promise<boolean> {
+  const t0 = Date.now();
+  for (;;) {
+    const store = openStore(stateDir);
+    if (store === null || isStoreError(store)) return true; // unreadable → don't cry wolf
+    let n = -1;
+    try {
+      n = store.queryAll<{ n: number }>("SELECT COUNT(*) AS n FROM exchanges WHERE run_id=?", [runId])[0]?.n ?? 0;
+    } catch {
+      n = -1;
+    } finally {
+      store.close();
+    }
+    if (n !== 0) return true;
+    if (Date.now() - t0 >= deadlineMs) return false;
+    await Bun.sleep(250);
+  }
+}
+
+/** The one-time graduation nudge (design §6.12): shown after the 3rd wrapper
+ *  run. Mode-aware — `beagle watch` supports both wire and telemetry shims, so
+ *  the suggested command matches how THIS run was captured (a telemetry user
+ *  pointed at a wire watch would silently lose coverage). Exported for tests. */
+export function graduationNudge(agent: string, telemetry: boolean): string {
+  const cmd = `beagle watch ${agent}${telemetry ? " --telemetry" : ""}`;
+  return (
+    `\nbeagle: you've run ${agent} under Beagle a few times.\n` +
+    `  Watch it automatically so you never have to prefix again? Run: ${cmd}\n` +
+    `  (one-time nudge; it won't ask again)\n\n`
+  );
 }
 
 // The shell command Claude Code runs for the tool-output hook: this same
@@ -595,13 +657,8 @@ async function execAgent(
   redirectCfg: string | null,
   telemetry: boolean,
 ): Promise<number> {
-  // Graduation nudges the user toward `beagle watch`, which installs a
-  // WIRE-mode PATH shim. That shim can't do --telemetry, so for a subscription
-  // login (the only reason to use --telemetry) it would capture nothing while
-  // status reports coverage. Telemetry runs are therefore excluded from the
-  // graduation flow entirely — neither counted nor nudged.
   const grad = new GraduationTracker(stateDir);
-  const shouldNudge = !telemetry && grad.recordRunAndCheck(agentName);
+  const shouldNudge = grad.recordRunAndCheck(agentName);
 
   // Hold a lease for the agent's lifetime so an auto-started ephemeral daemon
   // stays up while we're watching, then winds down after we exit (§6.7). Both
@@ -622,11 +679,7 @@ async function execAgent(
     // Graduation nudge AFTER the agent exits (R2): full-screen TUIs wipe
     // anything printed before they start; after exit the terminal is ours.
     if (shouldNudge) {
-      process.stderr.write(
-        `\nbeagle: you've run ${agentName} under Beagle a few times.\n` +
-          `  Watch it automatically so you never have to prefix again? Run: beagle watch ${agentName}\n` +
-          `  (one-time nudge; it won't ask again)\n\n`,
-      );
+      process.stderr.write(graduationNudge(agentName, telemetry));
     }
     return exitCode;
   } finally {

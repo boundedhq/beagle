@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChangeManifest } from "../src/install/manifest";
 import { shimScript, parseCoverageVerdict } from "../src/install/shim";
-import { detectAgents } from "../src/install/detect";
+import { codexAuthMode, detectAgents } from "../src/install/detect";
 import { GraduationTracker } from "../src/install/graduation";
+import { graduationNudge } from "../src/cli/commands";
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "beagle-install-"));
@@ -46,6 +47,27 @@ describe("ChangeManifest", () => {
     expect(m.summary()).toContain("claude");
     expect(m.summary()).toContain("1");
   });
+
+  test("summary labels telemetry shims so the trust strip shows the capture mode", () => {
+    const m = new ChangeManifest(dir);
+    m.record({ kind: "shim", agent: "codex", path: "/s/codex", backup: null, mode: "telemetry" });
+    m.record({ kind: "shim", agent: "claude", path: "/s/claude", backup: null, mode: "wire" });
+    expect(m.summary()).toContain("codex (telemetry)");
+    expect(m.summary()).toContain("claude");
+    expect(m.summary()).not.toContain("claude (telemetry)");
+  });
+
+  test("recordReplacing updates a re-watched agent's entry instead of stacking duplicates", () => {
+    const m = new ChangeManifest(dir);
+    m.recordReplacing({ kind: "shim", agent: "codex", path: "/s/codex", backup: null, mode: "wire" });
+    m.recordReplacing({ kind: "shim", agent: "codex", path: "/s/codex", backup: null, mode: "telemetry" });
+    const shims = m.list().filter((e) => e.kind === "shim");
+    expect(shims.length).toBe(1);
+    expect(shims[0]!.mode).toBe("telemetry");
+    // different path or agent is NOT replaced
+    m.recordReplacing({ kind: "shim", agent: "claude", path: "/s/claude", backup: null, mode: "wire" });
+    expect(m.list().length).toBe(2);
+  });
 });
 
 describe("shim script", () => {
@@ -70,6 +92,55 @@ describe("shim script", () => {
       beagleBinary: "/usr/local/bin/beagle",
     });
     expect(s).toContain('"/Applications/My Tools/claude"');
+  });
+
+  test("telemetry shim runs the agent in Mode B, keeping --real and arg passthrough", () => {
+    const s = shimScript({
+      agent: "codex",
+      realBinary: "/opt/homebrew/bin/codex",
+      beagleBinary: "/usr/local/bin/beagle",
+      telemetry: true,
+    });
+    expect(s).toContain('run codex --telemetry --real "/opt/homebrew/bin/codex" -- "$@"');
+    // and the default stays wire
+    const wire = shimScript({ agent: "codex", realBinary: "/o/codex", beagleBinary: "/b" });
+    expect(wire).not.toContain("--telemetry");
+  });
+});
+
+describe("codexAuthMode (subscription detection for watch auto-mode)", () => {
+  const authHome = (content: string | null) => {
+    const home = mkdtempSync(join(tmpdir(), "beagle-auth-"));
+    if (content !== null) {
+      mkdirSync(join(home, ".codex"), { recursive: true });
+      writeFileSync(join(home, ".codex", "auth.json"), content);
+    }
+    return home;
+  };
+
+  test("explicit auth_mode label wins (codex >=0.4x writes it)", () => {
+    expect(codexAuthMode(authHome('{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{}}'))).toBe("chatgpt");
+    expect(codexAuthMode(authHome('{"auth_mode":"apikey","OPENAI_API_KEY":"sk-x"}'))).toBe("api-key");
+  });
+
+  test("older files fall back to credential presence", () => {
+    expect(codexAuthMode(authHome('{"OPENAI_API_KEY":"sk-x"}'))).toBe("api-key");
+    expect(codexAuthMode(authHome('{"OPENAI_API_KEY":null,"tokens":{"access_token":"t"}}'))).toBe("chatgpt");
+  });
+
+  test("missing or malformed auth.json is unknown — never blocks, never auto-picks", () => {
+    expect(codexAuthMode(authHome(null))).toBe("unknown");
+    expect(codexAuthMode(authHome("not json"))).toBe("unknown");
+    expect(codexAuthMode(authHome("{}"))).toBe("unknown");
+  });
+});
+
+describe("graduationNudge (mode-aware watch suggestion)", () => {
+  test("wire runs point at plain watch; telemetry runs carry --telemetry", () => {
+    expect(graduationNudge("codex", false)).toContain("beagle watch codex\n");
+    expect(graduationNudge("codex", true)).toContain("beagle watch codex --telemetry");
+    // a telemetry user must never be pointed at a wire-only watch command
+    expect(graduationNudge("claude", true)).not.toContain("watch claude\n");
   });
 });
 

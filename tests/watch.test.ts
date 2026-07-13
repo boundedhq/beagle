@@ -83,11 +83,87 @@ describe("watchAgent", () => {
     expect(shim).toContain("run opencode");
   });
 
-  test("pi (no confirmed config knob) is still refused", () => {
+  test("pi is shimmable via its extension redirect (the shim just execs `beagle run pi`)", () => {
     const env = makeEnv({ resolveReal: () => "/opt/homebrew/bin/pi" });
     const r = watchAgent("pi", env);
-    expect(r.applied).toBe(false);
-    expect(existsSync(join(env.shimDir, "pi"))).toBe(false);
+    expect(r.applied).toBe(true);
+    const shim = readFileSync(join(env.shimDir, "pi"), "utf8");
+    expect(shim).toContain("run pi");
+    expect(shim).not.toContain("--telemetry"); // pi has no telemetry mode
+  });
+});
+
+describe("watchAgent — telemetry mode (subscription logins)", () => {
+  test("--telemetry writes a shim that runs the agent in Mode B", () => {
+    const env = makeEnv();
+    const r = watchAgent("claude", env, "telemetry");
+    expect(r.applied).toBe(true);
+    expect(r.message).toContain("agent telemetry");
+    const shim = readFileSync(join(env.shimDir, "claude"), "utf8");
+    expect(shim).toContain("run claude --telemetry --real");
+    expect(shim.endsWith('-- "$@"\n')).toBe(true); // user args still forwarded
+    // manifest records the mode so status/unwatch stay honest
+    const entry = new ChangeManifest(env.stateDir).list().find((e) => e.kind === "shim")!;
+    expect(entry.mode).toBe("telemetry");
+  });
+
+  test("--telemetry is refused for agents without a telemetry mode", () => {
+    for (const agent of ["opencode", "pi"]) {
+      const env = makeEnv({ resolveReal: () => `/opt/homebrew/bin/${agent}` });
+      const r = watchAgent(agent, env, "telemetry");
+      expect(r.applied).toBe(false);
+      expect(r.message).toContain("no telemetry");
+      expect(existsSync(join(env.shimDir, agent))).toBe(false);
+    }
+  });
+
+  test("auto mode picks telemetry when a subscription login is detected", () => {
+    const env = makeEnv({
+      resolveReal: () => "/opt/homebrew/bin/codex",
+      detectSubscription: (agent) => agent === "codex",
+    });
+    const r = watchAgent("codex", env); // no explicit mode
+    expect(r.applied).toBe(true);
+    expect(readFileSync(join(env.shimDir, "codex"), "utf8")).toContain("--telemetry");
+    expect(r.message).toContain("agent telemetry");
+  });
+
+  test("auto mode stays wire when no subscription is detected — with the subscription hint in the plan", () => {
+    let plan = "";
+    const env = makeEnv({
+      resolveReal: () => "/opt/homebrew/bin/codex",
+      detectSubscription: () => false,
+      confirm: (diff) => ((plan = diff), true),
+    });
+    const r = watchAgent("codex", env);
+    expect(r.applied).toBe(true);
+    expect(readFileSync(join(env.shimDir, "codex"), "utf8")).not.toContain("--telemetry");
+    expect(plan).toContain("--telemetry"); // the hint names the escape hatch
+  });
+
+  test("--wire overrides auto-detection", () => {
+    const env = makeEnv({
+      resolveReal: () => "/opt/homebrew/bin/codex",
+      detectSubscription: () => true, // would auto-pick telemetry
+    });
+    const r = watchAgent("codex", env, "wire");
+    expect(r.applied).toBe(true);
+    expect(readFileSync(join(env.shimDir, "codex"), "utf8")).not.toContain("--telemetry");
+  });
+
+  test("re-watching to switch modes rewrites the shim and updates (not duplicates) the manifest", () => {
+    const env = makeEnv();
+    watchAgent("claude", env, "wire");
+    watchAgent("claude", env, "telemetry");
+    const shim = readFileSync(join(env.shimDir, "claude"), "utf8");
+    expect(shim).toContain("--telemetry");
+    const shims = new ChangeManifest(env.stateDir).list().filter((e) => e.kind === "shim");
+    expect(shims.length).toBe(1); // replaced, not stacked
+    expect(shims[0]!.mode).toBe("telemetry");
+    // and unwatch still fully cleans up
+    const u = unwatchAgent("claude", env);
+    expect(u.applied).toBe(true);
+    expect(existsSync(join(env.shimDir, "claude"))).toBe(false);
   });
 });
 

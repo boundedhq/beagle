@@ -15,7 +15,9 @@ usage:
                                  subscription logins that can't be wired
                                  through a proxy (claude, codex) — nothing sits
                                  on the wire; capture is agent-reported
-  beagle watch <agent> [--yes]   watch an agent automatically (PATH shim)
+  beagle watch <agent> [--yes]   watch an agent automatically (PATH shim);
+                                 --telemetry for subscription logins (auto-
+                                 detected for codex), --wire to force proxy
   beagle unwatch <agent>         stop watching, restore your setup
   beagle detect                  find supported agents on this machine
   beagle status                  trust strip: coverage, store, retention
@@ -45,8 +47,13 @@ export async function run(argv: string[]): Promise<number> {
     }
     case "watch": {
       const agent = rest.find((a) => !a.startsWith("--"));
-      if (!agent) { console.error("usage: beagle watch <agent> [--yes]"); return 2; }
-      console.log(cmdWatch(stateDir, agent, rest.includes("--yes")));
+      if (!agent) { console.error("usage: beagle watch <agent> [--telemetry|--wire] [--yes]"); return 2; }
+      if (rest.includes("--telemetry") && rest.includes("--wire")) {
+        console.error("--telemetry and --wire are mutually exclusive.");
+        return 2;
+      }
+      const mode = rest.includes("--telemetry") ? "telemetry" : rest.includes("--wire") ? "wire" : "auto";
+      console.log(cmdWatch(stateDir, agent, rest.includes("--yes"), mode));
       return 0;
     }
     case "unwatch": {

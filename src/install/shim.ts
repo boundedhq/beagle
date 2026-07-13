@@ -1,10 +1,13 @@
 // PATH shim (design §6.7, R2): a `<agent>` earlier on PATH that redirects
 // then execs the real binary. Uninstall = removing one symlink; the user's
-// real config is untouched.
+// real config is untouched. A `telemetry` shim runs the agent in Mode B
+// (`beagle run <agent> --telemetry`) — for subscription logins whose traffic
+// the proxy can't see; a wire shim there would watch nothing.
 export interface ShimSpec {
   agent: string;
   realBinary: string;
   beagleBinary: string;
+  telemetry?: boolean;
 }
 
 function shQuote(s: string): string {
@@ -16,11 +19,15 @@ function shQuote(s: string): string {
 export function shimScript(spec: ShimSpec): string {
   const beagle = shQuote(spec.beagleBinary);
   const real = shQuote(spec.realBinary);
+  const mode = spec.telemetry ? " --telemetry" : "";
+  const how = spec.telemetry
+    ? "# Watches via the agent's own telemetry (Mode B — subscription login),"
+    : "# Redirects this agent's model traffic through Beagle,";
   return `#!/bin/sh
 # Beagle PATH shim for ${spec.agent} — created by 'beagle watch'.
-# Redirects this agent's model traffic through Beagle, then execs the real
+${how} then execs the real
 # binary. Remove with 'beagle unwatch ${spec.agent}'. Your config is untouched.
-exec ${beagle} run ${spec.agent} --real ${real} -- "$@"
+exec ${beagle} run ${spec.agent}${mode} --real ${real} -- "$@"
 `;
 }
 
