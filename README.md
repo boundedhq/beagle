@@ -27,14 +27,17 @@ While it runs, every model call is captured locally; if a secret goes out,
 you get an OS notification the moment it happens. Afterwards:
 
 ```sh
-$ pbpaste | beagle search          # "was this key ever sent?" — pipe the term
-found in 1 call across 1 session:  # in (or type at the prompt) so the secret
-  01KXAK6K  2026-07-12T…  session a1b2c3d4   # never lands in shell history
+$ beagle leaks                     # did anything leak? every call was already scanned
+1 leak event:
+  2026-07-12T14:22:15.000Z  aws-access-key-id → anthropic  ×3  first: 01KXAK6K
 
-$ beagle ui                        # or browse it in the dashboard
+$ beagle ui                        # or browse it — leaks are highlighted inline
 dashboard: http://127.0.0.1:52341/?boot=…
 (the link is one-time; run `beagle ui` again for a fresh one)
 ```
+
+You never have to tell Beagle what your secrets look like — detection runs
+automatically on every outbound call.
 
 ## How it works (and what it is *not*)
 
@@ -114,10 +117,10 @@ beagle run <agent>         # watch one agent run; nothing changed on your system
 beagle watch <agent>       # opt in to always-on (one PATH shim; revert any time)
 beagle unwatch <agent>     # stop watching, restore your setup
 beagle status              # trust strip: coverage, store size, retention, what changed
-beagle search [string]     # "was this password ever sent?" — a definitive answer
-                           # (no argument: reads the term from stdin — pipe a real
-                           #  secret in rather than putting it in shell history)
-beagle leaks               # the leak log
+beagle leaks               # the leak log — every detected secret, deduped, automatic
+beagle search [string]     # was this exact string ever sent? for things the detector
+                           # can't know (an internal password, a hostname). With no
+                           # argument it reads stdin, keeping the term out of history
 beagle show <id>           # one call, summarized or raw
 beagle ui                  # open the dashboard (loopback, one-time token)
 beagle purge [all|panic]   # erase captured data (panic = secure wipe + vacuum)
@@ -214,11 +217,15 @@ PATH entry. GUI apps launch their own processes and inherit neither, so
 their traffic isn't captured. `beagle status` reports coverage honestly
 rather than implying more than it sees.
 
-**How do I search for a real secret without leaking it into shell history?**
-Run `beagle search` with no argument — it reads the term from stdin. Pipe
-it (`pbpaste | beagle search`) or type it at the prompt; either way the
-secret never appears in argv, shell history, or `ps` output. (The search
-itself runs locally against your local store.)
+**How do I find out whether a secret leaked?**
+You don't have to go looking — every outbound call is scanned
+automatically, and anything detected is in `beagle leaks` and highlighted
+inline in the dashboard. Don't feed real keys into commands to check.
+`beagle search` is for strings the detector *can't* know about (an internal
+password, a customer hostname); if you ever do search for something
+sensitive, run `beagle search` with no argument and it reads the term from
+stdin, keeping it out of argv and shell history. The search runs locally
+against your local store.
 
 **Why should I trust the detector?**
 It's the gitleaks ruleset (vendored as data, sha256-pinned) run through a
