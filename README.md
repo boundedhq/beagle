@@ -78,17 +78,21 @@ under the proxy, and `beagle watch` shims its PATH entry:
 | opencode | runs under the local proxy (via a temporary Beagle-written config) | ✓ wire (full fidelity) |
 | pi | runs under the local proxy (via a one-run Beagle extension, `pi -e`) | ✓ wire (full fidelity) |
 
-**How the wrapping works.** Claude Code and Codex honor a standard
-environment variable that changes where they send their API traffic;
-`beagle run` sets it to the local proxy for that run and nothing else.
-opencode doesn't read such a variable — its endpoint lives in a config
-file — so for the duration of the run Beagle hands it a **temporary config
-file of its own** (your real settings merged in, plus the proxy address).
-pi has the cleanest knob of all: its `-e` flag loads an extension for one
-run, so Beagle passes a **generated three-line extension** that re-points
-pi's provider at the proxy — no config or auth files are even read. In
-every case your real config files are never modified, and the generated
-file is deleted when the run ends.
+**How the wrapping works.**
+
+- **Claude Code / Codex** — both honor a standard environment variable that
+  changes where they send their API traffic; `beagle run` sets it to the
+  local proxy for that run and nothing else.
+- **opencode** — no such variable; its endpoint lives in a config file. For
+  the duration of the run Beagle hands it a **temporary config file of its
+  own** (your real settings merged in, plus the proxy address).
+- **pi** — the cleanest knob of all: its `-e` flag loads an extension for
+  one run, so Beagle passes a **generated three-line extension** that
+  re-points pi's provider at the proxy — no config or auth files are even
+  read.
+
+In every case your real config files are never modified, and anything
+Beagle generates is deleted when the run ends.
 
 **Subscription logins are different.** A Claude.ai (Pro/Max) login only
 works over Anthropic's own client-server connection, so Beagle stays off
