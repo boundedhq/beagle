@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { parseUpstream } from "../src/core/proxy/http1";
 import { createServer, type Server, type Socket } from "node:net";
 import { gzipSync } from "node:zlib";
 import { mkdtempSync } from "node:fs";
@@ -120,6 +121,32 @@ describe("proxy", () => {
       ...overrides,
     });
   }
+
+  test("an upstream WITH a base path (…/v1) has it prefixed onto every forwarded request", async () => {
+    // The OpenAI family replaces a default base that INCLUDES /v1 and appends
+    // only /responses — before this, the proxy forwarded bare /responses to
+    // the host root and every codex/opencode/pi wire request 404'd.
+    register({ upstream: `http://127.0.0.1:${upstream.port}/v1` });
+    const body = '{"model":"m","input":"hi"}';
+    const raw =
+      `POST /run/run-abc/responses HTTP/1.1\r\n` +
+      `Host: 127.0.0.1\r\n` +
+      `Authorization: Bearer sk-test\r\n` +
+      `Content-Type: application/json\r\n` +
+      `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n` + body;
+    await sendRaw(proxy.port, raw);
+    const line = upstream.requests[0]!.toString().split("\r\n")[0];
+    expect(line).toBe("POST /v1/responses HTTP/1.1");
+  });
+
+  test("parseUpstream keeps the base path; bare hosts stay prefix-free", () => {
+    expect(parseUpstream("https://api.anthropic.com").basePath).toBe("");
+    expect(parseUpstream("https://api.openai.com/v1").basePath).toBe("/v1");
+    expect(parseUpstream("https://api.openai.com/v1/").basePath).toBe("/v1"); // trailing slash normalized
+    expect(parseUpstream("https://chatgpt.com/backend-api/codex").basePath).toBe("/backend-api/codex");
+    // and the anthropic default keeps working: no prefix, client path verbatim
+    expect(parseUpstream("http://127.0.0.1:8080").basePath).toBe("");
+  });
 
   test("forwards body byte-identical with header order preserved, prefix stripped", async () => {
     register();

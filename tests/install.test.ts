@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChangeManifest } from "../src/install/manifest";
 import { isBeagleShim, shimScript, parseCoverageVerdict } from "../src/install/shim";
-import { codexAuthMode, detectAgents } from "../src/install/detect";
+import { codexAuthMode, detectAgents, opencodeAuthMode } from "../src/install/detect";
+import { AGENTS } from "../src/cli/agents";
 import { GraduationTracker } from "../src/install/graduation";
 import { detectSubscriptionFor, graduationNudge, parseWatchArgs } from "../src/cli/commands";
 
@@ -217,6 +218,46 @@ describe("detectSubscriptionFor (the real auto-mode wiring)", () => {
     expect(detectSubscriptionFor("claude", home)).toBe(false); // not statically detectable
     writeFileSync(join(home, ".codex", "auth.json"), '{"auth_mode":"apikey","OPENAI_API_KEY":"sk-x"}');
     expect(detectSubscriptionFor("codex", home)).toBe(false);
+  });
+});
+
+describe("opencodeAuthMode + auth-aware upstream (ChatGPT OAuth routes to the Codex backend)", () => {
+  const ocHome = (content: string | null) => {
+    const home = mkdtempSync(join(tmpdir(), "beagle-oc-"));
+    if (content !== null) {
+      mkdirSync(join(home, ".local", "share", "opencode"), { recursive: true });
+      writeFileSync(join(home, ".local", "share", "opencode", "auth.json"), content);
+    }
+    return home;
+  };
+
+  test("reads the provider type label only", () => {
+    expect(opencodeAuthMode(ocHome('{"openai":{"type":"oauth","access":"x"}}'))).toBe("oauth");
+    expect(opencodeAuthMode(ocHome('{"openai":{"type":"api","key":"sk-x"}}'))).toBe("api-key");
+    expect(opencodeAuthMode(ocHome('{"anthropic":{"type":"oauth"}}'))).toBe("unknown"); // no openai entry
+    expect(opencodeAuthMode(ocHome(null))).toBe("unknown");
+    expect(opencodeAuthMode(ocHome("not json"))).toBe("unknown");
+  });
+
+  test("honors XDG_DATA_HOME (opencode resolves its data dir through it) — else an OAuth login misroutes to api.openai.com and 401s", () => {
+    // auth.json lives under $XDG_DATA_HOME/opencode, NOT ~/.local/share.
+    const home = mkdtempSync(join(tmpdir(), "beagle-oc-home-"));
+    const xdg = mkdtempSync(join(tmpdir(), "beagle-oc-xdg-"));
+    mkdirSync(join(xdg, "opencode"), { recursive: true });
+    writeFileSync(join(xdg, "opencode", "auth.json"), '{"openai":{"type":"oauth"}}');
+    expect(opencodeAuthMode(home, xdg)).toBe("oauth"); // found via XDG_DATA_HOME
+    expect(opencodeAuthMode(home)).toBe("unknown"); // default location empty → would misroute without the override
+  });
+
+  test("resolveUpstream picks the Codex backend for oauth, default /v1 otherwise", () => {
+    const spec = AGENTS.opencode!;
+    expect(spec.upstream).toBe("https://api.openai.com/v1");
+    expect(spec.resolveUpstream!(ocHome('{"openai":{"type":"oauth"}}'))).toBe("https://chatgpt.com/backend-api/codex");
+    expect(spec.resolveUpstream!(ocHome('{"openai":{"type":"api"}}'))).toBeUndefined();
+    // the openai-family defaults all carry their /v1 (clients append bare paths)
+    expect(AGENTS.codex!.upstream).toBe("https://api.openai.com/v1");
+    expect(AGENTS.pi!.upstream).toBe("https://api.openai.com/v1");
+    expect(AGENTS.claude!.upstream).toBe("https://api.anthropic.com"); // claude appends /v1/messages itself
   });
 });
 

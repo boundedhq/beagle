@@ -6,6 +6,28 @@ import { join } from "node:path";
 import { AGENTS } from "../cli/agents";
 import { isBeagleShim } from "./shim";
 
+// How opencode's openai provider is signed in. Its ChatGPT-plan OAuth login
+// speaks to OpenAI's Codex backend (https://chatgpt.com/backend-api/codex),
+// NOT api.openai.com — the wire redirect must forward to the right upstream
+// or every request 404s. Reads opencode's auth.json (honoring $XDG_DATA_HOME,
+// which opencode itself resolves its data dir through, else ~/.local/share)
+// but ONLY the per-provider `type` label — credential values never leave the
+// parse. `xdgDataHome` is injectable for tests.
+export function opencodeAuthMode(home: string, xdgDataHome?: string): "oauth" | "api-key" | "unknown" {
+  try {
+    const dataDir = xdgDataHome || join(home, ".local", "share");
+    const raw = JSON.parse(
+      readFileSync(join(dataDir, "opencode", "auth.json"), "utf8"),
+    ) as Record<string, { type?: unknown } | undefined>;
+    const t = raw?.openai && typeof raw.openai === "object" ? raw.openai.type : undefined;
+    if (t === "oauth") return "oauth";
+    if (t === "api" || t === "apikey" || t === "api-key") return "api-key";
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 // How codex is signed in — the input to `watch`'s wire-vs-telemetry choice: a
 // "Sign in with ChatGPT" login can't be wire-proxied, so watching it in wire
 // mode would capture nothing. Reads auth.json (honoring $CODEX_HOME, codex's

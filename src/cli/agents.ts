@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { opencodeAuthMode } from "../install/detect";
 
 // The four v1 CLI agents (R2) and their redirect knobs. claude/codex honor a
 // base-URL env var; opencode is config-driven via a Beagle-owned config file;
@@ -29,6 +30,9 @@ export interface AgentSpec {
   config?: ConfigRedirect;
   extension?: ExtensionRedirect;
   extraHeaders?: Array<[string, string]>;
+  /** Auth-dependent upstream override (e.g. opencode's ChatGPT OAuth backend).
+   *  Returns undefined to use `upstream`. */
+  resolveUpstream?: (home: string) => string | undefined;
   /** Whether `--telemetry` (Mode B, agent self-report capture) is supported and
    *  which vendor OTel wiring to use. Both agents export to Beagle's loopback
    *  receiver; they differ in how it's turned on — `claude` via env vars + a
@@ -49,7 +53,9 @@ export const AGENTS: Record<string, AgentSpec> = {
   codex: {
     command: "codex",
     provider: "openai",
-    upstream: "https://api.openai.com",
+    // codex's OPENAI_BASE_URL default is https://api.openai.com/v1 and it
+    // appends only /responses — the /v1 must live in the upstream.
+    upstream: "https://api.openai.com/v1",
     authLocation: "authorization",
     baseUrlEnv: "OPENAI_BASE_URL",
     // Codex on a ChatGPT login can't be wire-redirected (built-in openai
@@ -59,7 +65,14 @@ export const AGENTS: Record<string, AgentSpec> = {
   opencode: {
     command: "opencode",
     provider: "openai",
-    upstream: "https://api.openai.com",
+    // opencode's openai baseURL default includes /v1 (it appends /responses);
+    // a ChatGPT-plan OAuth login speaks to the Codex backend instead —
+    // resolveUpstream picks per login (verified live both ways).
+    upstream: "https://api.openai.com/v1",
+    resolveUpstream: (home) =>
+      opencodeAuthMode(home, process.env.XDG_DATA_HOME) === "oauth"
+        ? "https://chatgpt.com/backend-api/codex"
+        : undefined,
     authLocation: "authorization",
     // Config-driven (verified in the PRD): OPENCODE_CONFIG points at a config
     // file whose provider.openai.options.baseURL Beagle redirects.
@@ -75,7 +88,10 @@ export const AGENTS: Record<string, AgentSpec> = {
   pi: {
     command: "pi",
     provider: "openai",
-    upstream: "https://api.openai.com",
+    // pi's builtin openai provider uses the Responses API — it appends
+    // /responses to its base (verified in @earendil-works/pi-ai: the openai
+    // provider is openAIResponsesApi with baseUrl "https://api.openai.com/v1").
+    upstream: "https://api.openai.com/v1",
     authLocation: "authorization",
     // Verified against pi's docs (badlogic/pi-mono, coding-agent):
     // `pi -e <file.ts>` loads an extension for one run, and
