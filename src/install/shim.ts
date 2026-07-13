@@ -3,11 +3,39 @@
 // real config is untouched. A `telemetry` shim runs the agent in Mode B
 // (`beagle run <agent> --telemetry`) — for subscription logins whose traffic
 // the proxy can't see; a wire shim there would watch nothing.
+import { openSync, readSync, closeSync } from "node:fs";
+
 export interface ShimSpec {
   agent: string;
   realBinary: string;
+  /** The beagle executable (compiled binary, or the runtime in dev). */
   beagleBinary: string;
+  /** Dev only: the entry script `beagleBinary` must run (bun + main.ts). */
+  beagleScript?: string;
   telemetry?: boolean;
+}
+
+// Every generated shim carries this marker so Beagle can recognize its OWN
+// shims BY CONTENT — path comparisons miss symlinked dirs and shims left by a
+// different state dir, and mistaking a shim for the real binary writes a shim
+// that exec's itself (fork bomb, reproduced live).
+export const SHIM_MARKER = "# Beagle PATH shim";
+
+/** Is this file a Beagle-generated shim? Reads at most 4KB; any error → false
+ *  (a real binary must never be misclassified as a shim). */
+export function isBeagleShim(path: string): boolean {
+  try {
+    const fd = openSync(path, "r");
+    try {
+      const buf = Buffer.alloc(4096);
+      const n = readSync(fd, buf, 0, buf.length, 0);
+      return buf.toString("utf8", 0, n).includes(SHIM_MARKER);
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
 }
 
 function shQuote(s: string): string {
@@ -17,14 +45,17 @@ function shQuote(s: string): string {
 }
 
 export function shimScript(spec: ShimSpec): string {
-  const beagle = shQuote(spec.beagleBinary);
+  // Dev (bun + entry script) needs both parts on the exec line; compiled is
+  // just the binary. Without this, a dev-installed shim exec'd a bare runtime
+  // with no script — every watched invocation would fail.
+  const beagle = shQuote(spec.beagleBinary) + (spec.beagleScript ? ` ${shQuote(spec.beagleScript)}` : "");
   const real = shQuote(spec.realBinary);
   const mode = spec.telemetry ? " --telemetry" : "";
   const how = spec.telemetry
     ? "# Watches via the agent's own telemetry (Mode B — subscription login),"
     : "# Redirects this agent's model traffic through Beagle,";
   return `#!/bin/sh
-# Beagle PATH shim for ${spec.agent} — created by 'beagle watch'.
+${SHIM_MARKER} for ${spec.agent} — created by 'beagle watch'.
 ${how} then execs the real
 # binary. Remove with 'beagle unwatch ${spec.agent}'. Your config is untouched.
 exec ${beagle} run ${spec.agent}${mode} --real ${real} -- "$@"

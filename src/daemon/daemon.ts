@@ -365,6 +365,33 @@ export class Daemon {
           responseId: call.convId,
         });
       }
+      // redact-on-capture (R11), same contract as the wire path: an
+      // incomplete scan holds the raw value out entirely; findings substitute
+      // secret spans in the persisted body AND scrub the same values from the
+      // response, in case the model echoed the key back. Mode B rows must not
+      // be a redaction hole just because they arrived via the receiver.
+      let requestBody: Uint8Array | null = call.request.bodyBytes;
+      let responseBody: Uint8Array | null = call.response.bodyBytes ?? null;
+      let searchText =
+        (call.request.messages?.map((m) => m.content).join("\n") ?? "") + "\n" + (call.response.text ?? "");
+      let redacted = false;
+      if (this.config.redactOnCapture) {
+        if (scanResult.state === "incomplete") {
+          redacted = true;
+          requestBody = new TextEncoder().encode("[REDACTION INCOMPLETE: scan did not verify this body]");
+          responseBody = null;
+          searchText = "";
+        } else if (scanResult.findings.length > 0) {
+          redacted = true;
+          const scrubbed = redactBody(call.request.bodyBytes, scanResult.findings);
+          requestBody = scrubbed.bytes;
+          responseBody = redactValues(responseBody, scrubbed.values);
+          searchText =
+            new TextDecoder().decode(requestBody) +
+            "\n" +
+            (responseBody ? new TextDecoder().decode(responseBody) : "");
+        }
+      }
       this.store.insertCall({
         id: call.id,
         sessionId: resolution.sessionId,
@@ -388,13 +415,13 @@ export class Daemon {
         scanState: scanResult.state,
         captureState: "ok",
         sessionTier: resolution.tier,
-        requestBody: call.request.bodyBytes,
+        requestBody,
         requestHeaders: null,
-        responseBody: call.response.bodyBytes ?? null,
+        responseBody,
         responseHeaders: null,
         sseRaw: null,
-        searchText:
-          (call.request.messages?.map((m) => m.content).join("\n") ?? "") + "\n" + (call.response.text ?? ""),
+        redacted,
+        searchText,
       });
       this.alertEngine.process(
         {

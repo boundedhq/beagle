@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, chmodS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChangeManifest } from "../src/install/manifest";
-import { shimScript, parseCoverageVerdict } from "../src/install/shim";
+import { isBeagleShim, shimScript, parseCoverageVerdict } from "../src/install/shim";
 import { codexAuthMode, detectAgents } from "../src/install/detect";
 import { GraduationTracker } from "../src/install/graduation";
 import { detectSubscriptionFor, graduationNudge, parseWatchArgs } from "../src/cli/commands";
@@ -105,6 +105,42 @@ describe("shim script", () => {
     // and the default stays wire
     const wire = shimScript({ agent: "codex", realBinary: "/o/codex", beagleBinary: "/b" });
     expect(wire).not.toContain("--telemetry");
+  });
+});
+
+describe("isBeagleShim + shim-aware detection (fork-bomb & double-wrap defense)", () => {
+  test("recognizes a generated shim by content; never misclassifies other files", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-shimid-"));
+    const shimPath = join(dir, "codex");
+    writeFileSync(shimPath, shimScript({ agent: "codex", realBinary: "/r/codex", beagleBinary: "/b" }), { mode: 0o755 });
+    expect(isBeagleShim(shimPath)).toBe(true);
+    const real = join(dir, "real-binary");
+    writeFileSync(real, "#!/bin/sh\necho hi\n", { mode: 0o755 });
+    expect(isBeagleShim(real)).toBe(false);
+    expect(isBeagleShim(join(dir, "missing"))).toBe(false); // error → false, never blocks
+  });
+
+  test("detectAgents skips Beagle shims even when the shim dir is first on PATH", () => {
+    // Content-based: catches shims from a symlinked dir or an OLD state dir,
+    // where a path comparison can't. Mistaking a shim for the agent is how
+    // the self-exec fork bomb happened.
+    const shimDir = mkdtempSync(join(tmpdir(), "beagle-shimdir-"));
+    const realDir = mkdtempSync(join(tmpdir(), "beagle-realdir-"));
+    writeFileSync(join(shimDir, "codex"), shimScript({ agent: "codex", realBinary: join(realDir, "codex"), beagleBinary: "/b" }), { mode: 0o755 });
+    writeFileSync(join(realDir, "codex"), "#!/bin/sh\necho codex\n", { mode: 0o755 });
+    const found = detectAgents({ pathDirs: [shimDir, realDir], extraLocations: [] });
+    expect(found.find((f) => f.agent === "codex")?.path).toBe(join(realDir, "codex"));
+  });
+
+  test("dev-mode shim carries the runtime AND the entry script", () => {
+    const s = shimScript({
+      agent: "claude",
+      realBinary: "/opt/homebrew/bin/claude",
+      beagleBinary: "/usr/local/bin/bun",
+      beagleScript: "/repo/src/cli/main.ts",
+      telemetry: true,
+    });
+    expect(s).toContain('"/usr/local/bin/bun" "/repo/src/cli/main.ts" run claude --telemetry');
   });
 });
 

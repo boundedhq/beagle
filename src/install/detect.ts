@@ -4,6 +4,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { AGENTS } from "../cli/agents";
+import { isBeagleShim } from "./shim";
 
 // How codex is signed in — the input to `watch`'s wire-vs-telemetry choice: a
 // "Sign in with ChatGPT" login can't be wire-proxied, so watching it in wire
@@ -53,19 +54,27 @@ function isExecutable(path: string): boolean {
   }
 }
 
+// A candidate that is Beagle's OWN shim is never "the agent": listing it in
+// `beagle detect` misreports, and resolving it as the real binary writes a
+// self-exec'ing shim (fork bomb) or double-wraps `beagle run`. Content-based,
+// so symlinked shim dirs and shims from other state dirs are caught too.
+function isRealAgentBinary(path: string): boolean {
+  return isExecutable(path) && !isBeagleShim(path);
+}
+
 export function detectAgents(opts: DetectOptions): DetectedAgent[] {
   const found = new Map<string, string>();
   for (const name of Object.keys(AGENTS)) {
     for (const dir of opts.pathDirs) {
       const p = join(dir, name);
-      if (isExecutable(p)) {
+      if (isRealAgentBinary(p)) {
         found.set(name, p);
         break;
       }
     }
   }
   for (const loc of opts.extraLocations) {
-    if (!found.has(loc.agent) && existsSync(loc.path)) found.set(loc.agent, loc.path);
+    if (!found.has(loc.agent) && existsSync(loc.path) && isRealAgentBinary(loc.path)) found.set(loc.agent, loc.path);
   }
   return [...found.entries()].map(([agent, path]) => ({
     agent,

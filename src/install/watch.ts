@@ -5,7 +5,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync }
 import { dirname, join, resolve } from "node:path";
 import { AGENTS } from "../cli/agents";
 import { ChangeManifest } from "./manifest";
-import { shimScript, parseCoverageVerdict, type CoverageVerdict } from "./shim";
+import { isBeagleShim, shimScript, parseCoverageVerdict, type CoverageVerdict } from "./shim";
 import {
   installService,
   removeService,
@@ -19,6 +19,8 @@ export interface WatchEnv {
   stateDir: string;
   shimDir: string; // a Beagle-owned dir placed early on PATH
   beagleBinary: string;
+  /** Dev only: entry script the runtime must execute (bun + main.ts). */
+  beagleScript?: string;
   shell: string; // $SHELL
   platform: NodeJS.Platform;
   home: string;
@@ -112,7 +114,7 @@ export function watchAgent(agent: string, env: WatchEnv, requested: WatchModeReq
   // "real" binary resolved into Beagle's own shim dir — possible when the shim
   // dir is on PATH and the resolver didn't exclude it — refuse loudly rather
   // than write a self-referential shim. Confirmed live before this guard.
-  if (dirname(resolve(plan.real)) === resolve(env.shimDir)) {
+  if (dirname(resolve(plan.real)) === resolve(env.shimDir) || isBeagleShim(plan.real)) {
     return {
       applied: false,
       message:
@@ -163,7 +165,13 @@ export function watchAgent(agent: string, env: WatchEnv, requested: WatchModeReq
   manifest.recordReplacing({ kind: "shim", agent, path: plan.shimPath, backup: null, mode });
   writeFileSync(
     plan.shimPath,
-    shimScript({ agent, realBinary: plan.real, beagleBinary: env.beagleBinary, telemetry: mode === "telemetry" }),
+    shimScript({
+      agent,
+      realBinary: plan.real,
+      beagleBinary: env.beagleBinary,
+      beagleScript: env.beagleScript,
+      telemetry: mode === "telemetry",
+    }),
     { mode: 0o755 },
   );
 

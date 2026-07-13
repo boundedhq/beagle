@@ -9,6 +9,7 @@ import {
   mapCodexOtlpToCalls,
   buildCodexOtelArgs,
   buildCodexOtelEnv,
+  mergeHookIntoSettings,
 } from "../src/parsers/otlp-map";
 import { OtlpReceiver } from "../src/core/otlp/receiver";
 
@@ -502,17 +503,52 @@ describe("buildCodexOtelArgs / buildCodexOtelEnv (vendor knobs only, R2)", () =>
 });
 
 describe("buildOtelEnv (vendor knobs only, R2)", () => {
-  test("sets the documented Claude Code telemetry knobs, json protocol, token header", () => {
+  test("uses SIGNAL-SPECIFIC OTLP vars so a user's own OTel env can't shadow the export", () => {
     const env = buildOtelEnv("http://127.0.0.1:4318", "run-token-abc");
     expect(env.CLAUDE_CODE_ENABLE_TELEMETRY).toBe("1");
     expect(env.OTEL_LOGS_EXPORTER).toBe("otlp");
-    expect(env.OTEL_EXPORTER_OTLP_PROTOCOL).toBe("http/json");
-    expect(env.OTEL_EXPORTER_OTLP_ENDPOINT).toBe("http://127.0.0.1:4318");
+    // signal-specific (spec: full URL, wins over user/org generic vars) —
+    // verified live against Claude Code 2.1.193 with a hostile generic var set
+    expect(env.OTEL_EXPORTER_OTLP_LOGS_PROTOCOL).toBe("http/json");
+    expect(env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).toBe("http://127.0.0.1:4318/v1/logs");
+    expect(env.OTEL_EXPORTER_OTLP_LOGS_HEADERS).toContain("run-token-abc");
+    // the GENERIC vars are left alone so an org's own metrics/traces export
+    // keeps working while the agent is watched
+    expect("OTEL_EXPORTER_OTLP_ENDPOINT" in env).toBe(false);
+    expect("OTEL_EXPORTER_OTLP_HEADERS" in env).toBe(false);
+    // content flags that make tool inputs (a real leak surface) show up at all
     expect(env.OTEL_LOG_USER_PROMPTS).toBe("1");
-    // the flags that make tool inputs (a real leak surface) show up at all
     expect(env.OTEL_LOG_TOOL_DETAILS).toBe("1");
     expect(env.OTEL_LOG_TOOL_CONTENT).toBe("1");
-    expect(env.OTEL_EXPORTER_OTLP_HEADERS).toContain("run-token-abc");
+    // inherited compression would break the json-only loopback receiver
+    expect("OTEL_EXPORTER_OTLP_COMPRESSION" in env).toBe(true);
+    expect(env.OTEL_EXPORTER_OTLP_COMPRESSION).toBeUndefined();
+    expect(env.OTEL_EXPORTER_OTLP_LOGS_COMPRESSION).toBeUndefined();
+  });
+});
+
+describe("mergeHookIntoSettings (user --settings coexists with the hook)", () => {
+  test("inline JSON: user settings pass through, hook appended to their PostToolUse", () => {
+    const user = JSON.stringify({
+      theme: "dark",
+      hooks: { PostToolUse: [{ hooks: [{ type: "command", command: "user-hook" }] }], Stop: [] },
+    });
+    const merged = mergeHookIntoSettings(user, "beagle-hook") as {
+      theme: string;
+      hooks: { PostToolUse: Array<{ hooks: Array<{ command: string }> }>; Stop: unknown[] };
+    };
+    expect(merged.theme).toBe("dark");
+    expect(merged.hooks.Stop).toEqual([]);
+    expect(merged.hooks.PostToolUse.length).toBe(2); // user's first, beagle's appended
+    expect(merged.hooks.PostToolUse[0]!.hooks[0]!.command).toBe("user-hook");
+    expect(merged.hooks.PostToolUse[1]!.hooks[0]!.command).toBe("beagle-hook");
+  });
+
+  test("malformed input degrades to hook-only settings (capture never fails open)", () => {
+    const merged = mergeHookIntoSettings("/nonexistent/settings.json", "beagle-hook");
+    expect(JSON.stringify(merged)).toContain("beagle-hook");
+    const merged2 = mergeHookIntoSettings("{not json", "beagle-hook");
+    expect(JSON.stringify(merged2)).toContain("beagle-hook");
   });
 });
 

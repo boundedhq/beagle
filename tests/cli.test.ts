@@ -306,6 +306,32 @@ describe("runCallsArrived (the wire zero-capture tripwire's predicate)", () => {
     expect(await runCallsArrived(stateDir, "any", 300)).toBe(true);
   });
 
+  test("hook rows never satisfy the EXPORT tripwire — a dead exporter can't hide behind tool traffic", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "beagle-trip-"));
+    const store = Store.open(stateDir);
+    // only a HOOK row lands (PostToolUse works, OTel export dead/diverted)
+    store.insertCall({
+      id: ulid(), sessionId: "s1", runId: "otel", source: "otel", agent: "claude",
+      provider: "anthropic", endpoint: "otel:tool_output:Bash", tsRequest: Date.now(),
+      scanState: "ok", captureState: "ok", sessionTier: "run",
+      requestBody: null, requestHeaders: null, responseBody: null,
+      responseHeaders: null, sseRaw: null, searchText: "x",
+    });
+    store.close();
+    expect(await otelCallsArrivedSince(stateDir, Date.now() - 1000, 400)).toBe(false);
+    // an EXPORT row (the turn) does satisfy it
+    const s2 = Store.open(stateDir);
+    s2.insertCall({
+      id: ulid(), sessionId: "s1", runId: "otel", source: "otel", agent: "claude",
+      provider: "anthropic", endpoint: "otel:claude_code.turn", tsRequest: Date.now(),
+      scanState: "ok", captureState: "ok", sessionTier: "run",
+      requestBody: null, requestHeaders: null, responseBody: null,
+      responseHeaders: null, sseRaw: null, searchText: "y",
+    });
+    s2.close();
+    expect(await otelCallsArrivedSince(stateDir, Date.now() - 1000, 400)).toBe(true);
+  });
+
   test("otelCallsArrivedSince is timestamp-based — old rows don't count, deletions can't fake a zero", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "beagle-trip-"));
     const store = Store.open(stateDir);

@@ -82,7 +82,11 @@ export class OtlpReceiver {
         return;
       }
       const ctx = {
-        agent: this.opts.agent ?? "claude-code",
+        // "claude" — the CLI/config agent key, NOT "claude-code": exclusion
+        // (config.excludedAgents) and the wire rows both key on the CLI name,
+        // so a different label here would split the store and silently defeat
+        // `beagle config exclude claude` for Mode B rows.
+        agent: this.opts.agent ?? "claude",
         provider: this.opts.provider ?? "anthropic",
       };
       const calls = isHook

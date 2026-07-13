@@ -13,7 +13,7 @@ import { codexAuthMode, detectAgents, knownExtraLocations, pathDirsFromEnv } fro
 import { watchAgent, unwatchAgent, type WatchEnv, type WatchModeRequest } from "../install/watch";
 import { ChangeManifest } from "../install/manifest";
 import { listLeakEvents } from "../viewer/feed-query";
-import { buildCodexOtelArgs, buildCodexOtelEnv, buildHookSettings, buildOtelEnv } from "../parsers/otlp-map";
+import { buildCodexOtelArgs, buildCodexOtelEnv, buildHookSettings, buildOtelEnv, mergeHookIntoSettings } from "../parsers/otlp-map";
 import { buildExtensionRedirect, buildRedirectConfig, readFirstConfig, writeRedirectConfig, writeRedirectExtension } from "../install/config-redirect";
 import { AGENTS, buildRunEnv, runBaseUrl } from "./agents";
 
@@ -228,9 +228,11 @@ function buildWatchEnv(stateDir: string, yes: boolean): WatchEnv {
   return {
     stateDir,
     shimDir: join(stateDir, "shims"),
-    // For the compiled binary, argv0 is the beagle executable — exactly what
-    // the shim and the service unit should invoke.
+    // Compiled binary: argv0 IS beagle. Dev (bun + entry script): the shim
+    // must carry BOTH parts — a bare runtime with no script is a broken shim.
     beagleBinary: process.execPath,
+    beagleScript:
+      process.argv[1] && /\.(ts|js|mjs)$/.test(process.argv[1]) ? process.argv[1] : undefined,
     shell: process.env.SHELL ?? "/bin/sh",
     platform: process.platform,
     home: homedir(),
@@ -484,9 +486,19 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
       // hooks) that forwards each tool result to the receiver so a secret in a
       // tool's OUTPUT is scanned too. Endpoint + token ride env vars the hook
       // process inherits — never argv.
-      const settings = buildHookSettings(beagleHookCommand());
+      // Claude takes ONE --settings value (last wins), so if the user passed
+      // their own, blindly prepending ours would either lose theirs or (their
+      // flag coming later) silently drop the hook — and with it tool-output
+      // scanning. Merge instead: their settings verbatim, our hook appended.
+      const si = agentArgs.indexOf("--settings");
+      let settings = buildHookSettings(beagleHookCommand());
+      let restArgs = agentArgs;
+      if (si !== -1 && agentArgs[si + 1] !== undefined) {
+        settings = mergeHookIntoSettings(agentArgs[si + 1]!, beagleHookCommand());
+        restArgs = [...agentArgs.slice(0, si), ...agentArgs.slice(si + 2)];
+      }
       cleanupFile = writeRedirectConfig(stateDir, `claude-hook-${runId}`, settings);
-      finalArgs = ["--settings", cleanupFile, ...agentArgs];
+      finalArgs = ["--settings", cleanupFile, ...restArgs];
       modeEnv.BEAGLE_HOOK_ENDPOINT = `${base}/v1/hook`;
       modeEnv.BEAGLE_HOOK_TOKEN = data.otlpToken;
     }
@@ -568,23 +580,29 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
   // Graduation nudge AFTER the agent exits (R2: full-screen TUIs wipe earlier
   // output) and only when capture actually worked — a warning above already
   // names the right command, and nudging toward watching a failing mode would
-  // contradict it.
-  if (shouldNudge && !warned) {
+  // contradict it. Excluded agents aren't nudged either: recommending
+  // always-on watching for an agent the user configured Beagle to ignore
+  // would be nonsense.
+  if (shouldNudge && !warned && !excluded) {
     process.stderr.write(graduationNudge(agentName, telemetry));
   }
   return exitCode;
 }
 
-// Did any agent-reported call land at or after `since`? Timestamp-based, not a
-// before/after COUNT diff — a concurrent retention sweep or purge deleting old
-// rows must never turn a captured run into a false "nothing arrived". Exports
-// are batched, so the last batch can trail the agent's exit — poll briefly
-// before concluding zero. The 60s clock margin absorbs agent-reported
-// timestamps trailing our local t0. (Another concurrent Mode B run can also
-// match — fine: this is a best-effort tripwire, not an accounting.) Exported
-// for tests.
+// Did the agent's OTel EXPORT land anything at or after `since`?
+// Timestamp-based, not a before/after COUNT diff — a concurrent retention
+// sweep or purge deleting old rows must never turn a captured run into a false
+// "nothing arrived". Hook rows (otel:tool_output:*) are EXCLUDED: the
+// PostToolUse hook posts independently of the OTel exporter, so counting them
+// would mask a dead/diverted export — the exact failure this warns about —
+// for any run that used a tool. Exports are batched, so the last batch can
+// trail the agent's exit — poll briefly before concluding zero. The 10s clock
+// margin absorbs agent-reported timestamps trailing our local t0 without
+// letting a PREVIOUS run's rows mask a newly-dead exporter for a whole minute.
+// (Another concurrent Mode B run can still match — fine: best-effort tripwire,
+// not an accounting.) Exported for tests.
 export async function otelCallsArrivedSince(stateDir: string, since: number, deadlineMs = 4000): Promise<boolean> {
-  const cutoff = since - 60_000;
+  const cutoff = since - 10_000;
   const t0 = Date.now();
   for (;;) {
     const store = openStore(stateDir);
@@ -592,7 +610,8 @@ export async function otelCallsArrivedSince(stateDir: string, since: number, dea
     let n = -1;
     try {
       n = store.queryAll<{ n: number }>(
-        "SELECT COUNT(*) AS n FROM exchanges WHERE source='otel' AND ts_request>=?",
+        "SELECT COUNT(*) AS n FROM exchanges WHERE source='otel' AND ts_request>=? " +
+          "AND endpoint NOT LIKE 'otel:tool_output:%'",
         [cutoff],
       )[0]?.n ?? 0;
     } catch {
