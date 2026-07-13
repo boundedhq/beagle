@@ -206,7 +206,7 @@ export class ProxyServer {
         upstream.on("close", onEnd);
         upstream.on("error", onErr);
         client.on("close", onClientClose);
-        upstream.write(serializeRequest(req.method, upstreamPath, headers, req.body));
+        upstream.write(serializeRequest(req.method, run.parsedUpstream.basePath + upstreamPath, headers, req.body));
       });
 
     try {

@@ -11,6 +11,7 @@ export interface Upstream {
   host: string;
   port: number;
   authority: string; // host[:port] as written in the Host header
+  basePath: string; // upstream path prefix ("" or "/v1"-style, no trailing /)
 }
 
 export function parseUpstream(url: string): Upstream {
@@ -18,7 +19,11 @@ export function parseUpstream(url: string): Upstream {
   const scheme = u.protocol === "https:" ? "https" : "http";
   const port = u.port ? Number(u.port) : scheme === "https" ? 443 : 80;
   const authority = u.port ? `${u.hostname}:${u.port}` : u.hostname;
-  return { scheme, host: u.hostname, port, authority };
+  // Keep the upstream's own path prefix: OpenAI-family clients replace a base
+  // that INCLUDES /v1 (or /backend-api/codex) and append only /responses, so
+  // dropping it forwarded every such request to a 404.
+  const basePath = u.pathname.replace(/\/+$/, "");
+  return { scheme, host: u.hostname, port, authority, basePath };
 }
 
 export function serializeRequest(

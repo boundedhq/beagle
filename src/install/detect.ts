@@ -11,6 +11,25 @@ import { isBeagleShim } from "./shim";
 // mode would capture nothing. Reads auth.json (honoring $CODEX_HOME, codex's
 // own config-dir override) but ONLY the auth_mode label and key PRESENCE —
 // token values never leave the parse.
+// How opencode's openai provider is signed in. Its ChatGPT-plan OAuth login
+// speaks to OpenAI's Codex backend (https://chatgpt.com/backend-api/codex),
+// NOT api.openai.com — the wire redirect must forward to the right upstream
+// or every request 404s. Reads ~/.local/share/opencode/auth.json but ONLY the
+// per-provider `type` label — credential values never leave the parse.
+export function opencodeAuthMode(home: string): "oauth" | "api-key" | "unknown" {
+  try {
+    const raw = JSON.parse(
+      readFileSync(join(home, ".local", "share", "opencode", "auth.json"), "utf8"),
+    ) as Record<string, { type?: unknown } | undefined>;
+    const t = raw?.openai && typeof raw.openai === "object" ? raw.openai.type : undefined;
+    if (t === "oauth") return "oauth";
+    if (t === "api" || t === "apikey" || t === "api-key") return "api-key";
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 export function codexAuthMode(home: string, codexHome?: string): "chatgpt" | "api-key" | "unknown" {
   try {
     const dir = codexHome || join(home, ".codex");

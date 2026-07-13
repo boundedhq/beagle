@@ -509,7 +509,7 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
         id: runId,
         agent: agentName,
         provider: spec.provider,
-        upstream: spec.upstream,
+        upstream: spec.resolveUpstream?.(homedir()) ?? spec.upstream,
         authLocation: spec.authLocation,
         extraHeaders: spec.extraHeaders,
       },
