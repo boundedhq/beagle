@@ -62,32 +62,52 @@ Just as important, what Beagle is **not**:
 - **Not a cloud service.** No account, no server, no telemetry, no
   phone-home. The only outbound connections are the ones your agent was
   already making, forwarded verbatim.
-- **Not a blocker.** v1 observes and alerts; it never rewrites or drops
-  what the agent sends upstream (the optional `redact-on-capture` scrubs
-  secrets from *the local copy*, not from the wire).
+- **Not a blocker.** v1 observes and alerts; it never rewrites, drops, or
+  delays anything. What reaches the provider is byte-for-byte what your
+  agent sent. (There's an optional setting to censor detected secrets in
+  *Beagle's own local records* so they aren't stored on your disk — but
+  that only changes what Beagle keeps, never what goes over the wire.)
 
 ## Supported agents
 
 v1 wraps **terminal CLI agents** — `beagle run` launches the agent's CLI
 under the proxy, and `beagle watch` shims its PATH entry:
 
-| Agent | How it's wrapped | Capture |
+| Agent | How Beagle sees the traffic | Capture |
 |---|---|---|
-| Claude Code CLI (API key) | `ANTHROPIC_BASE_URL` | ✓ wire (full fidelity) |
-| Codex CLI | `OPENAI_BASE_URL` | ✓ wire (full fidelity) |
-| opencode | Beagle-owned config redirect, reverted after the run | ✓ wire (full fidelity) |
-| pi | Beagle-owned config redirect, reverted after the run | ✓ wire (full fidelity) |
-| Claude Code CLI (Claude.ai subscription) | `beagle run claude --telemetry` — Claude Code's own OpenTelemetry export posts to Beagle's loopback receiver; nothing sits on the wire | *agent-reported* (Mode B) |
+| Claude Code CLI (API key) | runs under the local proxy (via `ANTHROPIC_BASE_URL`) | ✓ wire (full fidelity) |
+| Claude Code CLI (Claude.ai subscription) | Claude Code's own usage telemetry, received locally — see below | *agent-reported* (Mode B) |
+| Codex CLI (API key) | runs under the local proxy (via `OPENAI_BASE_URL`) | ✓ wire (full fidelity) |
+| opencode | runs under the local proxy (via a temporary Beagle-written config) | ✓ wire (full fidelity) |
+| pi | runs under the local proxy (via a temporary Beagle-written config) | ✓ wire (full fidelity) |
+
+**How the wrapping works.** Claude Code and Codex honor a standard
+environment variable that changes where they send their API traffic;
+`beagle run` sets it to the local proxy for that run and nothing else.
+opencode and pi don't read such a variable — their endpoint lives in a
+config file — so for the duration of the run Beagle hands them a
+**temporary config file of its own** that points at the proxy. Your real
+config files are never modified, and the temporary one is deleted when the
+run ends.
+
+**Subscription logins are different.** A Claude.ai (Pro/Max) login only
+works over Anthropic's own client-server connection, so Beagle stays off
+that wire entirely. Instead, `beagle run claude --telemetry` switches on
+Claude Code's **built-in usage reporting** (its vendor-shipped OpenTelemetry
+export) and receives those reports on a local port. That means you see what
+Claude Code *says* it sent rather than the bytes themselves — which is why
+those rows are badged **agent** (*agent-reported*) in the dashboard instead
+of **✓ wire**. Mode B is implemented and unit-tested but **not yet
+validated against a real Claude Code build** — treat it as best-effort
+until the [Phase-0 spike checklist](docs/mode-b-spike.md) is complete.
+Codex on a "Sign in with ChatGPT" login is designed to work as a pure
+passthrough (Beagle forwards the client's own login unchanged and never
+injects anything), but that path is **also pending validation** — until
+then, API-key mode is the supported way to watch Codex.
 
 Desktop apps, IDE extensions, and web UIs launch their own processes and
 don't inherit either mechanism, so their traffic is **not** captured in v1 —
 `beagle status` always tells you exactly what is and isn't covered.
-
-Every row in the dashboard is labeled **✓ wire** (observed on the wire) or
-**agent** (the agent's own self-report), so you always know which kind of
-evidence you're looking at. Mode B is implemented and unit-tested but **not
-yet validated against a real Claude Code build** — treat it as best-effort
-until the [Phase-0 spike checklist](docs/mode-b-spike.md) is complete.
 
 ## Install
 
@@ -124,7 +144,8 @@ beagle search [string]     # was this exact string ever sent? for things the det
 beagle show <id>           # one call, summarized or raw
 beagle ui                  # open the dashboard (loopback, one-time token)
 beagle purge [all|panic]   # erase captured data (panic = secure wipe + vacuum)
-beagle config redact-on-capture on   # drop raw secret values at capture time
+beagle config redact-on-capture on   # censor detected secrets in Beagle's local
+                                     # store (never changes what's on the wire)
 ```
 
 The whole loop works headless — a skeptic never has to start the viewer.
