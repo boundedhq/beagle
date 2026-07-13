@@ -14,7 +14,7 @@ import { SessionResolver, type Resolution } from "../core/session/resolver";
 import { Store } from "../core/store/store";
 import { ScanHost } from "../adapters/scan-host";
 import type { Finding } from "../core/scanner/engine";
-import { redactBody, redactValues } from "../transform/redact";
+import { applyCaptureRedaction, redactValues, redactValuesInText } from "../transform/redact";
 import { scrubAuthHeaders } from "../core/normalize/normalize";
 import { Notifier } from "../notifier/notifier";
 import { detectFormat, extractActions, parseRequest, parseResponse, type Format, type ParsedRequest, type ToolAction } from "../parsers/parsers";
@@ -246,46 +246,42 @@ export class Daemon {
       });
     }
 
-    // redact-on-capture: substitute secret spans in the persisted body. If the
-    // scan came back incomplete we can't trust the spans, so we hold the raw
-    // value out entirely and mark it (never write raw-and-hope, §4).
-    let requestBody: Uint8Array | null = call.request.bodyBytes;
-    let responseBody: Uint8Array | null = call.response.bodyBytes ?? null;
+    // redact-on-capture (§4/R11): see applyCaptureRedaction for the policy.
+    const redaction =
+      this.config.redactOnCapture && stash
+        ? applyCaptureRedaction({
+            incomplete: stash.scanState === "incomplete",
+            requestBytes: call.request.bodyBytes,
+            requestFindings: stash.findings,
+            responseBody: call.response.bodyBytes ?? null,
+          })
+        : null;
+    const requestBody = redaction ? redaction.requestBody : call.request.bodyBytes;
+    const responseBody = redaction ? redaction.responseBody : (call.response.bodyBytes ?? null);
     let sseRaw: Uint8Array | null = call.response.sseRaw ?? null;
     let searchText = buildSearchText(parsed, respParsed?.text, call);
-    // True only when the stored body was actually rewritten (viewer highlight).
-    let redacted = false;
-    if (this.config.redactOnCapture && stash) {
-      if (stash.scanState === "incomplete") {
-        redacted = true;
-        requestBody = new TextEncoder().encode("[REDACTION INCOMPLETE: scan did not verify this body]");
-        responseBody = null;
-        sseRaw = null; // the raw stream could hold the unverified value
-        searchText = "";
-      } else if (stash.findings.length > 0) {
-        redacted = true;
-        const scrubbed = redactBody(call.request.bodyBytes, stash.findings);
-        requestBody = scrubbed.bytes;
-        // Scrub the same secret values from the response AND the raw stream, in
-        // case the model echoed a leaked key back (request-side redaction alone
-        // would miss it).
-        responseBody = redactValues(responseBody, scrubbed.values);
-        // A content-encoded raw stream is compressed bytes — a literal scrub
-        // can't find the secret in it, so keeping it would silently retain an
-        // echoed value. Drop it; the decoded (scrubbed) body remains.
-        const contentEncoded = call.response.headers?.some(
-          ([n, v]) =>
-            n.toLowerCase() === "content-encoding" &&
-            v.trim() !== "" &&
-            v.trim().toLowerCase() !== "identity",
-        );
-        sseRaw = contentEncoded ? null : redactValues(sseRaw, scrubbed.values);
-        searchText =
-          new TextDecoder().decode(requestBody) +
-          "\n" +
-          (responseBody ? new TextDecoder().decode(responseBody) : "");
-      }
+    if (redaction?.heldOut) {
+      sseRaw = null; // the raw stream could hold the unverified value
+      searchText = "";
+    } else if (redaction?.redacted) {
+      // A content-encoded raw stream is compressed bytes — a literal scrub
+      // can't find the secret in it, so keeping it would silently retain an
+      // echoed value. Drop it; the decoded (scrubbed) body remains.
+      const contentEncoded = call.response.headers?.some(
+        ([n, v]) =>
+          n.toLowerCase() === "content-encoding" &&
+          v.trim() !== "" &&
+          v.trim().toLowerCase() !== "identity",
+      );
+      sseRaw = contentEncoded ? null : redactValues(sseRaw, redaction.values);
+      searchText =
+        new TextDecoder().decode(requestBody) +
+        "\n" +
+        (responseBody ? new TextDecoder().decode(responseBody) : "");
     }
+    const summary = redaction?.heldOut
+      ? "[REDACTION INCOMPLETE: content withheld]"
+      : buildSummary(parsed, respParsed?.text, respActions, redaction?.values ?? []);
 
     this.store.insertCall({
       id: call.id,
@@ -303,11 +299,11 @@ export class Daemon {
       tokensOut: respParsed?.tokensOut,
       bytesReq: call.request.bodyBytes.byteLength,
       bytesResp: call.response.bodyBytes?.byteLength,
-      summary: buildSummary(parsed, respParsed?.text, respActions),
+      summary,
       scanState: stash?.scanState ?? "ok",
       captureState: call.meta.captureState,
       sessionTier: resolution.tier,
-      redacted,
+      redacted: redaction?.redacted ?? false,
       requestBody,
       requestHeaders: call.request.headers ?? null,
       responseBody,
@@ -328,7 +324,7 @@ export class Daemon {
       tokensIn: respParsed?.tokensIn,
       tokensOut: respParsed?.tokensOut,
       bytesReq: call.request.bodyBytes.byteLength,
-      summary: buildSummary(parsed, respParsed?.text, respActions),
+      summary,
       scanState: stash?.scanState ?? "ok",
       captureState: call.meta.captureState,
       sessionTier: resolution.tier,
@@ -365,33 +361,41 @@ export class Daemon {
           responseId: call.convId,
         });
       }
-      // redact-on-capture (R11), same contract as the wire path: an
-      // incomplete scan holds the raw value out entirely; findings substitute
-      // secret spans in the persisted body AND scrub the same values from the
-      // response, in case the model echoed the key back. Mode B rows must not
-      // be a redaction hole just because they arrived via the receiver.
-      let requestBody: Uint8Array | null = call.request.bodyBytes;
-      let responseBody: Uint8Array | null = call.response.bodyBytes ?? null;
+      // redact-on-capture (§4/R11): Mode B rows must not be a redaction hole
+      // just because they arrived via the receiver. One asymmetry with the
+      // wire path: a wire request carries the full history, so an echoed
+      // secret always co-occurs with a scanned request-side copy — but Mode B
+      // batch-splitting can deliver a response-only call. Scan the response
+      // too, for redaction only: inbound content never alerts (the outbound
+      // leak fired with the batch that carried the prompt).
+      const respScan =
+        this.config.redactOnCapture && call.response.bodyBytes?.byteLength
+          ? await this.scanHost.scan(call.response.bodyBytes, {})
+          : null;
+      const redaction = this.config.redactOnCapture
+        ? applyCaptureRedaction({
+            incomplete: scanResult.state === "incomplete" || respScan?.state === "incomplete",
+            requestBytes: call.request.bodyBytes,
+            requestFindings: scanResult.findings,
+            responseBody: call.response.bodyBytes ?? null,
+            responseFindings: respScan?.findings,
+          })
+        : null;
       let searchText =
         (call.request.messages?.map((m) => m.content).join("\n") ?? "") + "\n" + (call.response.text ?? "");
-      let redacted = false;
-      if (this.config.redactOnCapture) {
-        if (scanResult.state === "incomplete") {
-          redacted = true;
-          requestBody = new TextEncoder().encode("[REDACTION INCOMPLETE: scan did not verify this body]");
-          responseBody = null;
-          searchText = "";
-        } else if (scanResult.findings.length > 0) {
-          redacted = true;
-          const scrubbed = redactBody(call.request.bodyBytes, scanResult.findings);
-          requestBody = scrubbed.bytes;
-          responseBody = redactValues(responseBody, scrubbed.values);
-          searchText =
-            new TextDecoder().decode(requestBody) +
-            "\n" +
-            (responseBody ? new TextDecoder().decode(responseBody) : "");
-        }
-      }
+      // searchText and summary both derive from the display messages (already
+      // flattened plain text, not raw JSON), so both scrub by value — not by
+      // the scanned-byte offsets, which don't index this text.
+      if (redaction) searchText = redaction.heldOut ? "" : redactValuesInText(searchText, redaction.values);
+      const summary = redaction?.heldOut
+        ? "[REDACTION INCOMPLETE: content withheld]"
+        : buildSummary(
+            { model: call.model, messages: call.request.messages ?? [] } as ParsedRequest,
+            call.response.text,
+            undefined,
+            redaction?.values ?? [],
+          );
+      const scanState = redaction?.heldOut ? "incomplete" : scanResult.state;
       this.store.insertCall({
         id: call.id,
         sessionId: resolution.sessionId,
@@ -408,19 +412,16 @@ export class Daemon {
         tokensOut: call.meta.tokensOut,
         bytesReq: call.request.bodyBytes.byteLength,
         bytesResp: call.response.bodyBytes?.byteLength,
-        summary: buildSummary(
-          { model: call.model, messages: call.request.messages ?? [] } as ParsedRequest,
-          call.response.text,
-        ),
-        scanState: scanResult.state,
+        summary,
+        scanState,
         captureState: "ok",
         sessionTier: resolution.tier,
-        requestBody,
+        redacted: redaction?.redacted ?? false,
+        requestBody: redaction ? redaction.requestBody : call.request.bodyBytes,
         requestHeaders: null,
-        responseBody,
+        responseBody: redaction ? redaction.responseBody : (call.response.bodyBytes ?? null),
         responseHeaders: null,
         sseRaw: null,
-        redacted,
         searchText,
       });
       this.alertEngine.process(
@@ -444,11 +445,8 @@ export class Daemon {
         tokensIn: call.meta.tokensIn,
         tokensOut: call.meta.tokensOut,
         bytesReq: call.request.bodyBytes.byteLength,
-        summary: buildSummary(
-          { model: call.model, messages: call.request.messages ?? [] } as ParsedRequest,
-          call.response.text,
-        ),
-        scanState: scanResult.state,
+        summary,
+        scanState,
         captureState: "ok",
         sessionTier: resolution.tier,
         source: "otel",
@@ -611,7 +609,18 @@ function buildSummary(
   parsed: ParsedRequest | null,
   responseText?: string,
   actions?: ToolAction[],
+  secretValues?: Array<{ value: string; type: string }>,
 ): string {
+  // Redact-on-capture (R11): the summary derives from the same raw messages
+  // the body redaction already scrubbed, so it must scrub too. Before
+  // truncation — a secret cut by the 100-char cap no longer literal-matches,
+  // and a post-hoc scrub of the finished line would leak its prefix.
+  if (secretValues && secretValues.length > 0) {
+    const scrub = (s: string) => redactValuesInText(s, secretValues);
+    if (responseText !== undefined) responseText = scrub(responseText);
+    actions = actions?.map((a) => (a.detail ? { ...a, detail: scrub(a.detail) } : a));
+    if (parsed) parsed = { ...parsed, messages: parsed.messages.map((m) => ({ ...m, content: scrub(m.content) })) };
+  }
   if (actions && actions.length > 0) return summarizeActions(actions);
   if (responseText) return firstLine(responseText, 100);
   if (!parsed) return "unparsed call (raw view available)";
