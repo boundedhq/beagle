@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/core/store/store";
-import { redactBody, redactValues, redactionPlaceholder } from "../src/transform/redact";
+import { applyCaptureRedaction, redactBody, redactValues, redactValuesInText, redactionPlaceholder } from "../src/transform/redact";
 import { quarantineCorruptDb } from "../src/core/store/quarantine";
 import type { Finding } from "../src/core/scanner/engine";
 
@@ -45,6 +45,45 @@ describe("redact-on-capture (R11)", () => {
     const resp = enc("the word key appears often, key key key");
     const out = redactValues(resp, [{ value: "key", type: "x" }]);
     expect(dec(out!)).toBe("the word key appears often, key key key");
+  });
+
+  test("redactValuesInText scrubs derived text (summary, search index) by value", () => {
+    const secret = "AKIAZQ3DRSTUVWXY2345";
+    const out = redactValuesInText(`my key ${secret} leaked`, [{ value: secret, type: "aws-access-key-id" }]);
+    expect(out).not.toContain(secret);
+    expect(out).toContain("[REDACTED:aws-access-key-id:");
+  });
+
+  test("applyCaptureRedaction holds all content out on an incomplete scan", () => {
+    const out = applyCaptureRedaction({
+      incomplete: true,
+      requestBytes: enc("could hold anything"),
+      requestFindings: [],
+      responseBody: enc("also unverified"),
+    });
+    expect(out.redacted).toBe(true);
+    expect(out.heldOut).toBe(true);
+    expect(dec(out.requestBody)).toContain("[REDACTION INCOMPLETE");
+    expect(out.responseBody).toBeNull();
+    expect(out.values).toEqual([]);
+  });
+
+  test("applyCaptureRedaction redacts response-side findings (Mode B echo)", () => {
+    const secret = "AKIAZQ3DRSTUVWXY2345";
+    const resp = `your key is ${secret}`;
+    const start = resp.indexOf(secret);
+    const out = applyCaptureRedaction({
+      incomplete: false,
+      requestBytes: enc(""),
+      requestFindings: [],
+      responseBody: enc(resp),
+      responseFindings: [finding(start, start + secret.length)],
+    });
+    expect(out.redacted).toBe(true);
+    expect(out.heldOut).toBe(false);
+    expect(dec(out.responseBody!)).not.toContain(secret);
+    expect(dec(out.responseBody!)).toContain("[REDACTED:aws-access-key-id:");
+    expect(out.values).toEqual([{ value: secret, type: "aws-access-key-id" }]);
   });
 
   test("placeholder is stable for the same secret, distinct per type", () => {
