@@ -6,7 +6,7 @@ import { ChangeManifest } from "../src/install/manifest";
 import { shimScript, parseCoverageVerdict } from "../src/install/shim";
 import { codexAuthMode, detectAgents } from "../src/install/detect";
 import { GraduationTracker } from "../src/install/graduation";
-import { graduationNudge } from "../src/cli/commands";
+import { detectSubscriptionFor, graduationNudge, parseWatchArgs } from "../src/cli/commands";
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "beagle-install-"));
@@ -118,20 +118,69 @@ describe("codexAuthMode (subscription detection for watch auto-mode)", () => {
     return home;
   };
 
-  test("explicit auth_mode label wins (codex >=0.4x writes it)", () => {
-    expect(codexAuthMode(authHome('{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{}}'))).toBe("chatgpt");
-    expect(codexAuthMode(authHome('{"auth_mode":"apikey","OPENAI_API_KEY":"sk-x"}'))).toBe("api-key");
+  test("explicit auth_mode label wins even over contradicting credential presence", () => {
+    // Label says chatgpt while an API key sits in the file — the label rules.
+    expect(codexAuthMode(authHome('{"auth_mode":"chatgpt","OPENAI_API_KEY":"sk-x","tokens":null}'))).toBe("chatgpt");
+    // Label says apikey while ChatGPT tokens sit in the file — the label rules.
+    expect(codexAuthMode(authHome('{"auth_mode":"apikey","OPENAI_API_KEY":null,"tokens":{"access_token":"t"}}'))).toBe("api-key");
+    // The real live shape (codex 0.144.x).
+    expect(codexAuthMode(authHome('{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{"id_token":"a","access_token":"b","refresh_token":"c","account_id":"d"},"last_refresh":"2026-07-13"}'))).toBe("chatgpt");
   });
 
-  test("older files fall back to credential presence", () => {
+  test("older files fall back to credential presence — tokens win when both exist", () => {
     expect(codexAuthMode(authHome('{"OPENAI_API_KEY":"sk-x"}'))).toBe("api-key");
     expect(codexAuthMode(authHome('{"OPENAI_API_KEY":null,"tokens":{"access_token":"t"}}'))).toBe("chatgpt");
+    // Both present, no label: codex's own default prefers the ChatGPT login,
+    // and telemetry is the safe direction either way.
+    expect(codexAuthMode(authHome('{"OPENAI_API_KEY":"sk-x","tokens":{"access_token":"t"}}'))).toBe("chatgpt");
+  });
+
+  test("honors a CODEX_HOME-style override dir", () => {
+    const home = mkdtempSync(join(tmpdir(), "beagle-auth-"));
+    const codexHome = join(home, "relocated-codex");
+    mkdirSync(codexHome, { recursive: true });
+    writeFileSync(join(codexHome, "auth.json"), '{"auth_mode":"chatgpt"}');
+    expect(codexAuthMode(home, codexHome)).toBe("chatgpt"); // reads the override
+    expect(codexAuthMode(home)).toBe("unknown"); // default location is empty
   });
 
   test("missing or malformed auth.json is unknown — never blocks, never auto-picks", () => {
     expect(codexAuthMode(authHome(null))).toBe("unknown");
     expect(codexAuthMode(authHome("not json"))).toBe("unknown");
     expect(codexAuthMode(authHome("{}"))).toBe("unknown");
+  });
+});
+
+describe("parseWatchArgs (strict watch flag parsing)", () => {
+  test("modes parse and default to auto", () => {
+    expect(parseWatchArgs(["codex"])).toEqual({ agent: "codex", yes: false, mode: "auto" });
+    expect(parseWatchArgs(["codex", "--telemetry", "--yes"])).toEqual({ agent: "codex", yes: true, mode: "telemetry" });
+    expect(parseWatchArgs(["--wire", "codex"])).toEqual({ agent: "codex", yes: false, mode: "wire" });
+  });
+
+  test("--telemetry and --wire together are rejected", () => {
+    const r = parseWatchArgs(["codex", "--telemetry", "--wire"]);
+    expect("error" in r && r.error).toContain("mutually exclusive");
+  });
+
+  test("an unknown flag is an error, never a silent fallback to auto", () => {
+    // A typo'd --telemetry silently degrading to auto could install a WIRE
+    // shim for a subscription user — the exact failure this feature removes.
+    const r = parseWatchArgs(["codex", "--telemetr"]);
+    expect("error" in r && r.error).toContain("--telemetr");
+    expect("error" in parseWatchArgs([])).toBe(true); // missing agent
+  });
+});
+
+describe("detectSubscriptionFor (the real auto-mode wiring)", () => {
+  test("codex with a ChatGPT auth.json is a subscription; claude never auto-detects", () => {
+    const home = mkdtempSync(join(tmpdir(), "beagle-sub-"));
+    mkdirSync(join(home, ".codex"), { recursive: true });
+    writeFileSync(join(home, ".codex", "auth.json"), '{"auth_mode":"chatgpt"}');
+    expect(detectSubscriptionFor("codex", home)).toBe(true);
+    expect(detectSubscriptionFor("claude", home)).toBe(false); // not statically detectable
+    writeFileSync(join(home, ".codex", "auth.json"), '{"auth_mode":"apikey","OPENAI_API_KEY":"sk-x"}');
+    expect(detectSubscriptionFor("codex", home)).toBe(false);
   });
 });
 

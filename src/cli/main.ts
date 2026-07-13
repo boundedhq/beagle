@@ -2,7 +2,7 @@
 // leaks, show, purge — the whole product without the viewer.
 import {
   cmdConfig, cmdDetect, cmdHookForward, cmdLeaks, cmdPurge, cmdRun, cmdSearch, cmdShow,
-  cmdStatus, cmdUnwatch, cmdWatch, defaultStateDir, readLineSync,
+  cmdStatus, cmdUnwatch, cmdWatch, defaultStateDir, parseWatchArgs, readLineSync,
 } from "./commands";
 
 export const VERSION = "0.1.0";
@@ -46,15 +46,11 @@ export async function run(argv: string[]): Promise<number> {
       return cmdRun(stateDir, agent, agentArgs);
     }
     case "watch": {
-      const agent = rest.find((a) => !a.startsWith("--"));
-      if (!agent) { console.error("usage: beagle watch <agent> [--telemetry|--wire] [--yes]"); return 2; }
-      if (rest.includes("--telemetry") && rest.includes("--wire")) {
-        console.error("--telemetry and --wire are mutually exclusive.");
-        return 2;
-      }
-      const mode = rest.includes("--telemetry") ? "telemetry" : rest.includes("--wire") ? "wire" : "auto";
-      console.log(cmdWatch(stateDir, agent, rest.includes("--yes"), mode));
-      return 0;
+      const parsed = parseWatchArgs(rest);
+      if ("error" in parsed) { console.error(parsed.error); return 2; }
+      const r = cmdWatch(stateDir, parsed.agent, parsed.yes, parsed.mode);
+      console.log(r.message);
+      return r.ok ? 0 : 1;
     }
     case "unwatch": {
       if (!rest[0]) { console.error("usage: beagle unwatch <agent>"); return 2; }

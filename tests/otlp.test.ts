@@ -252,7 +252,7 @@ describe("OTLP mapper — against the REAL Claude Code capture (spike fixture)",
 });
 
 // Build a Codex OTel log record (the REAL schema — codex.* events, scope
-// codex_otel.log_only, verified live against Codex 0.44.x). Real codex sets
+// codex_otel.log_only, verified live against Codex 0.144.x). Real codex sets
 // timeUnixNano to the literal "0" sentinel and puts the actual time in
 // observedTimeUnixNano — the helper mirrors that shape exactly.
 function codexEvent(name: string, attrs: Record<string, string | number>, tsNano = "1752300000000000000") {
@@ -434,7 +434,7 @@ describe("Codex OTLP → Call mapping (Codex Mode B, codex.* schema)", () => {
 
 describe("Codex OTLP mapper — against the REAL Codex capture (fixture)", () => {
   // tests/fixtures/codex-otlp.json is a verbatim capture from a real `codex`
-  // session (0.44.x), PII attributes (user.email, user.account_id) stripped.
+  // session (codex 0.144.x), PII attributes (user.email, user.account_id) stripped.
   // Durable proof the codex mapper matches production output.
   const fixture = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "codex-otlp.json"), "utf8"));
 

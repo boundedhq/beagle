@@ -1,7 +1,7 @@
 // CLI command surface (design §6.9): the whole product headless. Reads open
 // the store read-only (work daemon-down); live actions ride the socket.
 import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { Store, StoreVersionError } from "../core/store/store";
@@ -234,13 +234,7 @@ function buildWatchEnv(stateDir: string, yes: boolean): WatchEnv {
     shell: process.env.SHELL ?? "/bin/sh",
     platform: process.platform,
     home: homedir(),
-    resolveReal: (agent) => {
-      const found = detectAgents({
-        pathDirs: pathDirsFromEnv(process.env.PATH),
-        extraLocations: knownExtraLocations(homedir()),
-      });
-      return found.find((f) => f.agent === agent)?.path ?? null;
-    },
+    resolveReal: (agent) => resolveRealBinary(stateDir, agent),
     runType: (agent) => {
       try {
         const shell = process.env.SHELL ?? "/bin/sh";
@@ -257,12 +251,51 @@ function buildWatchEnv(stateDir: string, yes: boolean): WatchEnv {
       const line = readLineSync();
       return /^y(es)?$/i.test(line.trim());
     },
-    // Codex records its login kind in ~/.codex/auth.json (label + key
-    // presence only — token values are never read). Claude Code's auth isn't
-    // statically detectable, so it stays wire unless --telemetry is passed;
-    // the wire tripwire in cmdRun catches the mismatch at run time.
-    detectSubscription: (agent) => agent === "codex" && codexAuthMode(homedir()) === "chatgpt",
+    // Codex records its login kind in auth.json (label + key presence only —
+    // token values are never read). Claude Code's auth isn't statically
+    // detectable, so it stays wire unless --telemetry is passed; the wire
+    // tripwire in cmdRun catches the mismatch at run time.
+    detectSubscription: (agent) => detectSubscriptionFor(agent, homedir(), process.env.CODEX_HOME),
   };
+}
+
+/** Resolve where the agent's REAL binary lives, never Beagle's own shim: once
+ *  the shim dir is on the user's PATH (the whole point of watch), a naive PATH
+ *  walk finds the shim first — a re-watch would then write a shim whose
+ *  `--real` is itself (fork bomb on the next invocation), and `beagle run` of
+ *  a watched agent would double-wrap through it. Confirmed live before this
+ *  guard existed. */
+export function resolveRealBinary(stateDir: string, agent: string): string | null {
+  const shimDir = resolvePath(join(stateDir, "shims"));
+  const found = detectAgents({
+    pathDirs: pathDirsFromEnv(process.env.PATH).filter((d) => resolvePath(d) !== shimDir),
+    extraLocations: knownExtraLocations(homedir()),
+  });
+  return found.find((f) => f.agent === agent)?.path ?? null;
+}
+
+/** Parse `beagle watch` flags. Strict: an unknown flag is an error, not a
+ *  silent fallback — a typo'd --telemetry that degraded to auto could install
+ *  a wire shim for a subscription user. Exported for tests. */
+export function parseWatchArgs(
+  rest: string[],
+): { agent: string; yes: boolean; mode: WatchModeRequest } | { error: string } {
+  const KNOWN = new Set(["--yes", "--telemetry", "--wire"]);
+  const unknown = rest.find((a) => a.startsWith("--") && !KNOWN.has(a));
+  if (unknown) return { error: `unknown flag ${unknown} — usage: beagle watch <agent> [--telemetry|--wire] [--yes]` };
+  const agent = rest.find((a) => !a.startsWith("--"));
+  if (!agent) return { error: "usage: beagle watch <agent> [--telemetry|--wire] [--yes]" };
+  if (rest.includes("--telemetry") && rest.includes("--wire")) {
+    return { error: "--telemetry and --wire are mutually exclusive." };
+  }
+  const mode: WatchModeRequest = rest.includes("--telemetry") ? "telemetry" : rest.includes("--wire") ? "wire" : "auto";
+  return { agent, yes: rest.includes("--yes"), mode };
+}
+
+/** Is this agent on a subscription login the proxy can't see? Pure and
+ *  home-injectable for tests; buildWatchEnv wires it with the real home. */
+export function detectSubscriptionFor(agent: string, home: string, codexHome?: string): boolean {
+  return agent === "codex" && codexAuthMode(home, codexHome) === "chatgpt";
 }
 
 export function cmdWatch(
@@ -270,11 +303,11 @@ export function cmdWatch(
   agent: string,
   yes: boolean,
   mode: WatchModeRequest = "auto",
-): string {
+): { ok: boolean; message: string } {
   const env = buildWatchEnv(stateDir, yes);
   const r = watchAgent(agent, env, mode);
   if (r.applied) new GraduationTracker(stateDir).markWatched(agent);
-  return r.message;
+  return { ok: r.applied, message: r.message };
 }
 
 export function cmdUnwatch(stateDir: string, agent: string): string {
@@ -353,7 +386,9 @@ export async function cmdUi(stateDir: string): Promise<string> {
 
 // Parses `beagle run` arguments. Beagle's own flags (--telemetry, --real)
 // are recognized only BEFORE the `--` separator; everything after it belongs
-// to the agent verbatim. The shim invokes: beagle run <agent> --real <path> -- <args...>
+// to the agent verbatim. The shim invokes:
+//   beagle run <agent> [--telemetry] --real <path> -- <args...>
+// (--telemetry present when the shim was installed in telemetry mode).
 export function parseRunArgs(rawArgs: string[]): {
   telemetry: boolean;
   realBinary: string | null;
@@ -399,7 +434,11 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
     );
     return 2;
   }
-  const realBinary = realOverride ?? spec.command;
+  // No --real override (a direct `beagle run`, not the shim): resolve the
+  // binary ourselves, skipping Beagle's shim dir — spawning the bare command
+  // through PATH would re-enter the shim on a watched agent (double-wrap: a
+  // second runId that captures nothing and trips the zero-capture warning).
+  const realBinary = realOverride ?? resolveRealBinary(stateDir, agentName) ?? spec.command;
 
   const daemon = await ensureDaemon(stateDir);
   if (!daemon) {
@@ -485,63 +524,83 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
       modeEnv = buildRunEnv(agentName, daemon.proxyPort, runId);
     }
   }
-  const otelBefore = telemetry ? countOtelCalls(stateDir) : -1;
+  // Graduation is recorded here (not in execAgent) so the nudge can be
+  // ordered AFTER the zero-capture check below — printing "watch codex" and
+  // "this run captured nothing" back-to-back would be contradictory advice.
+  const grad = new GraduationTracker(stateDir);
+  const shouldNudge = grad.recordRunAndCheck(agentName);
   const t0 = Date.now();
-  const exitCode = await execAgent(daemon.socketPath, realBinary, finalArgs, modeEnv, stateDir, agentName, cleanupFile, telemetry);
+  const exitCode = await execAgent(daemon.socketPath, realBinary, finalArgs, modeEnv, cleanupFile);
   // Both modes have silent zero-capture failure modes the agent itself never
   // surfaces — say so loudly rather than let the user believe the run was
-  // watched.
-  if (telemetry) {
-    // Telemetry: agent version without OTel export, or a user env/config that
-    // displaces the exporter.
-    if (!(await otelCallsArrived(stateDir, otelBefore))) {
+  // watched. Gated the same way for both: near-instant runs (--help, version
+  // checks) are skipped — a real model turn can finish in ~5s, so the bar
+  // must sit well under that — and so is an agent the user deliberately
+  // excluded from capture (zero rows there is configured behavior, not a
+  // failure). A rare false positive remains (e.g. `codex login`, which sends
+  // no model traffic) — the right trade against silently unwatched runs.
+  const excluded = loadConfig(stateDir).excludedAgents.includes(agentName);
+  let warned = false;
+  if (Date.now() - t0 >= 3_000 && !excluded) {
+    if (telemetry) {
+      // Telemetry: agent version without OTel export, or a user env/config
+      // that displaces the exporter.
+      if (!(await otelCallsArrivedSince(stateDir, t0))) {
+        warned = true;
+        process.stderr.write(
+          `beagle ▲ nothing arrived from ${agentName}'s telemetry this run — it was likely NOT captured.\n` +
+            `  Check \`beagle status\`, and that your ${agentName} version supports telemetry export.\n`,
+        );
+      }
+    } else if (!(await runCallsArrived(stateDir, runId))) {
+      // Wire: the big one is a subscription login — its traffic never crosses
+      // the proxy, so the run "works" while Beagle sees nothing.
+      const alt = spec.telemetry
+        ? `  If ${agentName} signs in with a subscription (not an API key), the proxy can't see its traffic —\n` +
+          `  use: beagle run ${agentName} --telemetry   (or: beagle watch ${agentName} --telemetry)\n`
+        : `  Check \`beagle status\` for coverage.\n`;
+      warned = true;
       process.stderr.write(
-        `beagle ▲ nothing arrived from ${agentName}'s telemetry this run — it was likely NOT captured.\n` +
-          `  Check \`beagle status\`, and that your ${agentName} version supports telemetry export.\n`,
+        `beagle ▲ no traffic from this ${agentName} run went through Beagle — it was NOT captured.\n` + alt,
       );
     }
-  } else if (Date.now() - t0 >= 3_000 && !(await runCallsArrived(stateDir, runId))) {
-    // Wire: the big one is a subscription login — its traffic never crosses
-    // the proxy, so the run "works" while Beagle sees nothing. Skipped only
-    // for near-instant runs (--help, version checks) — a real model turn can
-    // finish in ~5s, so the bar must sit well under that. A rare false
-    // positive (e.g. `codex login`, which sends no model traffic) is the
-    // right trade against silently unwatched subscription runs.
-    const alt = spec.telemetry
-      ? `  If ${agentName} signs in with a subscription (not an API key), the proxy can't see its traffic —\n` +
-        `  use: beagle run ${agentName} --telemetry   (or: beagle watch ${agentName} --telemetry)\n`
-      : `  Check \`beagle status\` for coverage.\n`;
-    process.stderr.write(
-      `beagle ▲ no traffic from this ${agentName} run went through Beagle — it was NOT captured.\n` + alt,
-    );
+  }
+  // Graduation nudge AFTER the agent exits (R2: full-screen TUIs wipe earlier
+  // output) and only when capture actually worked — a warning above already
+  // names the right command, and nudging toward watching a failing mode would
+  // contradict it.
+  if (shouldNudge && !warned) {
+    process.stderr.write(graduationNudge(agentName, telemetry));
   }
   return exitCode;
 }
 
-// COUNT of agent-reported calls in the store; -1 when unreadable (never block
-// or false-alarm the run over a store hiccup).
-function countOtelCalls(stateDir: string): number {
-  const store = openStore(stateDir);
-  if (store === null || isStoreError(store)) return -1;
-  try {
-    return store.queryAll<{ n: number }>("SELECT COUNT(*) AS n FROM exchanges WHERE source='otel'")[0]?.n ?? 0;
-  } catch {
-    return -1;
-  } finally {
-    store.close();
-  }
-}
-
-// Did any agent-reported call land since `before`? Exports are batched, so the
-// last batch can trail the agent's exit — poll briefly before concluding zero.
-// (Another concurrent Mode B run can also bump the count — that's fine, the
-// warning is a best-effort tripwire, not an accounting.)
-async function otelCallsArrived(stateDir: string, before: number, deadlineMs = 4000): Promise<boolean> {
-  if (before < 0) return true; // store unreadable → don't cry wolf
+// Did any agent-reported call land at or after `since`? Timestamp-based, not a
+// before/after COUNT diff — a concurrent retention sweep or purge deleting old
+// rows must never turn a captured run into a false "nothing arrived". Exports
+// are batched, so the last batch can trail the agent's exit — poll briefly
+// before concluding zero. The 60s clock margin absorbs agent-reported
+// timestamps trailing our local t0. (Another concurrent Mode B run can also
+// match — fine: this is a best-effort tripwire, not an accounting.) Exported
+// for tests.
+export async function otelCallsArrivedSince(stateDir: string, since: number, deadlineMs = 4000): Promise<boolean> {
+  const cutoff = since - 60_000;
   const t0 = Date.now();
   for (;;) {
-    const n = countOtelCalls(stateDir);
-    if (n < 0 || n > before) return true;
+    const store = openStore(stateDir);
+    if (store === null || isStoreError(store)) return true; // unreadable → don't cry wolf
+    let n = -1;
+    try {
+      n = store.queryAll<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM exchanges WHERE source='otel' AND ts_request>=?",
+        [cutoff],
+      )[0]?.n ?? 0;
+    } catch {
+      n = -1;
+    } finally {
+      store.close();
+    }
+    if (n !== 0) return true;
     if (Date.now() - t0 >= deadlineMs) return false;
     await Bun.sleep(250);
   }
@@ -549,7 +608,8 @@ async function otelCallsArrived(stateDir: string, before: number, deadlineMs = 4
 
 // Did any WIRE call land for this specific run? Rows are keyed by the run's
 // UUID, so no before/after dance is needed. Short poll to absorb write lag.
-async function runCallsArrived(stateDir: string, runId: string, deadlineMs = 2000): Promise<boolean> {
+// Exported for tests (the wire zero-capture tripwire's core predicate).
+export async function runCallsArrived(stateDir: string, runId: string, deadlineMs = 2000): Promise<boolean> {
   const t0 = Date.now();
   for (;;) {
     const store = openStore(stateDir);
@@ -652,14 +712,8 @@ async function execAgent(
   realBinary: string,
   agentArgs: string[],
   modeEnv: Record<string, string | undefined>,
-  stateDir: string,
-  agentName: string,
   redirectCfg: string | null,
-  telemetry: boolean,
 ): Promise<number> {
-  const grad = new GraduationTracker(stateDir);
-  const shouldNudge = grad.recordRunAndCheck(agentName);
-
   // Hold a lease for the agent's lifetime so an auto-started ephemeral daemon
   // stays up while we're watching, then winds down after we exit (§6.7). Both
   // wire and telemetry modes need this — Mode B registers no run.
@@ -674,14 +728,7 @@ async function execAgent(
       env: childEnv as Record<string, string>,
       stdio: ["inherit", "inherit", "inherit"],
     });
-    const exitCode = await child.exited;
-
-    // Graduation nudge AFTER the agent exits (R2): full-screen TUIs wipe
-    // anything printed before they start; after exit the terminal is ours.
-    if (shouldNudge) {
-      process.stderr.write(graduationNudge(agentName, telemetry));
-    }
-    return exitCode;
+    return await child.exited;
   } finally {
     lease?.end(); // release the daemon liveness hold
     // The redirect config merged in the user's real provider key — it is only

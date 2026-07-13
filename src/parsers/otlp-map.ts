@@ -75,7 +75,7 @@ function nano(v: string | number | undefined): number | undefined {
 }
 
 // The record's event time. Codex sets timeUnixNano to literal "0" on every
-// record (verified live, 0.44.x) and puts the real time in
+// record (verified live, codex 0.144.x) and puts the real time in
 // observedTimeUnixNano — taking the 0 at face value dated every codex row
 // 1970-01-01 and zeroed its ulid. Prefer the event time, then the collector's
 // observed time, then a span's start time.
@@ -252,7 +252,7 @@ export function mapOtlpLogsToCalls(payload: unknown, ctx: OtlpContext): OtelCall
 // Codex on a "Sign in with ChatGPT" login can't be wire-redirected — its
 // built-in `openai` provider is locked and OPENAI_BASE_URL doesn't reach
 // inference. But Codex ships its own OpenTelemetry exporter, and (verified live
-// against Codex 0.44.x, scope "codex_otel.log_only") its `codex.*` log events
+// against Codex 0.144.x, scope "codex_otel.log_only") its `codex.*` log events
 // carry the whole OUTBOUND leak surface in ONE stream — no PostToolUse hook
 // needed (unlike Claude Code, whose export omits tool results):
 //   event.name=codex.user_prompt → prompt (verbatim), conversation.id, model

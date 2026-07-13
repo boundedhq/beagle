@@ -93,6 +93,19 @@ describe("watchAgent", () => {
   });
 });
 
+describe("watchAgent — self-exec guard (fork-bomb prevention)", () => {
+  test("refuses when the resolved 'real' binary IS the shim (shim dir on PATH + re-watch)", () => {
+    const env = makeEnv();
+    // Simulate the confirmed-live failure: the resolver found Beagle's own
+    // shim because the shim dir sits at the front of the user's PATH.
+    env.resolveReal = () => join(env.shimDir, "claude");
+    const r = watchAgent("claude", env);
+    expect(r.applied).toBe(false);
+    expect(r.message).toContain("shim");
+    expect(existsSync(join(env.shimDir, "claude"))).toBe(false); // nothing written
+  });
+});
+
 describe("watchAgent — telemetry mode (subscription logins)", () => {
   test("--telemetry writes a shim that runs the agent in Mode B", () => {
     const env = makeEnv();

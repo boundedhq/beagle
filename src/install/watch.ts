@@ -2,7 +2,7 @@
 // after a diff-and-confirm, verifies coverage via the user's real shell, and
 // records every mutation in the change manifest so revert is mechanical.
 import { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { AGENTS } from "../cli/agents";
 import { ChangeManifest } from "./manifest";
 import { shimScript, parseCoverageVerdict, type CoverageVerdict } from "./shim";
@@ -108,6 +108,18 @@ export function watchAgent(agent: string, env: WatchEnv, requested: WatchModeReq
   if (!plan) {
     return { applied: false, message: `cannot watch ${agent}: not found or unsupported` };
   }
+  // Defense in depth against a shim that execs itself (fork bomb): if the
+  // "real" binary resolved into Beagle's own shim dir — possible when the shim
+  // dir is on PATH and the resolver didn't exclude it — refuse loudly rather
+  // than write a self-referential shim. Confirmed live before this guard.
+  if (dirname(resolve(plan.real)) === resolve(env.shimDir)) {
+    return {
+      applied: false,
+      message:
+        `refusing to watch ${agent}: the resolved "real" binary (${plan.real}) is Beagle's own shim — ` +
+        `a shim exec'ing itself would loop forever. Run 'beagle unwatch ${agent}' first, or check your PATH.`,
+    };
+  }
   // The always-on daemon service is installed once, on the first graduation.
   const svc = servicePlan(env.platform, env.home, env.beagleBinary, env.stateDir);
   const svcAlreadyInstalled = svc ? existsSync(svc.path) : true;
@@ -124,12 +136,17 @@ export function watchAgent(agent: string, env: WatchEnv, requested: WatchModeReq
       `    at ${svc.path}`,
     );
   }
-  if (mode === "wire" && telemetrySupported(agent) && requested === "auto") {
+  if (mode === "wire" && telemetrySupported(agent)) {
     // The one honest caveat of wire mode for these agents: a subscription
     // login never crosses the proxy, so this shim would watch nothing for it.
+    // Shown even for an explicit --wire — louder when we KNOW the login is a
+    // subscription, because then this shim is a no-op by construction.
     diffLines.push(
-      `  Note: if you sign in with a subscription (Claude.ai / ChatGPT) rather than an API key,`,
-      `  the proxy can't see that traffic — use 'beagle watch ${agent} --telemetry' instead.`,
+      env.detectSubscription?.(agent)
+        ? `  ▲ a subscription login was detected for ${agent} — this WIRE shim will capture NOTHING for it.\n` +
+          `  Use 'beagle watch ${agent} --telemetry' unless you are switching to an API key.`
+        : `  Note: if you sign in with a subscription (Claude.ai / ChatGPT) rather than an API key,\n` +
+          `  the proxy can't see that traffic — use 'beagle watch ${agent} --telemetry' instead.`,
     );
   }
   diffLines.push(
@@ -181,7 +198,11 @@ export function unwatchAgent(agent: string, env: WatchEnv): WatchResult {
   const runner = env.serviceRunner ?? osServiceRunner;
   let removed = false;
   manifest.removeFor(agent, (e) => {
-    if (e.kind === "shim" && existsSync(e.path)) {
+    if (e.kind === "shim") {
+      // The manifest entry — not the file — is the watch relationship: a
+      // hand-deleted shim must still count as "unwatched" (rmSync tolerates
+      // the missing file), or this would report "not being watched" while
+      // quietly dropping the entry and tearing down the shared service.
       rmSync(e.path, { force: true });
       removed = true;
     }
