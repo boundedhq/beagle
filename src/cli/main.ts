@@ -2,7 +2,7 @@
 // leaks, show, purge — the whole product without the viewer.
 import {
   cmdConfig, cmdDetect, cmdHookForward, cmdLeaks, cmdPurge, cmdRun, cmdSearch, cmdShow,
-  cmdStatus, cmdUnwatch, cmdWatch, defaultStateDir, readLineSync,
+  cmdStatus, cmdUnwatch, cmdWatch, defaultStateDir, parseWatchArgs, readLineSync,
 } from "./commands";
 
 export const VERSION = "0.1.0";
@@ -15,7 +15,9 @@ usage:
                                  subscription logins that can't be wired
                                  through a proxy (claude, codex) — nothing sits
                                  on the wire; capture is agent-reported
-  beagle watch <agent> [--yes]   watch an agent automatically (PATH shim)
+  beagle watch <agent> [--yes]   watch an agent automatically (PATH shim);
+                                 --telemetry for subscription logins (auto-
+                                 detected for codex), --wire to force proxy
   beagle unwatch <agent>         stop watching, restore your setup
   beagle detect                  find supported agents on this machine
   beagle status                  trust strip: coverage, store, retention
@@ -44,10 +46,11 @@ export async function run(argv: string[]): Promise<number> {
       return cmdRun(stateDir, agent, agentArgs);
     }
     case "watch": {
-      const agent = rest.find((a) => !a.startsWith("--"));
-      if (!agent) { console.error("usage: beagle watch <agent> [--yes]"); return 2; }
-      console.log(cmdWatch(stateDir, agent, rest.includes("--yes")));
-      return 0;
+      const parsed = parseWatchArgs(rest);
+      if ("error" in parsed) { console.error(parsed.error); return 2; }
+      const r = cmdWatch(stateDir, parsed.agent, parsed.yes, parsed.mode);
+      console.log(r.message);
+      return r.ok ? 0 : 1;
     }
     case "unwatch": {
       if (!rest[0]) { console.error("usage: beagle unwatch <agent>"); return 2; }

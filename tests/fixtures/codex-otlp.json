@@ -6,13 +6,25 @@
           {
             "key": "service.name",
             "value": {
-              "stringValue": "codex"
+              "stringValue": "codex_exec"
             }
           },
           {
-            "key": "service.version",
+            "key": "telemetry.sdk.language",
             "value": {
-              "stringValue": "0.44.0"
+              "stringValue": "rust"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "opentelemetry"
+            }
+          },
+          {
+            "key": "telemetry.sdk.version",
+            "value": {
+              "stringValue": "0.31.0"
             }
           }
         ]
