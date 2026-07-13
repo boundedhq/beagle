@@ -11,9 +11,10 @@ const HELP = `beagle ${VERSION} — a local transparency proxy for AI agents
 
 usage:
   beagle run <agent> [args...]   watch one agent run (claude, codex, opencode, pi)
-  beagle run claude --telemetry  watch via Claude Code's own telemetry
-                                 (for Claude.ai subscription logins — nothing
-                                 sits on the wire; capture is agent-reported)
+  beagle run <agent> --telemetry watch via the agent's own telemetry, for
+                                 subscription logins that can't be wired
+                                 through a proxy (claude, codex) — nothing sits
+                                 on the wire; capture is agent-reported
   beagle watch <agent> [--yes]   watch an agent automatically (PATH shim)
   beagle unwatch <agent>         stop watching, restore your setup
   beagle detect                  find supported agents on this machine

@@ -75,6 +75,7 @@ under the proxy, and `beagle watch` shims its PATH entry:
 | Claude Code CLI (API key) | runs under the local proxy (via `ANTHROPIC_BASE_URL`) | ✓ wire (full fidelity) |
 | Claude Code CLI (Claude.ai subscription) | Claude Code's own usage telemetry, received locally — see below | *agent-reported* (Mode B) |
 | Codex CLI (API key) | runs under the local proxy (via `OPENAI_BASE_URL`) | ✓ wire (full fidelity) |
+| Codex CLI (ChatGPT subscription) | Codex's own OpenTelemetry export, received locally — see below | *agent-reported* (Mode B) |
 | opencode | runs under the local proxy (via a temporary Beagle-written config) | ✓ wire (full fidelity) |
 | pi | runs under the local proxy (via a one-run Beagle extension, `pi -e`) | ✓ wire (full fidelity) |
 
@@ -83,17 +84,18 @@ under the proxy, and `beagle watch` shims its PATH entry:
 - **Claude Code / Codex (API key)** — both honor a standard environment
   variable that changes where they send their API traffic; `beagle run`
   sets it to the local proxy for that run and nothing else.
-- **Claude Code / Codex (subscription)** — a Claude.ai (Pro/Max) login only
-  works over Anthropic's own connection, so Beagle can't proxy it. Instead
-  `beagle run claude --telemetry` reads Claude Code's own usage reporting
-  locally — catching secrets in your prompts, tool inputs, and tool outputs
-  (including files the agent reads). It's the agent's self-report, not
-  observed wire bytes, so those rows are badged **agent** and alerts are
-  batched (lag seconds) and best-effort. Codex on a "Sign in with ChatGPT"
-  login is designed to work as a pure passthrough (Beagle forwards the
-  client's own login unchanged and never injects anything), but that path is
-  **still pending validation** — until then,
-  API-key mode is the supported way to watch Codex.
+- **Claude Code / Codex (subscription)** — a Claude.ai (Pro/Max) or
+  "Sign in with ChatGPT" login only works over the vendor's own connection, so
+  Beagle can't put a proxy on the wire. Instead `beagle run claude --telemetry`
+  and `beagle run codex --telemetry` read the agent's own local usage
+  reporting — catching secrets in your prompts, tool inputs, and tool outputs
+  (including files the agent reads). It's the agent's self-report, not observed
+  wire bytes, so those rows are badged **agent** and alerts are batched (lag
+  seconds) and best-effort. Nothing is sent anywhere: Beagle points the agent's
+  telemetry at a loopback receiver on your own machine, authed with a per-run
+  token. The vendor content flags apply only to that one run — set per-run
+  (env vars for Claude Code, `-c` overrides for Codex), never written to your
+  agent's config.
 - **opencode** — no base-URL variable; its endpoint lives in a config file.
   For the duration of the run Beagle hands it a **temporary config file of
   its own** (your real settings merged in, plus the proxy address).

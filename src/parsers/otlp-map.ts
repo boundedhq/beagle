@@ -175,9 +175,15 @@ function buildTurnCall(t: Turn, ctx: OtlpContext): OtelCall {
 // dedup make that harmless (all content is scanned, no double alert).
 export function mapOtlpLogsToCalls(payload: unknown, ctx: OtlpContext): OtelCall[] {
   try {
+    const records = collectRecords(payload);
+    // Codex speaks its own `codex.*` event schema and carries tool OUTPUT
+    // inline; route it to the Codex mapper. Claude Code splits a turn across
+    // several records, reassembled below. The loopback receiver is shared, so
+    // the payload's schema — not any per-receiver setting — is the discriminator.
+    if (isCodexPayload(records)) return mapCodexRecords(records);
     const turns = new Map<string, Turn>();
     let idx = 0;
-    for (const rec of collectRecords(payload)) {
+    for (const rec of records) {
       const i = idx++;
       // Per-record isolation: one malformed record is SKIPPED, never allowed to
       // discard the scanning of valid secret-bearing records in the same batch.
@@ -226,6 +232,140 @@ export function mapOtlpLogsToCalls(payload: unknown, ctx: OtlpContext): OtelCall
   } catch {
     return [];
   }
+}
+
+// ---- Codex subscription capture (Codex Mode B) ----
+//
+// Codex on a "Sign in with ChatGPT" login can't be wire-redirected — its
+// built-in `openai` provider is locked and OPENAI_BASE_URL doesn't reach
+// inference. But Codex ships its own OpenTelemetry exporter, and (verified live
+// against Codex 0.44.x, scope "codex_otel.log_only") its `codex.*` log events
+// carry the whole OUTBOUND leak surface in ONE stream — no PostToolUse hook
+// needed (unlike Claude Code, whose export omits tool results):
+//   event.name=codex.user_prompt → prompt (verbatim), conversation.id, model
+//   event.name=codex.tool_result → tool_name, arguments (the command run),
+//                                   output (the tool's RESULT content, e.g. the
+//                                   bytes of a secret file the agent `cat`s)
+// Everything else Codex emits (codex.api_request, codex.sse_event,
+// codex.turn_ttft, websocket_*, startup_phase, …) is operational, no content.
+// Each content event becomes its OWN Call — a prompt and a tool call are
+// distinct captured units — mirroring the Claude Code hook mapper's per-tool
+// rows. Codex's export also carries PII (user.email, user.account_id); we read
+// ONLY content + conversation id and never touch those attributes.
+const CODEX_CONTENT = new Set(["codex.user_prompt", "codex.tool_result"]);
+
+function isCodexPayload(records: OtlpRecord[]): boolean {
+  for (const rec of records) {
+    const n = str(attrMap(rec.attributes).get("event.name"));
+    if (n && n.startsWith("codex.")) return true;
+  }
+  return false;
+}
+
+function buildCodexCall(o: {
+  ts: number;
+  convId?: string;
+  model?: string;
+  endpoint: string;
+  scanText: string;
+  display: { role: string; content: string };
+}): OtelCall {
+  return {
+    id: ulid(o.ts),
+    runId: "otel",
+    source: "otel",
+    // The shared loopback receiver defaults its context to claude-code/anthropic;
+    // a codex.* payload is unambiguously Codex, so it self-labels here so those
+    // defaults can't bleed onto Codex rows.
+    agent: "codex",
+    provider: "openai",
+    model: o.model,
+    endpoint: o.endpoint,
+    request: {
+      bodyBytes: new TextEncoder().encode(o.scanText),
+      messages: [o.display],
+    },
+    response: { text: "", bodyBytes: new Uint8Array() },
+    meta: { tsRequest: o.ts, tsResponse: o.ts },
+    convId: o.convId,
+  };
+}
+
+function mapCodexRecords(records: OtlpRecord[]): OtelCall[] {
+  const out: OtelCall[] = [];
+  for (const rec of records) {
+    // Per-record isolation: one malformed record is skipped, never allowed to
+    // discard the scanning of valid secret-bearing records in the same batch.
+    try {
+      const a = attrMap(rec.attributes);
+      const name = str(a.get("event.name"));
+      if (!name || !CODEX_CONTENT.has(name)) continue;
+      const convId = str(a.get("conversation.id"));
+      const model = str(a.get("model"));
+      const ns = nano(rec.timeUnixNano ?? rec.startTimeUnixNano);
+      const ts = ns !== undefined ? Math.floor(ns / 1e6) : Date.now();
+      if (name === "codex.user_prompt") {
+        const prompt = str(a.get("prompt"));
+        if (!prompt) continue;
+        out.push(
+          buildCodexCall({
+            ts,
+            convId,
+            model,
+            endpoint: "otel:codex:user_prompt",
+            scanText: prompt,
+            display: { role: "user", content: flattenPromptText(prompt) },
+          }),
+        );
+      } else {
+        // codex.tool_result — scan BOTH the command and its output: a secret can
+        // hide in the arguments (curl -H "Authorization: Bearer …") or in the
+        // result (the bytes of a secret file the agent reads back).
+        const tool = str(a.get("tool_name")) ?? "tool";
+        const args = str(a.get("arguments")) ?? "";
+        const output = str(a.get("output")) ?? "";
+        if (!args && !output) continue;
+        out.push(
+          buildCodexCall({
+            ts,
+            convId,
+            model,
+            endpoint: `otel:codex:tool_result:${tool}`,
+            scanText: `${tool}\n${args}\n${output}`,
+            display: { role: "tool", content: `${tool}: ${output.slice(0, 4000)}` },
+          }),
+        );
+      }
+    } catch {
+      /* skip a single malformed record; the rest of the batch still maps */
+    }
+  }
+  return out;
+}
+
+/** Map a Codex OTLP logs payload into scannable Calls. Malformed input degrades
+ *  to []. Exported for direct testing; the receiver reaches it through
+ *  `mapOtlpLogsToCalls`, which auto-detects the codex.* schema. */
+export function mapCodexOtlpToCalls(payload: unknown): OtelCall[] {
+  try {
+    return mapCodexRecords(collectRecords(payload));
+  } catch {
+    return [];
+  }
+}
+
+/** The codex `-c` config overrides that point its OpenTelemetry exporter at
+ *  Beagle's loopback receiver. Prepended to the user's codex argv (`-c` is a
+ *  global flag, honored before the subcommand). `log_user_prompt` turns on
+ *  prompt content; the exporter posts application/json to /v1/logs carrying the
+ *  per-run token in the header the receiver gates on. Vendor knobs only (R2) —
+ *  no patching, no config-file writes. `base`/`runToken` are Beagle-generated
+ *  (loopback URL, hex token) so there's nothing to escape into the inline table. */
+export function buildCodexOtelArgs(base: string, runToken: string): string[] {
+  const exporter =
+    `otel.exporter={ "otlp-http" = { endpoint = "${base}/v1/logs", ` +
+    `protocol = "json", headers = { "x-beagle-run" = "${runToken}" } } }`;
+  return ["-c", "otel.log_user_prompt=true", "-c", exporter];
 }
 
 // ---- tool-output capture via a PostToolUse hook (Mode B gap fix) ----

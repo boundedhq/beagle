@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { mapOtlpLogsToCalls, buildOtelEnv, mapHookToCall, buildHookSettings } from "../src/parsers/otlp-map";
+import {
+  mapOtlpLogsToCalls,
+  buildOtelEnv,
+  mapHookToCall,
+  buildHookSettings,
+  mapCodexOtlpToCalls,
+  buildCodexOtelArgs,
+} from "../src/parsers/otlp-map";
 import { OtlpReceiver } from "../src/core/otlp/receiver";
 
 // Build a Claude Code OTel log record (the REAL schema — event.name events,
@@ -240,6 +247,147 @@ describe("OTLP mapper — against the REAL Claude Code capture (spike fixture)",
     expect(scanned).toContain("AKIAZQ3DRSTUVWXY2345"); // prompt secret → scannable
     expect(scanned).toContain("fake-creds.txt"); // tool_input (Read file_path) → scannable
     expect(c.response.text).toContain("config keys"); // real assistant response captured
+  });
+});
+
+// Build a Codex OTel log record (the REAL schema — codex.* events, scope
+// codex_otel.log_only, verified live against Codex 0.44.x).
+function codexEvent(name: string, attrs: Record<string, string | number>, tsNano = "1752300000000000000") {
+  return {
+    timeUnixNano: tsNano,
+    attributes: [
+      { key: "event.name", value: { stringValue: name } },
+      ...Object.entries(attrs).map(([key, value]) =>
+        typeof value === "number" ? { key, value: { intValue: value } } : { key, value: { stringValue: value } },
+      ),
+    ],
+  };
+}
+function codexLogs(records: unknown[]) {
+  return {
+    resourceLogs: [{ scopeLogs: [{ scope: { name: "codex_otel.log_only" }, logRecords: records }] }],
+  };
+}
+
+describe("Codex OTLP → Call mapping (Codex Mode B, codex.* schema)", () => {
+  test("codex.user_prompt → a Call self-labeled codex/openai with the prompt scanned", () => {
+    const calls = mapCodexOtlpToCalls(
+      codexLogs([
+        codexEvent("codex.user_prompt", {
+          "conversation.id": "conv-9",
+          model: "gpt-5.6",
+          prompt: "deploy with AKIAZQ3DRSTUVWXY2345",
+        }),
+      ]),
+    );
+    expect(calls.length).toBe(1);
+    const c = calls[0]!;
+    expect(c.source).toBe("otel");
+    expect(c.agent).toBe("codex"); // self-labeled, not the receiver's claude-code default
+    expect(c.provider).toBe("openai");
+    expect(c.model).toBe("gpt-5.6");
+    expect(c.convId).toBe("conv-9");
+    expect(c.endpoint).toBe("otel:codex:user_prompt");
+    expect(decode(c.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
+  });
+
+  test("codex.tool_result → a Call scanning tool name, command, AND output", () => {
+    const calls = mapCodexOtlpToCalls(
+      codexLogs([
+        codexEvent("codex.tool_result", {
+          "conversation.id": "conv-9",
+          tool_name: "exec_command",
+          arguments: '{"cmd":"cat key.txt"}',
+          output: "token = AKIAZQ3DRSTUVWXY2345",
+        }),
+      ]),
+    );
+    expect(calls.length).toBe(1);
+    const c = calls[0]!;
+    expect(c.endpoint).toBe("otel:codex:tool_result:exec_command");
+    const scanned = decode(c.request.bodyBytes);
+    expect(scanned).toContain("cat key.txt"); // the command (a secret could hide here)
+    expect(scanned).toContain("AKIAZQ3DRSTUVWXY2345"); // the tool OUTPUT — the key gap Codex closes natively
+  });
+
+  test("operational codex.* events (api_request, sse_event) carry no content and map to nothing", () => {
+    const calls = mapCodexOtlpToCalls(
+      codexLogs([
+        codexEvent("codex.api_request", { "conversation.id": "c", success: "true" }),
+        codexEvent("codex.sse_event", { "conversation.id": "c", input_token_count: 40 }),
+        codexEvent("codex.turn_ttft", { "conversation.id": "c", duration_ms: 12 }),
+      ]),
+    );
+    expect(calls).toEqual([]);
+  });
+
+  test("mapOtlpLogsToCalls auto-detects the codex.* schema and routes to the codex mapper", () => {
+    // Even with the receiver's default claude-code/anthropic context, a codex
+    // payload self-labels codex/openai — one shared receiver, payload-discriminated.
+    const calls = mapOtlpLogsToCalls(
+      codexLogs([codexEvent("codex.user_prompt", { "conversation.id": "c", prompt: "hi" })]),
+      ctx,
+    );
+    expect(calls.length).toBe(1);
+    expect(calls[0]!.agent).toBe("codex");
+  });
+
+  test("a malformed record is skipped, not fatal to the whole batch", () => {
+    const calls = mapCodexOtlpToCalls(
+      codexLogs([
+        { attributes: "not-an-array" }, // malformed
+        codexEvent("codex.user_prompt", { "conversation.id": "c", prompt: "still scanned" }),
+      ]),
+    );
+    expect(calls.length).toBe(1);
+    expect(decode(calls[0]!.request.bodyBytes)).toContain("still scanned");
+  });
+
+  test("malformed top-level payload degrades to [] (R3, fail-open)", () => {
+    expect(mapCodexOtlpToCalls(null)).toEqual([]);
+    expect(mapCodexOtlpToCalls({ resourceLogs: "nope" })).toEqual([]);
+  });
+});
+
+describe("Codex OTLP mapper — against the REAL Codex capture (fixture)", () => {
+  // tests/fixtures/codex-otlp.json is a verbatim capture from a real `codex`
+  // session (0.44.x), PII attributes (user.email, user.account_id) stripped.
+  // Durable proof the codex mapper matches production output.
+  const fixture = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "codex-otlp.json"), "utf8"));
+
+  test("maps the real export into a prompt Call and a tool_result Call", () => {
+    const calls = mapCodexOtlpToCalls(fixture);
+    expect(calls.length).toBe(2);
+    expect(calls.every((c) => c.agent === "codex" && c.provider === "openai")).toBe(true);
+    const prompt = calls.find((c) => c.endpoint === "otel:codex:user_prompt")!;
+    const tool = calls.find((c) => c.endpoint.startsWith("otel:codex:tool_result"))!;
+    expect(prompt).toBeDefined();
+    expect(tool).toBeDefined();
+    // The real tool output carried the file's contents back to the model — a
+    // secret there is scanned. This is the gap Claude Code needs a hook for.
+    expect(decode(tool.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
+  });
+
+  test("no PII (email / account id) survives into any mapped Call", () => {
+    const blob = mapCodexOtlpToCalls(fixture)
+      .map((c) => decode(c.request.bodyBytes) + JSON.stringify(c.request.messages))
+      .join("");
+    expect(blob).not.toContain("@");
+    expect(blob.toLowerCase()).not.toContain("account_id");
+  });
+});
+
+describe("buildCodexOtelArgs (vendor `-c` knobs only, R2)", () => {
+  test("points codex's exporter at /v1/logs with the run token in the header", () => {
+    const args = buildCodexOtelArgs("http://127.0.0.1:4318", "run-token-xyz");
+    // -c pairs: log_user_prompt on, exporter → the loopback receiver
+    expect(args).toContain("otel.log_user_prompt=true");
+    const exporter = args[args.length - 1]!;
+    expect(exporter).toContain('endpoint = "http://127.0.0.1:4318/v1/logs"');
+    expect(exporter).toContain('protocol = "json"');
+    expect(exporter).toContain('"x-beagle-run" = "run-token-xyz"');
+    // every knob is passed as a `-c` override, never a config-file write
+    expect(args.filter((a) => a === "-c").length).toBe(2);
   });
 });
 

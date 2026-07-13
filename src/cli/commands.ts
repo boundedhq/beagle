@@ -13,7 +13,7 @@ import { detectAgents, knownExtraLocations, pathDirsFromEnv } from "../install/d
 import { watchAgent, unwatchAgent, type WatchEnv } from "../install/watch";
 import { ChangeManifest } from "../install/manifest";
 import { listLeakEvents } from "../viewer/feed-query";
-import { buildHookSettings, buildOtelEnv } from "../parsers/otlp-map";
+import { buildCodexOtelArgs, buildHookSettings, buildOtelEnv } from "../parsers/otlp-map";
 import { buildExtensionRedirect, buildRedirectConfig, readFirstConfig, writeRedirectConfig, writeRedirectExtension } from "../install/config-redirect";
 import { AGENTS, buildRunEnv, runBaseUrl } from "./agents";
 
@@ -121,8 +121,7 @@ export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null):
   if (otelCalls > 0) {
     lines.push(
       `  ${otelCalls} agent-reported (Mode B, --telemetry): self-report — prompts, ` +
-        `responses, tool inputs, and tool outputs (via a PostToolUse hook) are ` +
-        `scanned; alerts lag seconds`,
+        `responses, tool inputs, and tool outputs are scanned; alerts lag seconds`,
     );
   }
   lines.push(
@@ -375,8 +374,12 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
   // of the wire — for Claude Code on a Claude.ai subscription, where putting
   // a proxy on the wire is off-limits. Capture is labeled agent-reported.
   const { telemetry, realBinary: realOverride, agentArgs } = parseRunArgs(rawArgs);
-  if (telemetry && agentName !== "claude") {
-    console.error("--telemetry (agent self-report capture) is supported for claude only in v1.");
+  if (telemetry && !spec.telemetry) {
+    const supported = Object.entries(AGENTS)
+      .filter(([, s]) => s.telemetry)
+      .map(([n]) => n)
+      .join(", ");
+    console.error(`--telemetry (agent self-report capture) is supported for ${supported}.`);
     return 2;
   }
   if (!telemetry && !spec.baseUrlEnv && !spec.config && !spec.extension) {
@@ -415,17 +418,26 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
       return 1;
     }
     const base = `http://127.0.0.1:${data.otlpPort}`;
-    modeEnv = buildOtelEnv(base, data.otlpToken);
-    // Close the OTel export's tool-output blind spot: register a Beagle-owned
-    // PostToolUse hook (merged via --settings, never touching the user's own
-    // hooks) that forwards each tool result to the receiver so a secret in a
-    // tool's OUTPUT is scanned too. Endpoint + token ride env vars the hook
-    // process inherits — never argv.
-    const settings = buildHookSettings(beagleHookCommand());
-    cleanupFile = writeRedirectConfig(stateDir, `claude-hook-${runId}`, settings);
-    finalArgs = ["--settings", cleanupFile, ...agentArgs];
-    modeEnv.BEAGLE_HOOK_ENDPOINT = `${base}/v1/hook`;
-    modeEnv.BEAGLE_HOOK_TOKEN = data.otlpToken;
+    if (spec.telemetry === "codex") {
+      // Codex exports the full leak surface — prompt, tool commands, AND tool
+      // output — inline in its own OTel stream, so no PostToolUse hook is
+      // needed. Point its exporter at the receiver via `-c` config flags
+      // prepended to the user's argv; the run token rides the header.
+      modeEnv = {};
+      finalArgs = [...buildCodexOtelArgs(base, data.otlpToken), ...agentArgs];
+    } else {
+      modeEnv = buildOtelEnv(base, data.otlpToken);
+      // Close the OTel export's tool-output blind spot: register a Beagle-owned
+      // PostToolUse hook (merged via --settings, never touching the user's own
+      // hooks) that forwards each tool result to the receiver so a secret in a
+      // tool's OUTPUT is scanned too. Endpoint + token ride env vars the hook
+      // process inherits — never argv.
+      const settings = buildHookSettings(beagleHookCommand());
+      cleanupFile = writeRedirectConfig(stateDir, `claude-hook-${runId}`, settings);
+      finalArgs = ["--settings", cleanupFile, ...agentArgs];
+      modeEnv.BEAGLE_HOOK_ENDPOINT = `${base}/v1/hook`;
+      modeEnv.BEAGLE_HOOK_TOKEN = data.otlpToken;
+    }
   } else {
     await controlRequest(daemon.socketPath, {
       cmd: "register-run",
