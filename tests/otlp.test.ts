@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { mapOtlpLogsToCalls, buildOtelEnv } from "../src/parsers/otlp-map";
+import { mapOtlpLogsToCalls, buildOtelEnv, mapHookToCall, buildHookSettings } from "../src/parsers/otlp-map";
 import { OtlpReceiver } from "../src/core/otlp/receiver";
 
 // Build a Claude Code OTel log record (the REAL schema — event.name events,
@@ -303,5 +303,94 @@ describe("OtlpReceiver HTTP endpoint", () => {
     const c = got[0] as { request: { bodyBytes: Uint8Array } };
     // prompt is part of the scanned body for the turn
     expect(decode(c.request.bodyBytes)).toContain(prompt);
+  });
+});
+
+describe("mapHookToCall — PostToolUse hook tool-OUTPUT capture (Mode B gap fix)", () => {
+  // Claude Code's OTel export omits tool RESULT content; a PostToolUse hook
+  // supplies it. Shape verified live against Claude Code 2.1.193.
+  const hook = (over: Record<string, unknown> = {}) => ({
+    session_id: "sess-hook-1",
+    hook_event_name: "PostToolUse",
+    tool_name: "Bash",
+    tool_input: { command: "cat secrets.env" },
+    tool_response: "export AWS_SECRET=AKIAZQ3DRSTUVWXY2345\n",
+    tool_use_id: "toolu_1",
+    ...over,
+  });
+
+  test("a secret in the tool OUTPUT is captured, scannable, source=otel", () => {
+    const c = mapHookToCall(hook(), ctx)!;
+    expect(c).not.toBeNull();
+    expect(c.source).toBe("otel");
+    expect(c.convId).toBe("sess-hook-1"); // chains into the same session as the turns
+    expect(decode(c.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345"); // the file content
+    expect(c.endpoint).toContain("Bash");
+  });
+
+  test("tool_input is scanned too (a secret in a command, not just its output)", () => {
+    const c = mapHookToCall(hook({ tool_response: "ok", tool_input: { command: "curl -H 'Authorization: AKIAZQ3DRSTUVWXY2345'" } }), ctx)!;
+    expect(decode(c.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
+  });
+
+  test("an object tool_response is serialized so nested secrets are still scannable", () => {
+    const c = mapHookToCall(hook({ tool_response: { stdout: "AKIAZQ3DRSTUVWXY2345", exitCode: 0 } }), ctx)!;
+    expect(decode(c.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
+  });
+
+  test("no tool content → null (nothing to scan)", () => {
+    expect(mapHookToCall({ session_id: "s", tool_name: "X" }, ctx)).toBeNull();
+  });
+
+  test("malformed hook payload → null, never throws", () => {
+    expect(mapHookToCall(null, ctx)).toBeNull();
+    expect(mapHookToCall("not json", ctx)).toBeNull();
+    expect(mapHookToCall(12345, ctx)).toBeNull();
+  });
+});
+
+describe("buildHookSettings — the Beagle-owned PostToolUse hook", () => {
+  test("registers a no-matcher PostToolUse command hook (fires for every tool)", () => {
+    const s = buildHookSettings("/abs/beagle __hook") as any;
+    const entry = s.hooks.PostToolUse[0];
+    expect(entry.matcher).toBeUndefined(); // no matcher = all tools (Bash, Read, MCP, …)
+    expect(entry.hooks[0]).toEqual({ type: "command", command: "/abs/beagle __hook" });
+  });
+});
+
+describe("OtlpReceiver — /v1/hook route (tool-output capture)", () => {
+  let receiver: OtlpReceiver;
+  let got: unknown[];
+  let port: number;
+  beforeEach(async () => {
+    got = [];
+    receiver = new OtlpReceiver({ token: "run-tok", onCalls: (exs) => got.push(...exs) });
+    port = await receiver.listen(0);
+  });
+  afterEach(() => receiver.close());
+
+  const hookPayload = { session_id: "s1", tool_name: "Bash", tool_input: { command: "cat .env" }, tool_response: "KEY=AKIAZQ3DRSTUVWXY2345" };
+
+  test("accepts a hook payload with the token and yields a scannable Call", async () => {
+    const r = await fetch(`http://127.0.0.1:${port}/v1/hook`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-beagle-run": "run-tok" },
+      body: JSON.stringify(hookPayload),
+    });
+    expect(r.status).toBe(200);
+    expect(got.length).toBe(1);
+    const c = got[0] as { source: string; request: { bodyBytes: Uint8Array } };
+    expect(c.source).toBe("otel");
+    expect(decode(c.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
+  });
+
+  test("the hook route enforces the same run token", async () => {
+    const r = await fetch(`http://127.0.0.1:${port}/v1/hook`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-beagle-run": "wrong" },
+      body: JSON.stringify(hookPayload),
+    });
+    expect(r.status).toBe(401);
+    expect(got.length).toBe(0);
   });
 });

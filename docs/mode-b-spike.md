@@ -69,21 +69,31 @@ interception.
    application/json`, `x-beagle-run` header present. OTLP path used:
    **`/v1/logs`** (logs, not traces).
 
-2. **Content completeness for R5 scanning — ⚠️ PARTIAL (documented gap).**
-   - verbatim user prompts — ✅ present (`user_prompt.prompt`)
-   - assistant response text — ✅ present (`assistant_response.response`)
-   - tool **inputs** — ✅ present verbatim (`tool_result.tool_input`: bash
-     command lines, file paths, write payloads — real leak surfaces)
-   - tool **outputs / results** — ❌ **NOT exported.** `tool_result` carries
-     only `tool_result_size_bytes`, never the content. A secret that exists
-     *only* in a tool's output (e.g. the body of a file the agent `Read`) is
-     invisible to Mode B, even with `OTEL_LOG_TOOL_CONTENT=1`.
+2. **Content completeness for R5 scanning — ✅ PASS (via the OTel export + a
+   hook).**
+   - verbatim user prompts — ✅ `user_prompt.prompt`
+   - assistant response text — ✅ `assistant_response.response`
+   - tool **inputs** — ✅ verbatim (`tool_result.tool_input`)
+   - tool **outputs / results** — ✅ **captured via a `PostToolUse` hook.**
+     The OTel `tool_result` event carries only `tool_result_size_bytes`,
+     never the content — so a secret that exists *only* in a tool's output
+     (the body of a file the agent `Read`s, a `cat` result) would escape the
+     export. Beagle closes this by registering a Beagle-owned `PostToolUse`
+     hook via the vendor `--settings` flag (additive — verified it does NOT
+     replace the user's own hooks); the hook forwards each tool result to the
+     receiver's `/v1/hook` route, where it's scanned like any other body.
 
-   End-to-end proof of the parts that ARE covered: a real `beagle run claude
-   --telemetry` session with `AKIAZQ3DRSTUVWXY2345` in the prompt fires
-   `beagle leaks` → `aws-access-key-id → anthropic`, and `beagle search`
-   finds it. **This gap is the honest cost of the agent-reported badge and is
-   stated in `status` and the README.**
+   End-to-end proof, both paths, against real Claude Code:
+   - secret in the **prompt** → `beagle run claude --telemetry` fires
+     `beagle leaks` (`aws-access-key-id → anthropic`);
+   - secret only in a **tool output** → a natural "read config.txt" task
+     (the key was in the file, never in the prompt or the model's reply) also
+     fires `beagle leaks`. The `cat passwordfile.txt` case is covered.
+
+   Residual: the hook is best-effort (a failed forward is a miss, never a
+   block) and requires Claude Code's hook system (disabled by `--bare`).
+   Every tool call spawns the hook forwarder — an accepted per-tool cost for
+   the coverage.
 
 3. **Payload shape — ✅ recorded.** GenAI data arrives as **logs**
    (`resourceLogs → scopeLogs → logRecords`), scope
@@ -137,12 +147,17 @@ interception.
 
 ## Classification
 
-**Sanctioned mechanism, partial fidelity.** Mode B is functional and validated
-for Claude Code 2.1.193: it captures prompts, assistant responses, and tool
-inputs, and fires real leak alerts on them — using only vendor-shipped OTel
-knobs, with the model↔Anthropic connection untouched. The one gap (tool output
-content is not exported) and the batch-bound latency are inherent to the
-self-report and are disclosed. Ship as `--telemetry` with the **agent-reported**
-badge; safe to keep opt-in. Before promoting it to a default or graduation
-nudge, re-run this spike against the then-current Claude Code (the event schema
-is a client implementation detail and can drift).
+**Sanctioned mechanism, near-wire fidelity.** Mode B is functional and
+validated for Claude Code 2.1.193: it captures prompts, assistant responses,
+tool inputs, **and tool outputs**, and fires real leak alerts on all of them —
+using only vendor-shipped knobs (OTel env vars + a `--settings` `PostToolUse`
+hook), with the model↔Anthropic connection untouched. It differs from wire
+capture in ways inherent to a self-report: alerts are batch-bound (seconds,
+not wire-instant); the tool-output hook is best-effort (a dropped forward is
+a miss, never a block) and depends on the hook system (`--bare` disables it);
+and it spawns the forwarder per tool call. Ship as `--telemetry` with the
+**agent-reported** badge (it is still a self-report, not observed wire bytes);
+safe to keep opt-in. Before
+promoting it to a default or graduation nudge, re-run this spike against the
+then-current Claude Code — both the event schema and the hook payload shape
+are client implementation details and can drift.

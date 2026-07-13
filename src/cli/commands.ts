@@ -13,7 +13,7 @@ import { detectAgents, knownExtraLocations, pathDirsFromEnv } from "../install/d
 import { watchAgent, unwatchAgent, type WatchEnv } from "../install/watch";
 import { ChangeManifest } from "../install/manifest";
 import { listLeakEvents } from "../viewer/feed-query";
-import { buildOtelEnv } from "../parsers/otlp-map";
+import { buildHookSettings, buildOtelEnv } from "../parsers/otlp-map";
 import { buildExtensionRedirect, buildRedirectConfig, readFirstConfig, writeRedirectConfig, writeRedirectExtension } from "../install/config-redirect";
 import { AGENTS, buildRunEnv, runBaseUrl } from "./agents";
 
@@ -121,8 +121,8 @@ export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null):
   if (otelCalls > 0) {
     lines.push(
       `  ${otelCalls} agent-reported (Mode B, --telemetry): self-report — prompts, ` +
-        `responses, tool inputs are scanned; tool-result content is not exported, ` +
-        `and alerts lag seconds. see docs/mode-b-spike.md`,
+        `responses, tool inputs, and tool outputs (via a PostToolUse hook) are ` +
+        `scanned; alerts lag seconds. see docs/mode-b-spike.md`,
     );
   }
   lines.push(
@@ -398,7 +398,13 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
     return await direct.exited;
   }
 
+  const runId = randomUUID();
   let modeEnv: Record<string, string>;
+  let finalArgs = agentArgs;
+  // Beagle-owned per-run file to delete when the agent exits (redirect config,
+  // pi extension, or the Mode-B hook settings). Named per RUN so concurrent
+  // runs of one agent don't collide.
+  let cleanupFile: string | null = null;
   if (telemetry) {
     // Nothing goes on the wire: point the agent's own OTel exporter at the
     // daemon's loopback receiver, authed by the per-session run token.
@@ -408,9 +414,19 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
       console.error("could not read the telemetry receiver from the daemon — try `beagle status`.");
       return 1;
     }
-    modeEnv = buildOtelEnv(`http://127.0.0.1:${data.otlpPort}`, data.otlpToken);
+    const base = `http://127.0.0.1:${data.otlpPort}`;
+    modeEnv = buildOtelEnv(base, data.otlpToken);
+    // Close the OTel export's tool-output blind spot: register a Beagle-owned
+    // PostToolUse hook (merged via --settings, never touching the user's own
+    // hooks) that forwards each tool result to the receiver so a secret in a
+    // tool's OUTPUT is scanned too. Endpoint + token ride env vars the hook
+    // process inherits — never argv.
+    const settings = buildHookSettings(beagleHookCommand());
+    cleanupFile = writeRedirectConfig(stateDir, `claude-hook-${runId}`, settings);
+    finalArgs = ["--settings", cleanupFile, ...agentArgs];
+    modeEnv.BEAGLE_HOOK_ENDPOINT = `${base}/v1/hook`;
+    modeEnv.BEAGLE_HOOK_TOKEN = data.otlpToken;
   } else {
-    const runId = randomUUID();
     await controlRequest(daemon.socketPath, {
       cmd: "register-run",
       args: {
@@ -422,11 +438,6 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
         extraHeaders: spec.extraHeaders,
       },
     });
-    let redirectCfg: string | null = null;
-    let finalArgs = agentArgs;
-    // Redirect files are named per RUN, not per agent: two concurrent runs of
-    // the same agent must not overwrite each other's redirect (or delete it
-    // out from under the slower run's startup).
     if (spec.config) {
       // Config-driven agent (opencode): write a Beagle-owned config that
       // merges the user's real settings with the proxy baseURL, and point the
@@ -434,24 +445,88 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
       const baseUrl = runBaseUrl(daemon.proxyPort, runId);
       const userCfg = readFirstConfig(spec.config.realConfigCandidates(homedir()));
       const merged = buildRedirectConfig(userCfg, spec.config.baseUrlPath, baseUrl);
-      redirectCfg = writeRedirectConfig(stateDir, `${agentName}-${runId}`, merged);
-      modeEnv = { [spec.config.configEnv]: redirectCfg };
+      cleanupFile = writeRedirectConfig(stateDir, `${agentName}-${runId}`, merged);
+      modeEnv = { [spec.config.configEnv]: cleanupFile };
     } else if (spec.extension) {
       // Extension-driven agent (pi): generate a one-run extension that
       // re-points the provider at the proxy and load it via the agent's own
       // per-run flag. No config or auth files are touched, ever.
       const baseUrl = runBaseUrl(daemon.proxyPort, runId);
       const source = buildExtensionRedirect(spec.extension.baseUrlProvider, baseUrl);
-      redirectCfg = writeRedirectExtension(stateDir, `${agentName}-${runId}`, source);
-      finalArgs = [spec.extension.flag, redirectCfg, ...agentArgs];
+      cleanupFile = writeRedirectExtension(stateDir, `${agentName}-${runId}`, source);
+      finalArgs = [spec.extension.flag, cleanupFile, ...agentArgs];
       modeEnv = {};
     } else {
       modeEnv = buildRunEnv(agentName, daemon.proxyPort, runId);
     }
-    return await execAgent(daemon.socketPath, realBinary, finalArgs, modeEnv, stateDir, agentName, redirectCfg);
   }
+  return await execAgent(daemon.socketPath, realBinary, finalArgs, modeEnv, stateDir, agentName, cleanupFile);
+}
 
-  return await execAgent(daemon.socketPath, realBinary, agentArgs, modeEnv, stateDir, agentName, null);
+// The shell command Claude Code runs for the tool-output hook: this same
+// beagle binary in `__hook` mode. Compiled → the binary; dev → bun + the entry
+// script. Paths quoted so a space in an install path can't split the command.
+function beagleHookCommand(): string {
+  const self = process.execPath;
+  const script = process.argv[1];
+  return script && /\.(ts|js|mjs)$/.test(script)
+    ? `"${self}" "${script}" __hook`
+    : `"${self}" __hook`;
+}
+
+// PostToolUse hook forwarder (Mode B tool-output capture). Reads Claude Code's
+// hook JSON from stdin and POSTs it to the daemon's loopback receiver. Silent
+// and ALWAYS exits 0 — a hook must never disrupt the agent or feed output back
+// into its context.
+export async function cmdHookForward(): Promise<number> {
+  try {
+    const endpoint = process.env.BEAGLE_HOOK_ENDPOINT;
+    const token = process.env.BEAGLE_HOOK_TOKEN;
+    if (endpoint && token) {
+      // Bounded read (size AND time): a runaway or never-closing tool output
+      // can't balloon or hang this short-lived process. The read cap matches
+      // the receiver's body cap — anything larger wouldn't be accepted anyway.
+      const body = await readStdinCapped(32 << 20, 1500);
+      if (body) {
+        // Hard timeout: PostToolUse runs synchronously inside the agent's loop,
+        // so a hung/slow receiver must NEVER stall the agent. Best-effort.
+        await fetch(endpoint, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-beagle-run": token },
+          body,
+          signal: AbortSignal.timeout(2000),
+        }).catch(() => {});
+      }
+    }
+  } catch {
+    /* best-effort: never surface an error to the agent */
+  }
+  return 0;
+}
+
+// Read stdin up to `cap` bytes OR `deadlineMs`, whichever comes first, then
+// stop. Bounds both memory (a huge payload) and time (stdin that never reaches
+// EOF) so the hook can't balloon or hang the agent — the whole point of a hook
+// forwarder is to never disrupt the agent.
+async function readStdinCapped(cap: number, deadlineMs: number): Promise<string> {
+  const reader = (Bun.stdin.stream() as ReadableStream<Uint8Array>).getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  // On the deadline, cancel the reader — the pending read() then resolves done.
+  const timer = setTimeout(() => void reader.cancel().catch(() => {}), deadlineMs);
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done || !value) break;
+      chunks.push(value);
+      total += value.length;
+      if (total >= cap) break;
+    }
+  } finally {
+    clearTimeout(timer);
+    reader.cancel().catch(() => {});
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks));
 }
 
 async function execAgent(

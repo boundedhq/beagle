@@ -228,9 +228,72 @@ export function mapOtlpLogsToCalls(payload: unknown, ctx: OtlpContext): OtelCall
   }
 }
 
+// ---- tool-output capture via a PostToolUse hook (Mode B gap fix) ----
+//
+// Claude Code's OTel export omits tool RESULT content — only the size — so a
+// secret that appears ONLY in a tool's output (e.g. the body of a file the
+// agent reads) escapes Mode B. Its PostToolUse hook, however, receives that
+// output. `beagle run claude --telemetry` registers a Beagle-owned hook (via
+// the vendor `--settings` flag — additive, verified not to clobber the user's
+// own hooks) that forwards each tool result to the loopback receiver. This
+// maps that hook payload into a scannable Call.
+
+interface HookPayload {
+  session_id?: string;
+  tool_name?: string;
+  tool_input?: unknown;
+  tool_response?: unknown;
+}
+
+const asText = (v: unknown): string =>
+  v === undefined || v === null ? "" : typeof v === "string" ? v : JSON.stringify(v);
+
+/** Map a Claude Code PostToolUse hook payload into a Call whose scanned body
+ *  is the tool's input AND output. Its own row (a tool call is a distinct unit
+ *  of captured data), chained to the turn's session via session_id. Returns
+ *  null when there's nothing to scan or the payload is malformed. */
+export function mapHookToCall(payload: unknown, ctx: OtlpContext): OtelCall | null {
+  try {
+    if (typeof payload !== "object" || payload === null) return null;
+    const p = payload as HookPayload;
+    const toolName = typeof p.tool_name === "string" ? p.tool_name : "tool";
+    const toolInput = asText(p.tool_input);
+    const toolResponse = asText(p.tool_response);
+    if (!toolInput && !toolResponse) return null; // nothing to scan
+    const ts = Date.now();
+    // The scanned surface: tool name + input + output, raw, so a secret in the
+    // command OR its result is caught.
+    const scanText = `${toolName}\n${toolInput}\n${toolResponse}`;
+    return {
+      id: ulid(ts),
+      runId: "otel",
+      source: "otel",
+      agent: ctx.agent,
+      provider: ctx.provider,
+      endpoint: `otel:tool_output:${toolName}`,
+      request: {
+        bodyBytes: new TextEncoder().encode(scanText),
+        messages: [{ role: "tool", content: `${toolName}: ${toolResponse.slice(0, 4000)}` }],
+      },
+      response: { text: "", bodyBytes: new Uint8Array() },
+      meta: { tsRequest: ts, tsResponse: ts },
+      convId: typeof p.session_id === "string" ? p.session_id : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** The additional settings passed to Claude Code via `--settings` to register
+ *  the tool-output hook. No matcher → fires for every tool. */
+export function buildHookSettings(command: string): Record<string, unknown> {
+  return { hooks: { PostToolUse: [{ hooks: [{ type: "command", command }] }] } };
+}
+
 // Vendor-shipped knobs only (R2 bright line): env vars, never patching. All
 // verified honored against Claude Code 2.1.193 in the Phase-0 spike; the
-// content flags surface user prompts and tool INPUTS (not tool results).
+// content flags surface user prompts and tool INPUTS (not tool results — the
+// hook above closes that gap).
 export function buildOtelEnv(endpoint: string, runToken: string): Record<string, string> {
   return {
     CLAUDE_CODE_ENABLE_TELEMETRY: "1",
