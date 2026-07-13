@@ -21,6 +21,7 @@ import { detectFormat, extractActions, parseRequest, parseResponse, type Format,
 import { startControlServer, type ControlRequest, type ControlResponse } from "./control";
 import { ViewerServer } from "../viewer/server";
 import { OtlpReceiver } from "../core/otlp/receiver";
+import { BEAGLE_VERSION } from "../core/version";
 import type { OtelCall } from "../parsers/otlp-map";
 // Embedded at build time so the compiled binary needs no repo checkout.
 // (bun-types types *.json as a parsed object; with { type: "text" } the
@@ -521,7 +522,9 @@ export class Daemon {
   private async handleControl(req: ControlRequest, socket: Socket): Promise<ControlResponse> {
     switch (req.cmd) {
       case "ping":
-        return { ok: true, data: { pid: process.pid, proxyPort: this.proxyPort } };
+        // Report the running daemon's version so an upgraded CLI can detect a
+        // stale daemon (old binary still serving after an upgrade) and warn.
+        return { ok: true, data: { pid: process.pid, proxyPort: this.proxyPort, version: BEAGLE_VERSION } };
       case "lease": {
         // The caller holds this connection for a watched agent's lifetime;
         // count it as a live run so the daemon doesn't idle-exit. Closing the

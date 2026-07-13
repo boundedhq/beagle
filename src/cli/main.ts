@@ -4,8 +4,9 @@ import {
   cmdConfig, cmdDetect, cmdHookForward, cmdLeaks, cmdPurge, cmdRun, cmdSearch, cmdShow,
   cmdStatus, cmdUnwatch, cmdWatch, defaultStateDir, parseWatchArgs, readLineSync,
 } from "./commands";
+import { BEAGLE_VERSION } from "../core/version";
 
-export const VERSION = "0.1.0";
+export const VERSION = BEAGLE_VERSION;
 
 const HELP = `beagle ${VERSION} — a local transparency proxy for AI agents
 

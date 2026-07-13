@@ -16,6 +16,7 @@ import { listLeakEvents } from "../viewer/feed-query";
 import { buildCodexOtelArgs, buildCodexOtelEnv, buildHookSettings, buildOtelEnv, mergeHookIntoSettings } from "../parsers/otlp-map";
 import { buildExtensionRedirect, buildRedirectConfig, readFirstConfig, writeRedirectConfig, writeRedirectExtension } from "../install/config-redirect";
 import { AGENTS, buildRunEnv, runBaseUrl } from "./agents";
+import { BEAGLE_VERSION } from "../core/version";
 
 // Everything printed by these commands can embed traffic-derived text
 // (summaries, session ids from parsed content) — sanitize at the boundary,
@@ -49,6 +50,7 @@ interface DaemonInfo {
   pid: number;
   proxyPort: number;
   socketPath: string;
+  runningVersion?: string; // from the ping handshake, not daemon.json
 }
 
 function readDaemonInfo(stateDir: string): DaemonInfo | null {
@@ -64,7 +66,9 @@ async function pingDaemon(stateDir: string): Promise<DaemonInfo | null> {
   if (!info) return null;
   try {
     const r = await controlRequest(info.socketPath, { cmd: "ping" }, 800);
-    return r.ok ? info : null;
+    if (!r.ok) return null;
+    const version = (r.data as { version?: string } | undefined)?.version;
+    return { ...info, runningVersion: version };
   } catch {
     return null;
   }
@@ -73,7 +77,20 @@ async function pingDaemon(stateDir: string): Promise<DaemonInfo | null> {
 // Ensure a daemon is up, spawning one if needed. Shared by run and ui.
 async function ensureDaemon(stateDir: string): Promise<DaemonInfo | null> {
   let daemon = await pingDaemon(stateDir);
-  if (daemon) return daemon;
+  if (daemon) {
+    // A daemon left running from an OLD binary (persistent / service unit)
+    // won't have this build's fixes — it's the one parsing upstreams,
+    // registering runs, and scanning. Warn (don't force-restart: it may be
+    // serving other agents right now) with the exact remedy.
+    if (daemon.runningVersion && daemon.runningVersion !== BEAGLE_VERSION) {
+      process.stderr.write(
+        `beagle ▲ the running daemon is v${daemon.runningVersion} but this beagle is v${BEAGLE_VERSION} — ` +
+          `it won't have this version's fixes until restarted.\n` +
+          `  Restart it: kill ${daemon.pid} && beagle status   (a plain 'beagle run' will start a fresh one)\n`,
+      );
+    }
+    return daemon;
+  }
   // Compiled binary: argv[1] is not a script path — invoke ourselves
   // directly. Dev (bun run): re-run the entry script.
   const script = process.argv[1];

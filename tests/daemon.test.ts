@@ -91,6 +91,13 @@ describe("Daemon end-to-end", () => {
     upstream.server.close();
   });
 
+  test("ping reports the daemon's version so an upgraded CLI can detect a stale daemon", async () => {
+    const { BEAGLE_VERSION } = await import("../src/core/version");
+    const r = await controlRequest(daemon.socketPath, { cmd: "ping" });
+    expect(r.ok).toBe(true);
+    expect((r.data as { version?: string }).version).toBe(BEAGLE_VERSION);
+  });
+
   const requestBody = (content: string) =>
     JSON.stringify({
       model: "claude-sonnet-5",
