@@ -97,13 +97,18 @@ Claude Code's **built-in usage reporting** (its vendor-shipped OpenTelemetry
 export) and receives those reports on a local port. That means you see what
 Claude Code *says* it sent rather than the bytes themselves — which is why
 those rows are badged **agent** (*agent-reported*) in the dashboard instead
-of **✓ wire**. Mode B is implemented and unit-tested but **not yet
-validated against a real Claude Code build** — treat it as best-effort
-until the [Phase-0 spike checklist](docs/mode-b-spike.md) is complete.
-Codex on a "Sign in with ChatGPT" login is designed to work as a pure
-passthrough (Beagle forwards the client's own login unchanged and never
-injects anything), but that path is **also pending validation** — until
-then, API-key mode is the supported way to watch Codex.
+of **✓ wire**. This is **validated against Claude Code 2.1.193**: it
+captures your prompts, the assistant's responses, and tool inputs, and
+fires real leak alerts on them. One honest limitation — Claude Code does
+*not* export the *contents* of tool results, so a secret that appears only
+in a file the agent reads (never in a prompt or command) won't be seen in
+Mode B; and because reports are batched, alerts lag by seconds rather than
+being wire-instant. Details and the reproduction:
+[Phase-0 spike results](docs/mode-b-spike.md). Codex on a "Sign in with
+ChatGPT" login is designed to work as a pure passthrough (Beagle forwards
+the client's own login unchanged and never injects anything), but that path
+is **still pending validation** — until then, API-key mode is the supported
+way to watch Codex.
 
 Desktop apps, IDE extensions, and web UIs launch their own processes and
 don't inherit either mechanism, so their traffic is **not** captured in v1 —

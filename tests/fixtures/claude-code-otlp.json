@@ -1,0 +1,2476 @@
+{
+"resourceLogs": [
+{
+"resource": {
+"attributes": [
+{
+"key": "service.name",
+"value": {
+"stringValue": "claude-code"
+}
+}
+]
+},
+"scopeLogs": [
+{
+"scope": {
+"name": "com.anthropic.claude_code.events",
+"version": "2.1.193"
+},
+"logRecords": [
+{
+"timeUnixNano": "1783909613446000000",
+"observedTimeUnixNano": "1783909613446000000",
+"body": {
+"stringValue": "claude_code.hook_execution_start"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "7624b26f-c4cc-479c-bb92-ccee67dedf62"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "hook_execution_start"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:26:53.446Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 0
+}
+},
+{
+"key": "hook_event",
+"value": {
+"stringValue": "SessionStart"
+}
+},
+{
+"key": "hook_name",
+"value": {
+"stringValue": "SessionStart:startup"
+}
+},
+{
+"key": "num_hooks",
+"value": {
+"stringValue": "1"
+}
+},
+{
+"key": "managed_only",
+"value": {
+"stringValue": "false"
+}
+},
+{
+"key": "hook_source",
+"value": {
+"stringValue": "merged"
+}
+},
+{
+"key": "safe_mode",
+"value": {
+"stringValue": "false"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909613463000000",
+"observedTimeUnixNano": "1783909613463000000",
+"body": {
+"stringValue": "claude_code.plugin_loaded"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "7624b26f-c4cc-479c-bb92-ccee67dedf62"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "plugin_loaded"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:26:53.463Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 1
+}
+},
+{
+"key": "plugin.name",
+"value": {
+"stringValue": "andrej-karpathy-skills"
+}
+},
+{
+"key": "marketplace.name",
+"value": {
+"stringValue": "karpathy-skills"
+}
+},
+{
+"key": "plugin.version",
+"value": {
+"stringValue": "1.0.0"
+}
+},
+{
+"key": "plugin.scope",
+"value": {
+"stringValue": "user-local"
+}
+},
+{
+"key": "enabled_via",
+"value": {
+"stringValue": "user-install"
+}
+},
+{
+"key": "plugin_id_hash",
+"value": {
+"stringValue": "30834b4136798ee9"
+}
+},
+{
+"key": "has_hooks",
+"value": {
+"boolValue": false
+}
+},
+{
+"key": "has_mcp",
+"value": {
+"boolValue": false
+}
+},
+{
+"key": "host_owned_mcp",
+"value": {
+"boolValue": false
+}
+},
+{
+"key": "skill_path_count",
+"value": {
+"intValue": 2
+}
+},
+{
+"key": "command_path_count",
+"value": {
+"intValue": 0
+}
+},
+{
+"key": "agent_path_count",
+"value": {
+"intValue": 0
+}
+},
+{
+"key": "safe_mode",
+"value": {
+"stringValue": "false"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909613464000000",
+"observedTimeUnixNano": "1783909613464000000",
+"body": {
+"stringValue": "claude_code.hook_registered"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "7624b26f-c4cc-479c-bb92-ccee67dedf62"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "hook_registered"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:26:53.464Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 2
+}
+},
+{
+"key": "hook_event",
+"value": {
+"stringValue": "SessionStart"
+}
+},
+{
+"key": "hook_type",
+"value": {
+"stringValue": "command"
+}
+},
+{
+"key": "hook_source",
+"value": {
+"stringValue": "userSettings"
+}
+},
+{
+"key": "safe_mode",
+"value": {
+"stringValue": "false"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909613464000000",
+"observedTimeUnixNano": "1783909613464000000",
+"body": {
+"stringValue": "claude_code.hook_registered"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "7624b26f-c4cc-479c-bb92-ccee67dedf62"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "hook_registered"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:26:53.464Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 3
+}
+},
+{
+"key": "hook_event",
+"value": {
+"stringValue": "Stop"
+}
+},
+{
+"key": "hook_type",
+"value": {
+"stringValue": "command"
+}
+},
+{
+"key": "hook_source",
+"value": {
+"stringValue": "userSettings"
+}
+},
+{
+"key": "safe_mode",
+"value": {
+"stringValue": "false"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909613464000000",
+"observedTimeUnixNano": "1783909613464000000",
+"body": {
+"stringValue": "claude_code.hook_registered"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "7624b26f-c4cc-479c-bb92-ccee67dedf62"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "hook_registered"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:26:53.464Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 4
+}
+},
+{
+"key": "hook_event",
+"value": {
+"stringValue": "UserPromptSubmit"
+}
+},
+{
+"key": "hook_type",
+"value": {
+"stringValue": "command"
+}
+},
+{
+"key": "hook_source",
+"value": {
+"stringValue": "userSettings"
+}
+},
+{
+"key": "safe_mode",
+"value": {
+"stringValue": "false"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909613632000000",
+"observedTimeUnixNano": "1783909613632000000",
+"body": {
+"stringValue": "claude_code.mcp_server_connection"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "7624b26f-c4cc-479c-bb92-ccee67dedf62"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "mcp_server_connection"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:26:53.632Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 5
+}
+},
+{
+"key": "status",
+"value": {
+"stringValue": "connected"
+}
+},
+{
+"key": "transport_type",
+"value": {
+"stringValue": "http"
+}
+},
+{
+"key": "server_scope",
+"value": {
+"stringValue": "user"
+}
+},
+{
+"key": "duration_ms",
+"value": {
+"stringValue": "172"
+}
+},
+{
+"key": "is_plugin",
+"value": {
+"boolValue": false
+}
+},
+{
+"key": "server_name",
+"value": {
+"stringValue": "hyper"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909613786000000",
+"observedTimeUnixNano": "1783909613786000000",
+"body": {
+"stringValue": "claude_code.hook_execution_complete"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "7624b26f-c4cc-479c-bb92-ccee67dedf62"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "hook_execution_complete"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:26:53.786Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 6
+}
+},
+{
+"key": "hook_event",
+"value": {
+"stringValue": "SessionStart"
+}
+},
+{
+"key": "hook_name",
+"value": {
+"stringValue": "SessionStart:startup"
+}
+},
+{
+"key": "num_hooks",
+"value": {
+"stringValue": "1"
+}
+},
+{
+"key": "num_success",
+"value": {
+"stringValue": "1"
+}
+},
+{
+"key": "num_blocking",
+"value": {
+"stringValue": "0"
+}
+},
+{
+"key": "num_non_blocking_error",
+"value": {
+"stringValue": "0"
+}
+},
+{
+"key": "num_cancelled",
+"value": {
+"stringValue": "0"
+}
+},
+{
+"key": "total_duration_ms",
+"value": {
+"stringValue": "337"
+}
+},
+{
+"key": "managed_only",
+"value": {
+"stringValue": "false"
+}
+},
+{
+"key": "hook_source",
+"value": {
+"stringValue": "merged"
+}
+},
+{
+"key": "safe_mode",
+"value": {
+"stringValue": "false"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909637138000000",
+"observedTimeUnixNano": "1783909637138000000",
+"body": {
+"stringValue": "claude_code.hook_execution_start"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "d82062e5-a22f-4f85-9914-a47cf3073a72"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "hook_execution_start"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:27:17.138Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 0
+}
+},
+{
+"key": "hook_event",
+"value": {
+"stringValue": "SessionStart"
+}
+},
+{
+"key": "hook_name",
+"value": {
+"stringValue": "SessionStart:startup"
+}
+},
+{
+"key": "num_hooks",
+"value": {
+"stringValue": "1"
+}
+},
+{
+"key": "managed_only",
+"value": {
+"stringValue": "false"
+}
+},
+{
+"key": "hook_source",
+"value": {
+"stringValue": "merged"
+}
+},
+{
+"key": "safe_mode",
+"value": {
+"stringValue": "false"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909637166000000",
+"observedTimeUnixNano": "1783909637166000000",
+"body": {
+"stringValue": "claude_code.plugin_loaded"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "d82062e5-a22f-4f85-9914-a47cf3073a72"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "plugin_loaded"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:27:17.166Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 1
+}
+},
+{
+"key": "plugin.name",
+"value": {
+"stringValue": "andrej-karpathy-skills"
+}
+},
+{
+"key": "marketplace.name",
+"value": {
+"stringValue": "karpathy-skills"
+}
+},
+{
+"key": "plugin.version",
+"value": {
+"stringValue": "1.0.0"
+}
+},
+{
+"key": "plugin.scope",
+"value": {
+"stringValue": "user-local"
+}
+},
+{
+"key": "enabled_via",
+"value": {
+"stringValue": "user-install"
+}
+},
+{
+"key": "plugin_id_hash",
+"value": {
+"stringValue": "30834b4136798ee9"
+}
+},
+{
+"key": "has_hooks",
+"value": {
+"boolValue": false
+}
+},
+{
+"key": "has_mcp",
+"value": {
+"boolValue": false
+}
+},
+{
+"key": "host_owned_mcp",
+"value": {
+"boolValue": false
+}
+},
+{
+"key": "skill_path_count",
+"value": {
+"intValue": 2
+}
+},
+{
+"key": "command_path_count",
+"value": {
+"intValue": 0
+}
+},
+{
+"key": "agent_path_count",
+"value": {
+"intValue": 0
+}
+},
+{
+"key": "safe_mode",
+"value": {
+"stringValue": "false"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909637166000000",
+"observedTimeUnixNano": "1783909637166000000",
+"body": {
+"stringValue": "claude_code.hook_registered"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "d82062e5-a22f-4f85-9914-a47cf3073a72"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "hook_registered"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:27:17.166Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 2
+}
+},
+{
+"key": "hook_event",
+"value": {
+"stringValue": "SessionStart"
+}
+},
+{
+"key": "hook_type",
+"value": {
+"stringValue": "command"
+}
+},
+{
+"key": "hook_source",
+"value": {
+"stringValue": "userSettings"
+}
+},
+{
+"key": "safe_mode",
+"value": {
+"stringValue": "false"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909637167000000",
+"observedTimeUnixNano": "1783909637167000000",
+"body": {
+"stringValue": "claude_code.hook_registered"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "d82062e5-a22f-4f85-9914-a47cf3073a72"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "hook_registered"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:27:17.167Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 3
+}
+},
+{
+"key": "hook_event",
+"value": {
+"stringValue": "Stop"
+}
+},
+{
+"key": "hook_type",
+"value": {
+"stringValue": "command"
+}
+},
+{
+"key": "hook_source",
+"value": {
+"stringValue": "userSettings"
+}
+},
+{
+"key": "safe_mode",
+"value": {
+"stringValue": "false"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909637167000000",
+"observedTimeUnixNano": "1783909637167000000",
+"body": {
+"stringValue": "claude_code.hook_registered"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "d82062e5-a22f-4f85-9914-a47cf3073a72"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "hook_registered"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:27:17.167Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 4
+}
+},
+{
+"key": "hook_event",
+"value": {
+"stringValue": "UserPromptSubmit"
+}
+},
+{
+"key": "hook_type",
+"value": {
+"stringValue": "command"
+}
+},
+{
+"key": "hook_source",
+"value": {
+"stringValue": "userSettings"
+}
+},
+{
+"key": "safe_mode",
+"value": {
+"stringValue": "false"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909637281000000",
+"observedTimeUnixNano": "1783909637281000000",
+"body": {
+"stringValue": "claude_code.mcp_server_connection"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "d82062e5-a22f-4f85-9914-a47cf3073a72"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "mcp_server_connection"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:27:17.281Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 5
+}
+},
+{
+"key": "status",
+"value": {
+"stringValue": "connected"
+}
+},
+{
+"key": "transport_type",
+"value": {
+"stringValue": "http"
+}
+},
+{
+"key": "server_scope",
+"value": {
+"stringValue": "user"
+}
+},
+{
+"key": "duration_ms",
+"value": {
+"stringValue": "120"
+}
+},
+{
+"key": "is_plugin",
+"value": {
+"boolValue": false
+}
+},
+{
+"key": "server_name",
+"value": {
+"stringValue": "hyper"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909637399000000",
+"observedTimeUnixNano": "1783909637399000000",
+"body": {
+"stringValue": "claude_code.mcp_server_connection"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "d82062e5-a22f-4f85-9914-a47cf3073a72"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "mcp_server_connection"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:27:17.399Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 6
+}
+},
+{
+"key": "status",
+"value": {
+"stringValue": "connected"
+}
+},
+{
+"key": "transport_type",
+"value": {
+"stringValue": "claudeai-proxy"
+}
+},
+{
+"key": "server_scope",
+"value": {
+"stringValue": "claudeai"
+}
+},
+{
+"key": "duration_ms",
+"value": {
+"stringValue": "4"
+}
+},
+{
+"key": "is_plugin",
+"value": {
+"boolValue": false
+}
+},
+{
+"key": "server_name",
+"value": {
+"stringValue": "claude.ai Google Calendar"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909637400000000",
+"observedTimeUnixNano": "1783909637400000000",
+"body": {
+"stringValue": "claude_code.mcp_server_connection"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "d82062e5-a22f-4f85-9914-a47cf3073a72"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "mcp_server_connection"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:27:17.400Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 7
+}
+},
+{
+"key": "status",
+"value": {
+"stringValue": "connected"
+}
+},
+{
+"key": "transport_type",
+"value": {
+"stringValue": "claudeai-proxy"
+}
+},
+{
+"key": "server_scope",
+"value": {
+"stringValue": "claudeai"
+}
+},
+{
+"key": "duration_ms",
+"value": {
+"stringValue": "4"
+}
+},
+{
+"key": "is_plugin",
+"value": {
+"boolValue": false
+}
+},
+{
+"key": "server_name",
+"value": {
+"stringValue": "claude.ai Gmail"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909637400000000",
+"observedTimeUnixNano": "1783909637400000000",
+"body": {
+"stringValue": "claude_code.mcp_server_connection"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "d82062e5-a22f-4f85-9914-a47cf3073a72"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "mcp_server_connection"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:27:17.400Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 8
+}
+},
+{
+"key": "status",
+"value": {
+"stringValue": "connected"
+}
+},
+{
+"key": "transport_type",
+"value": {
+"stringValue": "claudeai-proxy"
+}
+},
+{
+"key": "server_scope",
+"value": {
+"stringValue": "claudeai"
+}
+},
+{
+"key": "duration_ms",
+"value": {
+"stringValue": "3"
+}
+},
+{
+"key": "is_plugin",
+"value": {
+"boolValue": false
+}
+},
+{
+"key": "server_name",
+"value": {
+"stringValue": "claude.ai Google Drive"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909637403000000",
+"observedTimeUnixNano": "1783909637403000000",
+"body": {
+"stringValue": "claude_code.hook_execution_complete"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "d82062e5-a22f-4f85-9914-a47cf3073a72"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "hook_execution_complete"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:27:17.403Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 9
+}
+},
+{
+"key": "hook_event",
+"value": {
+"stringValue": "SessionStart"
+}
+},
+{
+"key": "hook_name",
+"value": {
+"stringValue": "SessionStart:startup"
+}
+},
+{
+"key": "num_hooks",
+"value": {
+"stringValue": "1"
+}
+},
+{
+"key": "num_success",
+"value": {
+"stringValue": "1"
+}
+},
+{
+"key": "num_blocking",
+"value": {
+"stringValue": "0"
+}
+},
+{
+"key": "num_non_blocking_error",
+"value": {
+"stringValue": "0"
+}
+},
+{
+"key": "num_cancelled",
+"value": {
+"stringValue": "0"
+}
+},
+{
+"key": "total_duration_ms",
+"value": {
+"stringValue": "259"
+}
+},
+{
+"key": "managed_only",
+"value": {
+"stringValue": "false"
+}
+},
+{
+"key": "hook_source",
+"value": {
+"stringValue": "merged"
+}
+},
+{
+"key": "safe_mode",
+"value": {
+"stringValue": "false"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909637480000000",
+"observedTimeUnixNano": "1783909637480000000",
+"body": {
+"stringValue": "claude_code.user_prompt"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "d82062e5-a22f-4f85-9914-a47cf3073a72"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "user_prompt"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:27:17.480Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 10
+}
+},
+{
+"key": "prompt.id",
+"value": {
+"stringValue": "f1e03b92-9ec7-4886-b5d9-8f55dba01e80"
+}
+},
+{
+"key": "prompt_length",
+"value": {
+"stringValue": "124"
+}
+},
+{
+"key": "prompt",
+"value": {
+"stringValue": "please deploy with AWS key AKIAZQ3DRSTUVWXY2345 to prod"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909637480000000",
+"observedTimeUnixNano": "1783909637480000000",
+"body": {
+"stringValue": "claude_code.hook_execution_start"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "d82062e5-a22f-4f85-9914-a47cf3073a72"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "hook_execution_start"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:27:17.480Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 11
+}
+},
+{
+"key": "prompt.id",
+"value": {
+"stringValue": "f1e03b92-9ec7-4886-b5d9-8f55dba01e80"
+}
+},
+{
+"key": "hook_event",
+"value": {
+"stringValue": "UserPromptSubmit"
+}
+},
+{
+"key": "hook_name",
+"value": {
+"stringValue": "UserPromptSubmit"
+}
+},
+{
+"key": "num_hooks",
+"value": {
+"stringValue": "1"
+}
+},
+{
+"key": "managed_only",
+"value": {
+"stringValue": "false"
+}
+},
+{
+"key": "hook_source",
+"value": {
+"stringValue": "merged"
+}
+},
+{
+"key": "safe_mode",
+"value": {
+"stringValue": "false"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909637737000000",
+"observedTimeUnixNano": "1783909637737000000",
+"body": {
+"stringValue": "claude_code.hook_execution_complete"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "d82062e5-a22f-4f85-9914-a47cf3073a72"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "hook_execution_complete"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:27:17.737Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 12
+}
+},
+{
+"key": "prompt.id",
+"value": {
+"stringValue": "f1e03b92-9ec7-4886-b5d9-8f55dba01e80"
+}
+},
+{
+"key": "hook_event",
+"value": {
+"stringValue": "UserPromptSubmit"
+}
+},
+{
+"key": "hook_name",
+"value": {
+"stringValue": "UserPromptSubmit"
+}
+},
+{
+"key": "num_hooks",
+"value": {
+"stringValue": "1"
+}
+},
+{
+"key": "num_success",
+"value": {
+"stringValue": "1"
+}
+},
+{
+"key": "num_blocking",
+"value": {
+"stringValue": "0"
+}
+},
+{
+"key": "num_non_blocking_error",
+"value": {
+"stringValue": "0"
+}
+},
+{
+"key": "num_cancelled",
+"value": {
+"stringValue": "0"
+}
+},
+{
+"key": "total_duration_ms",
+"value": {
+"stringValue": "256"
+}
+},
+{
+"key": "managed_only",
+"value": {
+"stringValue": "false"
+}
+},
+{
+"key": "hook_source",
+"value": {
+"stringValue": "merged"
+}
+},
+{
+"key": "safe_mode",
+"value": {
+"stringValue": "false"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909645565000000",
+"observedTimeUnixNano": "1783909645565000000",
+"body": {
+"stringValue": "claude_code.tool_decision"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "d82062e5-a22f-4f85-9914-a47cf3073a72"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "tool_decision"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:27:25.565Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 13
+}
+},
+{
+"key": "prompt.id",
+"value": {
+"stringValue": "f1e03b92-9ec7-4886-b5d9-8f55dba01e80"
+}
+},
+{
+"key": "decision",
+"value": {
+"stringValue": "accept"
+}
+},
+{
+"key": "source",
+"value": {
+"stringValue": "config"
+}
+},
+{
+"key": "tool_name",
+"value": {
+"stringValue": "Read"
+}
+},
+{
+"key": "tool_use_id",
+"value": {
+"stringValue": "toolu_01Gmcwi972nG8rbDV9yxdcvR"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909645569000000",
+"observedTimeUnixNano": "1783909645569000000",
+"body": {
+"stringValue": "claude_code.tool_result"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "d82062e5-a22f-4f85-9914-a47cf3073a72"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "tool_result"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:27:25.569Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 14
+}
+},
+{
+"key": "prompt.id",
+"value": {
+"stringValue": "f1e03b92-9ec7-4886-b5d9-8f55dba01e80"
+}
+},
+{
+"key": "tool_name",
+"value": {
+"stringValue": "Read"
+}
+},
+{
+"key": "tool_use_id",
+"value": {
+"stringValue": "toolu_01Gmcwi972nG8rbDV9yxdcvR"
+}
+},
+{
+"key": "success",
+"value": {
+"stringValue": "true"
+}
+},
+{
+"key": "duration_ms",
+"value": {
+"stringValue": "3"
+}
+},
+{
+"key": "tool_input",
+"value": {
+"stringValue": "{\"file_path\": \"/home/user/project/fake-creds.txt\"}"
+}
+},
+{
+"key": "tool_input_size_bytes",
+"value": {
+"stringValue": "136"
+}
+},
+{
+"key": "tool_result_size_bytes",
+"value": {
+"stringValue": "66"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909645621000000",
+"observedTimeUnixNano": "1783909645621000000",
+"body": {
+"stringValue": "claude_code.api_request"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "d82062e5-a22f-4f85-9914-a47cf3073a72"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "api_request"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:27:25.621Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 15
+}
+},
+{
+"key": "prompt.id",
+"value": {
+"stringValue": "f1e03b92-9ec7-4886-b5d9-8f55dba01e80"
+}
+},
+{
+"key": "model",
+"value": {
+"stringValue": "claude-fable-5"
+}
+},
+{
+"key": "input_tokens",
+"value": {
+"intValue": 4058
+}
+},
+{
+"key": "output_tokens",
+"value": {
+"intValue": 181
+}
+},
+{
+"key": "cache_read_tokens",
+"value": {
+"intValue": 14155
+}
+},
+{
+"key": "cache_creation_tokens",
+"value": {
+"intValue": 3707
+}
+},
+{
+"key": "cost_usd",
+"value": {
+"doubleValue": 0.137925
+}
+},
+{
+"key": "cost_usd_micros",
+"value": {
+"intValue": 137925
+}
+},
+{
+"key": "duration_ms",
+"value": {
+"intValue": 7871
+}
+},
+{
+"key": "request_id",
+"value": {
+"stringValue": "req_011CcyGQMQeU7Ko8aG4wFgJF"
+}
+},
+{
+"key": "speed",
+"value": {
+"stringValue": "normal"
+}
+},
+{
+"key": "query_source",
+"value": {
+"stringValue": "sdk"
+}
+},
+{
+"key": "effort",
+"value": {
+"stringValue": "high"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909650499000000",
+"observedTimeUnixNano": "1783909650499000000",
+"body": {
+"stringValue": "claude_code.api_refusal"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "d82062e5-a22f-4f85-9914-a47cf3073a72"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "api_refusal"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:27:30.499Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 16
+}
+},
+{
+"key": "prompt.id",
+"value": {
+"stringValue": "f1e03b92-9ec7-4886-b5d9-8f55dba01e80"
+}
+},
+{
+"key": "model",
+"value": {
+"stringValue": "claude-fable-5"
+}
+},
+{
+"key": "request_id",
+"value": {
+"stringValue": "req_011CcyGQvnb1VsExKEEaqjAK"
+}
+},
+{
+"key": "speed",
+"value": {
+"stringValue": "normal"
+}
+},
+{
+"key": "attempt",
+"value": {
+"intValue": 1
+}
+},
+{
+"key": "server_fallback_hop",
+"value": {
+"boolValue": true
+}
+},
+{
+"key": "query_source",
+"value": {
+"stringValue": "sdk"
+}
+},
+{
+"key": "effort",
+"value": {
+"stringValue": "high"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909650513000000",
+"observedTimeUnixNano": "1783909650513000000",
+"body": {
+"stringValue": "claude_code.api_request"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "d82062e5-a22f-4f85-9914-a47cf3073a72"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "api_request"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:27:30.513Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 17
+}
+},
+{
+"key": "prompt.id",
+"value": {
+"stringValue": "f1e03b92-9ec7-4886-b5d9-8f55dba01e80"
+}
+},
+{
+"key": "model",
+"value": {
+"stringValue": "claude-opus-4-8"
+}
+},
+{
+"key": "input_tokens",
+"value": {
+"intValue": 2
+}
+},
+{
+"key": "output_tokens",
+"value": {
+"intValue": 38
+}
+},
+{
+"key": "cache_read_tokens",
+"value": {
+"intValue": 22087
+}
+},
+{
+"key": "cache_creation_tokens",
+"value": {
+"intValue": 0
+}
+},
+{
+"key": "cost_usd",
+"value": {
+"doubleValue": 0.0120035
+}
+},
+{
+"key": "cost_usd_micros",
+"value": {
+"intValue": 12004
+}
+},
+{
+"key": "duration_ms",
+"value": {
+"intValue": 4877
+}
+},
+{
+"key": "request_id",
+"value": {
+"stringValue": "req_011CcyGQvnb1VsExKEEaqjAK"
+}
+},
+{
+"key": "speed",
+"value": {
+"stringValue": "normal"
+}
+},
+{
+"key": "query_source",
+"value": {
+"stringValue": "sdk"
+}
+},
+{
+"key": "effort",
+"value": {
+"stringValue": "high"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909650513000000",
+"observedTimeUnixNano": "1783909650513000000",
+"body": {
+"stringValue": "claude_code.assistant_response"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "d82062e5-a22f-4f85-9914-a47cf3073a72"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "assistant_response"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:27:30.513Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 18
+}
+},
+{
+"key": "prompt.id",
+"value": {
+"stringValue": "f1e03b92-9ec7-4886-b5d9-8f55dba01e80"
+}
+},
+{
+"key": "response_length",
+"value": {
+"intValue": 84
+}
+},
+{
+"key": "response",
+"value": {
+"stringValue": "The file `fake-creds.txt` defines two config keys:\n\n- `aws_access_key_id`\n- `region`"
+}
+},
+{
+"key": "request_id",
+"value": {
+"stringValue": "req_011CcyGQvnb1VsExKEEaqjAK"
+}
+},
+{
+"key": "model",
+"value": {
+"stringValue": "claude-opus-4-8"
+}
+},
+{
+"key": "query_source",
+"value": {
+"stringValue": "sdk"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909652458000000",
+"observedTimeUnixNano": "1783909652458000000",
+"body": {
+"stringValue": "claude_code.hook_execution_start"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "d82062e5-a22f-4f85-9914-a47cf3073a72"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "hook_execution_start"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:27:32.458Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 19
+}
+},
+{
+"key": "prompt.id",
+"value": {
+"stringValue": "f1e03b92-9ec7-4886-b5d9-8f55dba01e80"
+}
+},
+{
+"key": "hook_event",
+"value": {
+"stringValue": "Stop"
+}
+},
+{
+"key": "hook_name",
+"value": {
+"stringValue": "Stop"
+}
+},
+{
+"key": "num_hooks",
+"value": {
+"stringValue": "1"
+}
+},
+{
+"key": "managed_only",
+"value": {
+"stringValue": "false"
+}
+},
+{
+"key": "hook_source",
+"value": {
+"stringValue": "merged"
+}
+},
+{
+"key": "safe_mode",
+"value": {
+"stringValue": "false"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909652761000000",
+"observedTimeUnixNano": "1783909652761000000",
+"body": {
+"stringValue": "claude_code.hook_execution_complete"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "d82062e5-a22f-4f85-9914-a47cf3073a72"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "hook_execution_complete"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:27:32.761Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 20
+}
+},
+{
+"key": "prompt.id",
+"value": {
+"stringValue": "f1e03b92-9ec7-4886-b5d9-8f55dba01e80"
+}
+},
+{
+"key": "hook_event",
+"value": {
+"stringValue": "Stop"
+}
+},
+{
+"key": "hook_name",
+"value": {
+"stringValue": "Stop"
+}
+},
+{
+"key": "num_hooks",
+"value": {
+"stringValue": "1"
+}
+},
+{
+"key": "num_success",
+"value": {
+"stringValue": "1"
+}
+},
+{
+"key": "num_blocking",
+"value": {
+"stringValue": "0"
+}
+},
+{
+"key": "num_non_blocking_error",
+"value": {
+"stringValue": "0"
+}
+},
+{
+"key": "num_cancelled",
+"value": {
+"stringValue": "0"
+}
+},
+{
+"key": "total_duration_ms",
+"value": {
+"stringValue": "301"
+}
+},
+{
+"key": "managed_only",
+"value": {
+"stringValue": "false"
+}
+},
+{
+"key": "hook_source",
+"value": {
+"stringValue": "merged"
+}
+},
+{
+"key": "safe_mode",
+"value": {
+"stringValue": "false"
+}
+}
+],
+"droppedAttributesCount": 0
+},
+{
+"timeUnixNano": "1783909652763000000",
+"observedTimeUnixNano": "1783909652763000000",
+"body": {
+"stringValue": "claude_code.mcp_server_connection"
+},
+"attributes": [
+{
+"key": "session.id",
+"value": {
+"stringValue": "d82062e5-a22f-4f85-9914-a47cf3073a72"
+}
+},
+{
+"key": "terminal.type",
+"value": {
+"stringValue": "non-interactive"
+}
+},
+{
+"key": "event.name",
+"value": {
+"stringValue": "mcp_server_connection"
+}
+},
+{
+"key": "event.timestamp",
+"value": {
+"stringValue": "2026-07-13T02:27:32.763Z"
+}
+},
+{
+"key": "event.sequence",
+"value": {
+"intValue": 21
+}
+},
+{
+"key": "prompt.id",
+"value": {
+"stringValue": "f1e03b92-9ec7-4886-b5d9-8f55dba01e80"
+}
+},
+{
+"key": "status",
+"value": {
+"stringValue": "disconnected"
+}
+},
+{
+"key": "transport_type",
+"value": {
+"stringValue": "http"
+}
+},
+{
+"key": "server_scope",
+"value": {
+"stringValue": "user"
+}
+},
+{
+"key": "duration_ms",
+"value": {
+"stringValue": "15482"
+}
+},
+{
+"key": "is_plugin",
+"value": {
+"boolValue": false
+}
+},
+{
+"key": "server_name",
+"value": {
+"stringValue": "hyper"
+}
+}
+],
+"droppedAttributesCount": 0
+}
+]
+}
+]
+}
+]
+}
