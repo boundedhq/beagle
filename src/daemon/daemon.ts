@@ -82,6 +82,10 @@ export class Daemon {
   otlpPort = 0;
   private otlpToken = "";
   private pending = new Map<string, PendingCall>();
+  // Calls whose request was skipped (paused / excluded agent) — the capture
+  // must drop these even if the daemon was resumed or the agent un-excluded
+  // before the response landed. Swept alongside `pending`.
+  private skipped = new Map<string, number>();
   private paused = false;
   private sweeper: ReturnType<typeof setInterval> | null = null;
   private leases = 0;
@@ -172,7 +176,13 @@ export class Daemon {
 
   private async scanPipeline(bytes: Uint8Array, ctx: ScanContext): Promise<void> {
     this.lastActivityTs = Date.now();
-    if (this.paused || this.config.excludedAgents.includes(ctx.agent ?? "")) return;
+    if (this.paused || this.config.excludedAgents.includes(ctx.agent ?? "")) {
+      // The skip decision is per-call, made here: these bytes are never
+      // scanned, so the call must not be captured even if the state flips
+      // back mid-flight (§4 — never store an unscanned body as verified).
+      this.skipped.set(ctx.callId, Date.now());
+      return;
+    }
     const format = detectFormat(ctx.endpoint);
     const parsed = format === "unknown" ? null : parseRequest(format, bytes);
     // Session resolution is synchronous, before the first await: the capture
@@ -215,6 +225,7 @@ export class Daemon {
   }
 
   private async captureCall(call: CapturedCall): Promise<void> {
+    if (this.skipped.delete(call.id)) return; // request-time skip is final
     const stash = this.pending.get(call.id);
     // redact-on-capture (R11): await the scan verdict and substitute the raw
     // secret BEFORE the first write, so no raw value ever lands in the WAL.
@@ -246,6 +257,10 @@ export class Daemon {
       });
     }
 
+    // A missing stash means these bytes were never scanned (pending entry
+    // TTL-swept mid-flight, scan pipeline died) — never claim "ok" for a
+    // body no scan verified (§4).
+    const scanState: "ok" | "incomplete" = stash?.scanState ?? "incomplete";
     // redact-on-capture: substitute secret spans in the persisted body. If the
     // scan came back incomplete we can't trust the spans, so we hold the raw
     // value out entirely and mark it (never write raw-and-hope, §4).
@@ -255,14 +270,14 @@ export class Daemon {
     let searchText = buildSearchText(parsed, respParsed?.text, call);
     // True only when the stored body was actually rewritten (viewer highlight).
     let redacted = false;
-    if (this.config.redactOnCapture && stash) {
-      if (stash.scanState === "incomplete") {
+    if (this.config.redactOnCapture) {
+      if (scanState === "incomplete") {
         redacted = true;
         requestBody = new TextEncoder().encode("[REDACTION INCOMPLETE: scan did not verify this body]");
         responseBody = null;
         sseRaw = null; // the raw stream could hold the unverified value
         searchText = "";
-      } else if (stash.findings.length > 0) {
+      } else if (stash && stash.findings.length > 0) {
         redacted = true;
         const scrubbed = redactBody(call.request.bodyBytes, stash.findings);
         requestBody = scrubbed.bytes;
@@ -304,7 +319,7 @@ export class Daemon {
       bytesReq: call.request.bodyBytes.byteLength,
       bytesResp: call.response.bodyBytes?.byteLength,
       summary: buildSummary(parsed, respParsed?.text, respActions),
-      scanState: stash?.scanState ?? "ok",
+      scanState,
       captureState: call.meta.captureState,
       sessionTier: resolution.tier,
       redacted,
@@ -329,7 +344,7 @@ export class Daemon {
       tokensOut: respParsed?.tokensOut,
       bytesReq: call.request.bodyBytes.byteLength,
       summary: buildSummary(parsed, respParsed?.text, respActions),
-      scanState: stash?.scanState ?? "ok",
+      scanState,
       captureState: call.meta.captureState,
       sessionTier: resolution.tier,
       source: call.source,
@@ -449,6 +464,9 @@ export class Daemon {
     const cutoff = Date.now() - PENDING_TTL_MS;
     for (const [id, entry] of this.pending) {
       if (entry.createdTs < cutoff) this.pending.delete(id);
+    }
+    for (const [id, ts] of this.skipped) {
+      if (ts < cutoff) this.skipped.delete(id);
     }
   }
 

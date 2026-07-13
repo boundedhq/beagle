@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect } from "node:net";
 import { Daemon } from "../src/daemon/daemon";
+import type { CapturedCall } from "../src/core/proxy/server";
 import { controlRequest } from "../src/daemon/control";
 import { Store } from "../src/core/store/store";
 import { listCalls, listLeakEvents } from "../src/viewer/feed-query";
@@ -265,6 +266,89 @@ describe("Daemon end-to-end", () => {
     const status = await controlRequest(daemon.socketPath, { cmd: "status" });
     expect(status.ok).toBe(true);
     expect((status.data as { calls: number }).calls).toBeGreaterThan(0);
+    store.close();
+  });
+
+  test("call started while paused is dropped even if resumed before the response", async () => {
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    // Upstream that holds its response until released, so pause/resume can
+    // flip while the call is in flight.
+    let release!: () => void;
+    const released = new Promise<void>((r) => (release = r));
+    let requestArrived!: () => void;
+    const arrived = new Promise<void>((r) => (requestArrived = r));
+    const slow = createServer((sock) => {
+      sock.on("data", () => {
+        requestArrived();
+        void released.then(() => {
+          const body = JSON.stringify({ model: "m", content: [{ type: "text", text: "slow done" }] });
+          sock.write(`HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: ${body.length}\r\n\r\n${body}`);
+        });
+      });
+      sock.on("error", () => {});
+    });
+    await new Promise<void>((r) => slow.listen(0, "127.0.0.1", () => r()));
+    const sport = (slow.address() as { port: number }).port;
+    await controlRequest(daemon.socketPath, {
+      cmd: "register-run",
+      args: { id: "run-slow", agent: "claude-code", provider: "anthropic", upstream: `http://127.0.0.1:${sport}`, authLocation: "x-api-key" },
+    });
+
+    await controlRequest(daemon.socketPath, { cmd: "pause" });
+    const respP = sendThroughProxy(
+      daemon.proxyPort, "run-slow",
+      requestBody("paused-time secret AKIAZQ3DRSTUVWXY2345"),
+    );
+    await arrived; // request forwarded → the skip decision is already made
+    await controlRequest(daemon.socketPath, { cmd: "resume" });
+    release();
+    await respP;
+    await Bun.sleep(150);
+
+    // The never-scanned body must not be stored at all — in particular not
+    // raw with scanState "ok".
+    let store = Store.openReadOnly(stateDir);
+    expect(store.countCalls()).toBe(0);
+    expect(store.searchLiteral("paused-time secret")).toEqual([]);
+    store.close();
+
+    // The skip is per-call, not sticky: post-resume traffic captures normally.
+    await sendThroughProxy(daemon.proxyPort, "run-e2e", requestBody("after the race"));
+    await Bun.sleep(150);
+    store = Store.openReadOnly(stateDir);
+    expect(store.searchLiteral("after the race").length).toBe(1);
+    store.close();
+    slow.close();
+  });
+
+  test("capture with no pending entry never claims scanState ok; redact-on-capture holds the body out", async () => {
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    // Simulate the stash being gone at capture time (pending entry TTL-swept
+    // during a long in-flight call) by driving the capture path directly with
+    // an id the scan pipeline never saw.
+    const enc = new TextEncoder();
+    const id = "01TESTSTASHGONE0000000000";
+    await (daemon as unknown as { captureCall(c: CapturedCall): Promise<void> }).captureCall({
+      id,
+      runId: "run-e2e",
+      source: "wire",
+      agent: "claude-code",
+      provider: "anthropic",
+      endpoint: "/v1/messages",
+      request: { headers: [], bodyBytes: enc.encode(requestBody("stash-gone secret AKIAZQ3DRSTUVWXY2345")) },
+      response: {
+        status: 200,
+        headers: [["content-type", "application/json"]],
+        bodyBytes: enc.encode('{"content":[{"type":"text","text":"done"}]}'),
+      },
+      meta: { tsRequest: Date.now(), tsResponse: Date.now(), captureState: "ok" },
+    });
+    const store = Store.openReadOnly(stateDir);
+    const call = store.getCall(id)!;
+    expect(call.scanState).toBe("incomplete");
+    expect(new TextDecoder().decode(call.requestBody!)).toContain("[REDACTION INCOMPLETE");
+    expect(call.responseBody).toBeNull();
+    expect(store.searchLiteral("stash-gone secret")).toEqual([]);
     store.close();
   });
 
