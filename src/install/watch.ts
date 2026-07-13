@@ -171,6 +171,7 @@ export function watchAgent(agent: string, env: WatchEnv, requested: WatchModeReq
       beagleBinary: env.beagleBinary,
       beagleScript: env.beagleScript,
       telemetry: mode === "telemetry",
+      pinWire: mode === "wire" && requested === "wire",
     }),
     { mode: 0o755 },
   );

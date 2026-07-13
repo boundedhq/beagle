@@ -40,6 +40,17 @@ export function claudeAuthMode(
   claudeConfigDir?: string,
 ): "api-key" | "subscription" | "unknown" {
   if (hasApiKeyEnv) return "api-key";
+  // apiKeyHelper in settings.json is Claude Code's env-var-free API-key auth —
+  // without this check, such a user with a STALE oauthAccount record from an
+  // old Claude.ai login would be misread as subscription and silently
+  // downgraded to agent-reported capture.
+  try {
+    const settingsPath = join(claudeConfigDir ?? join(home, ".claude"), "settings.json");
+    const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as { apiKeyHelper?: unknown };
+    if (typeof settings?.apiKeyHelper === "string" && settings.apiKeyHelper.length > 0) return "api-key";
+  } catch {
+    /* no settings.json / unreadable → keep looking */
+  }
   try {
     const path = claudeConfigDir ? join(claudeConfigDir, ".claude.json") : join(home, ".claude.json");
     const raw = JSON.parse(readFileSync(path, "utf8")) as { oauthAccount?: unknown };

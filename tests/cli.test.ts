@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, otelCallsArrivedSince, parseRunArgs, resolveRunMode, runCallsArrived } from "../src/cli/commands";
+import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, interpretAskAnswer, otelCallsArrivedSince, parseRunArgs, resolveRunMode, runCallsArrived } from "../src/cli/commands";
 import { buildRunEnv, AGENTS } from "../src/cli/agents";
 import { Store, type CallRecord } from "../src/core/store/store";
 import { ulid } from "../src/core/store/ulid";
@@ -281,6 +281,17 @@ describe("__hook forwarder safety (Mode B tool-output hook)", () => {
     ]);
     expect(code).toBe(0); // exited on its own (not the 6s kill fallback)
     expect(Date.now() - t0).toBeLessThan(5000); // bounded by the 1.5s stdin deadline + fetch
+  });
+});
+
+describe("interpretAskAnswer (strict — a fumbled keystroke is never remembered)", () => {
+  test("only an unambiguous 1 or 2 counts", () => {
+    expect(interpretAskAnswer("1")).toBe("wire");
+    expect(interpretAskAnswer(" 2 ")).toBe("telemetry");
+    expect(interpretAskAnswer("")).toBeNull(); // blank Enter
+    expect(interpretAskAnswer("yes")).toBeNull();
+    expect(interpretAskAnswer("1)")).toBeNull();
+    expect(interpretAskAnswer("12")).toBeNull();
   });
 });
 

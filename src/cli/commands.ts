@@ -490,6 +490,16 @@ export function resolveRunMode(
   return { mode: "wire", source: "default" };
 }
 
+/** Strict parse of the one-time login question: only an unambiguous 1 or 2
+ *  counts — anything else (empty line, EOF, typo) is null so a fumbled
+ *  keystroke is never remembered as an answer. Exported for tests. */
+export function interpretAskAnswer(line: string): "wire" | "telemetry" | null {
+  const t = line.trim();
+  if (t === "1") return "wire";
+  if (t === "2") return "telemetry";
+  return null;
+}
+
 export async function cmdRun(stateDir: string, agentName: string, rawArgs: string[]): Promise<number> {
   const spec = AGENTS[agentName];
   if (!spec) {
@@ -522,27 +532,47 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
       { telemetry: telemetryFlag, wire: wireFlag },
       cfg.agentRunMode[agentName],
       detectAuthForRun(agentName),
-      Boolean(process.stdin.isTTY),
+      // Never ask through the PATH shim (--real marks it): the user set up
+      // watch precisely to not be interrupted — an unknown login there falls
+      // through to wire + the zero-capture warning. The shim's exec keeps the
+      // terminal's stdin, so a TTY check alone would NOT protect it.
+      Boolean(process.stdin.isTTY) && realOverride === null,
     );
     if (resolved.mode === "ask") {
       // Beagle couldn't tell and we have a terminal: ask ONCE, remember.
-      process.stderr.write(
-        `beagle: how is ${agentName} signed in? (couldn't tell automatically)\n` +
-          `  [1] API key — full-fidelity proxy capture\n` +
-          `  [2] Subscription (Claude.ai / ChatGPT) — the agent reports its own usage\n` +
-          `choice [1/2]: `,
-      );
-      telemetry = readLineSync().trim() === "2";
-      const mode: "wire" | "telemetry" = telemetry ? "telemetry" : "wire";
-      // Route through a running daemon (the config's single writer when up)
-      // so its own next save can't clobber the remembered answer.
-      const agentRunMode = { ...cfg.agentRunMode, [agentName]: mode };
-      const running = await pingDaemon(stateDir);
-      if (running) await controlRequest(running.socketPath, { cmd: "set-config", args: { agentRunMode } });
-      else saveConfig(stateDir, { ...cfg, agentRunMode });
-      process.stderr.write(
-        `beagle: saved — future runs use ${mode}. Change with: beagle config run-mode ${agentName} <wire|telemetry|auto>\n`,
-      );
+      let answer: "wire" | "telemetry" | null = null;
+      for (let attempt = 0; attempt < 2 && answer === null; attempt++) {
+        process.stderr.write(
+          `beagle: how is ${agentName} signed in? (couldn't tell automatically)\n` +
+            `  [1] API key — full-fidelity proxy capture\n` +
+            `  [2] Subscription (Claude.ai / ChatGPT) — the agent reports its own usage\n` +
+            `choice [1/2]: `,
+        );
+        answer = interpretAskAnswer(readLineSync());
+        if (answer === null) process.stderr.write("beagle: please answer 1 or 2.\n");
+      }
+      if (answer === null) {
+        // Invalid/EOF: use wire for THIS run only — a fumbled keystroke must
+        // not become a permanently remembered (and wrong) answer.
+        telemetry = false;
+        process.stderr.write(
+          `beagle: no valid answer — using wire capture for this run only. ` +
+            `Set it with: beagle config run-mode ${agentName} <wire|telemetry>\n`,
+        );
+      } else {
+        telemetry = answer === "telemetry";
+        // Re-read config at save time (the prompt is human-paced — a stale
+        // pre-prompt snapshot could clobber a concurrent save), and route
+        // through a running daemon, the config's single writer when up.
+        const latest = loadConfig(stateDir);
+        const agentRunMode = { ...latest.agentRunMode, [agentName]: answer };
+        const running = await pingDaemon(stateDir);
+        if (running) await controlRequest(running.socketPath, { cmd: "set-config", args: { agentRunMode } });
+        else saveConfig(stateDir, { ...latest, agentRunMode });
+        process.stderr.write(
+          `beagle: saved — future runs use ${answer}. Change with: beagle config run-mode ${agentName} <wire|telemetry|auto>\n`,
+        );
+      }
     } else {
       telemetry = resolved.mode === "telemetry";
       if (telemetry && resolved.source === "detected") {
@@ -691,9 +721,13 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
     } else if (!(await runCallsArrived(stateDir, runId))) {
       // Wire: the big one is a subscription login — its traffic never crosses
       // the proxy, so the run "works" while Beagle sees nothing.
+      const savedWire = loadConfig(stateDir).agentRunMode[agentName] === "wire";
       const alt = spec.telemetry
         ? `  If ${agentName} signs in with a subscription (not an API key), the proxy can't see its traffic —\n` +
-          `  use: beagle run ${agentName} --telemetry   (or: beagle watch ${agentName} --telemetry)\n`
+          `  use: beagle run ${agentName} --telemetry   (or: beagle watch ${agentName} --telemetry)\n` +
+          (savedWire
+            ? `  Note: a saved answer is forcing wire mode — reset it with: beagle config run-mode ${agentName} auto\n`
+            : "")
         : `  Check \`beagle status\` for coverage.\n`;
       warned = true;
       process.stderr.write(

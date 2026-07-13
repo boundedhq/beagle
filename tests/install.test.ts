@@ -284,6 +284,19 @@ describe("claudeAuthMode (login detection for run/watch auto-mode)", () => {
     expect(claudeAuthMode(cHome("not json"), false)).toBe("unknown");
   });
 
+  test("apiKeyHelper in settings.json means API key — even with a stale oauthAccount record", () => {
+    // env-var-free API-key auth: a leftover oauth record must not downgrade
+    // this user to agent-reported capture.
+    const home = mkdtempSync(join(tmpdir(), "beagle-cl-"));
+    writeFileSync(join(home, ".claude.json"), '{"oauthAccount":{"accountUuid":"u"}}');
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    writeFileSync(join(home, ".claude", "settings.json"), '{"apiKeyHelper":"/usr/local/bin/get-key.sh"}');
+    expect(claudeAuthMode(home, false)).toBe("api-key");
+    // empty helper string proves nothing
+    writeFileSync(join(home, ".claude", "settings.json"), '{"apiKeyHelper":""}');
+    expect(claudeAuthMode(home, false)).toBe("subscription");
+  });
+
   test("honors CLAUDE_CONFIG_DIR for the .claude.json location", () => {
     const home = mkdtempSync(join(tmpdir(), "beagle-cl-"));
     const cfgDir = mkdtempSync(join(tmpdir(), "beagle-cl-cfg-"));

@@ -13,6 +13,11 @@ export interface ShimSpec {
   /** Dev only: the entry script `beagleBinary` must run (bun + main.ts). */
   beagleScript?: string;
   telemetry?: boolean;
+  /** Pin wire mode in the shim (user passed an explicit --wire to watch) so
+   *  run-time login detection can't override their stated choice. Auto-chosen
+   *  wire stays unpinned — if the login later changes to a subscription,
+   *  detection self-heals the capture instead of silently losing it. */
+  pinWire?: boolean;
 }
 
 // Every generated shim carries this marker so Beagle can recognize its OWN
@@ -50,7 +55,7 @@ export function shimScript(spec: ShimSpec): string {
   // with no script — every watched invocation would fail.
   const beagle = shQuote(spec.beagleBinary) + (spec.beagleScript ? ` ${shQuote(spec.beagleScript)}` : "");
   const real = shQuote(spec.realBinary);
-  const mode = spec.telemetry ? " --telemetry" : "";
+  const mode = spec.telemetry ? " --telemetry" : spec.pinWire ? " --wire" : "";
   const how = spec.telemetry
     ? "# Watches via the agent's own telemetry (Mode B — subscription login),"
     : "# Redirects this agent's model traffic through Beagle,";

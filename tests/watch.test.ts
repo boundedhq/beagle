@@ -154,14 +154,28 @@ describe("watchAgent — telemetry mode (subscription logins)", () => {
     expect(plan).toContain("--telemetry"); // the hint names the escape hatch
   });
 
-  test("--wire overrides auto-detection", () => {
+  test("--wire overrides auto-detection AND pins wire in the shim", () => {
     const env = makeEnv({
       resolveReal: () => "/opt/homebrew/bin/codex",
       detectSubscription: () => true, // would auto-pick telemetry
     });
     const r = watchAgent("codex", env, "wire");
     expect(r.applied).toBe(true);
-    expect(readFileSync(join(env.shimDir, "codex"), "utf8")).not.toContain("--telemetry");
+    const shim = readFileSync(join(env.shimDir, "codex"), "utf8");
+    expect(shim).not.toContain("--telemetry");
+    // the user's explicit choice must survive run-time login detection
+    expect(shim).toContain("run codex --wire --real");
+  });
+
+  test("auto-resolved wire is NOT pinned — run-time detection can self-heal a login change", () => {
+    const env = makeEnv({
+      resolveReal: () => "/opt/homebrew/bin/codex",
+      detectSubscription: () => false, // auto says wire today
+    });
+    watchAgent("codex", env); // auto mode
+    const shim = readFileSync(join(env.shimDir, "codex"), "utf8");
+    expect(shim).not.toContain("--wire");
+    expect(shim).not.toContain("--telemetry");
   });
 
   test("re-watching to switch modes rewrites the shim and updates (not duplicates) the manifest", () => {
