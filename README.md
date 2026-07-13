@@ -98,7 +98,10 @@ under the proxy, and `beagle watch` shims its PATH entry:
   to your agent's config. One side effect to know about: if your agent already
   exports its own OpenTelemetry data (say, to a company collector), Beagle's
   per-run settings redirect that export to the local receiver for the duration
-  of the run.
+  of the run. Subscriptions work with always-on watching too:
+  `beagle watch claude --telemetry` (or `codex`) installs a shim that runs
+  every invocation in telemetry mode — and plain `beagle watch codex` picks
+  telemetry automatically when it sees a ChatGPT login (`--wire` to override).
 - **opencode** — no base-URL variable; its endpoint lives in a config file.
   For the duration of the run Beagle hands it a **temporary config file of
   its own** (your real settings merged in, plus the proxy address).

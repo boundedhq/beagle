@@ -361,13 +361,13 @@ export class Daemon {
           responseId: call.convId,
         });
       }
-      // redact-on-capture (§4/R11): the self-reported path holds the same
-      // invariant as the wire path. One asymmetry: a wire request carries the
-      // full history, so an echoed secret always co-occurs with a scanned
-      // request-side copy — but Mode B batch-splitting can deliver a
-      // response-only call. Scan the response too, for redaction only:
-      // inbound content never alerts (the outbound leak fired with the
-      // batch that carried the prompt).
+      // redact-on-capture (§4/R11): Mode B rows must not be a redaction hole
+      // just because they arrived via the receiver. One asymmetry with the
+      // wire path: a wire request carries the full history, so an echoed
+      // secret always co-occurs with a scanned request-side copy — but Mode B
+      // batch-splitting can deliver a response-only call. Scan the response
+      // too, for redaction only: inbound content never alerts (the outbound
+      // leak fired with the batch that carried the prompt).
       const respScan =
         this.config.redactOnCapture && call.response.bodyBytes?.byteLength
           ? await this.scanHost.scan(call.response.bodyBytes, {})
@@ -383,8 +383,9 @@ export class Daemon {
         : null;
       let searchText =
         (call.request.messages?.map((m) => m.content).join("\n") ?? "") + "\n" + (call.response.text ?? "");
-      // searchText derives from the display messages, not the scanned bytes
-      // (offsets don't apply) — scrub it by value, like the summary.
+      // searchText and summary both derive from the display messages (already
+      // flattened plain text, not raw JSON), so both scrub by value — not by
+      // the scanned-byte offsets, which don't index this text.
       if (redaction) searchText = redaction.heldOut ? "" : redactValuesInText(searchText, redaction.values);
       const summary = redaction?.heldOut
         ? "[REDACTION INCOMPLETE: content withheld]"

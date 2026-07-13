@@ -20,6 +20,7 @@
 // omits tool RESULT content, so for it a secret present only in a tool's
 // output needs the PostToolUse hook below; Codex's export carries tool output
 // inline (see the codex section).
+import { readFileSync } from "node:fs";
 import type { Call } from "../core/call";
 import { ulid } from "../core/store/ulid";
 
@@ -75,7 +76,7 @@ function nano(v: string | number | undefined): number | undefined {
 }
 
 // The record's event time. Codex sets timeUnixNano to literal "0" on every
-// record (verified live, 0.44.x) and puts the real time in
+// record (verified live, codex 0.144.x) and puts the real time in
 // observedTimeUnixNano — taking the 0 at face value dated every codex row
 // 1970-01-01 and zeroed its ulid. Prefer the event time, then the collector's
 // observed time, then a span's start time.
@@ -252,7 +253,7 @@ export function mapOtlpLogsToCalls(payload: unknown, ctx: OtlpContext): OtelCall
 // Codex on a "Sign in with ChatGPT" login can't be wire-redirected — its
 // built-in `openai` provider is locked and OPENAI_BASE_URL doesn't reach
 // inference. But Codex ships its own OpenTelemetry exporter, and (verified live
-// against Codex 0.44.x, scope "codex_otel.log_only") its `codex.*` log events
+// against Codex 0.144.x, scope "codex_otel.log_only") its `codex.*` log events
 // carry the whole OUTBOUND leak surface in ONE stream — no PostToolUse hook
 // needed (unlike Claude Code, whose export omits tool results):
 //   event.name=codex.user_prompt → prompt (verbatim), conversation.id, model
@@ -522,22 +523,60 @@ export function buildHookSettings(command: string): Record<string, unknown> {
   return { hooks: { PostToolUse: [{ hooks: [{ type: "command", command }] }] } };
 }
 
+/** Merge Beagle's tool-output hook into a USER-supplied `--settings` value
+ *  (a file path or an inline JSON string — Claude Code accepts both). The
+ *  user's settings pass through verbatim; Beagle's hook is APPENDED to their
+ *  PostToolUse list. Unreadable/invalid input degrades to just the hook —
+ *  capture must not fail open because a user file was malformed. */
+export function mergeHookIntoSettings(userValue: string, command: string): Record<string, unknown> {
+  let user: Record<string, unknown> = {};
+  try {
+    const raw = userValue.trim().startsWith("{") ? userValue : readFileSync(userValue, "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) user = parsed as Record<string, unknown>;
+  } catch {
+    /* fall through: hook-only settings */
+  }
+  const hooks =
+    user.hooks && typeof user.hooks === "object" && !Array.isArray(user.hooks)
+      ? (user.hooks as Record<string, unknown>)
+      : {};
+  const ptu = Array.isArray(hooks.PostToolUse) ? hooks.PostToolUse : [];
+  return {
+    ...user,
+    hooks: { ...hooks, PostToolUse: [...ptu, { hooks: [{ type: "command", command }] }] },
+  };
+}
+
 // Vendor-shipped knobs only (R2 bright line): env vars, never patching. All
-// verified honored against Claude Code 2.1.193 in the Phase-0 spike; the
-// content flags surface user prompts and tool INPUTS (not tool results — the
-// hook above closes that gap).
-export function buildOtelEnv(endpoint: string, runToken: string): Record<string, string> {
+// verified honored against Claude Code 2.1.193 (content flags in the Phase-0
+// spike; the signal-specific OTLP vars verified live with a hostile generic
+// var alongside). The content flags surface user prompts and tool INPUTS (not
+// tool results — the hook above closes that gap).
+//
+// SIGNAL-SPECIFIC OTLP vars, same rationale as buildCodexOtelEnv: per the OTel
+// spec they beat the generic vars, so a user/org shell exporting
+// OTEL_EXPORTER_OTLP_LOGS_ENDPOINT to a company collector can't silently
+// divert the export away from Beagle — and Beagle in turn leaves the GENERIC
+// vars untouched, so the org's own metrics/traces pipelines keep working while
+// the agent is watched. Note the spec's shape difference: the signal-specific
+// endpoint is the FULL URL (…/v1/logs), not a base. `undefined` entries mean
+// "remove from the child env" (Claude's exporter would try gzip the loopback
+// receiver doesn't speak).
+export function buildOtelEnv(endpoint: string, runToken: string): Record<string, string | undefined> {
   return {
     CLAUDE_CODE_ENABLE_TELEMETRY: "1",
     OTEL_LOGS_EXPORTER: "otlp",
-    OTEL_EXPORTER_OTLP_PROTOCOL: "http/json",
-    OTEL_EXPORTER_OTLP_ENDPOINT: endpoint,
+    OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: "http/json",
+    OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: `${endpoint}/v1/logs`,
+    OTEL_EXPORTER_OTLP_LOGS_HEADERS: `x-beagle-run=${runToken}`,
     OTEL_LOG_USER_PROMPTS: "1",
     OTEL_LOG_TOOL_DETAILS: "1",
     OTEL_LOG_TOOL_CONTENT: "1",
     // Batch delay down so the alert lag (Mode B is batched, not wire-instant)
     // is ~1s, not the default tens of seconds.
     OTEL_BLRP_SCHEDULE_DELAY: "1000",
-    OTEL_EXPORTER_OTLP_HEADERS: `x-beagle-run=${runToken}`,
+    OTEL_EXPORTER_OTLP_COMPRESSION: undefined,
+    OTEL_EXPORTER_OTLP_LOGS_COMPRESSION: undefined,
   };
 }

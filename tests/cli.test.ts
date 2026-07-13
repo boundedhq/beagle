@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cmdLeaks, cmdSearch, cmdShow, cmdStatus } from "../src/cli/commands";
+import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, otelCallsArrivedSince, runCallsArrived } from "../src/cli/commands";
 import { buildRunEnv, AGENTS } from "../src/cli/agents";
 import { Store, type CallRecord } from "../src/core/store/store";
 import { ulid } from "../src/core/store/ulid";
@@ -283,3 +283,80 @@ describe("__hook forwarder safety (Mode B tool-output hook)", () => {
     expect(Date.now() - t0).toBeLessThan(5000); // bounded by the 1.5s stdin deadline + fetch
   });
 });
+
+describe("runCallsArrived (the wire zero-capture tripwire's predicate)", () => {
+  test("true as soon as a row exists for the runId; false when none within the deadline", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "beagle-trip-"));
+    const store = Store.open(stateDir);
+    store.insertCall({
+      id: ulid(), sessionId: "s1", runId: "run-covered", source: "wire", agent: "codex",
+      provider: "openai", endpoint: "/v1/responses", tsRequest: Date.now(),
+      scanState: "ok", captureState: "ok", sessionTier: "run",
+      requestBody: null, requestHeaders: null, responseBody: null,
+      responseHeaders: null, sseRaw: null, searchText: "x",
+    });
+    store.close();
+    expect(await runCallsArrived(stateDir, "run-covered", 500)).toBe(true);
+    // a different runId has zero rows → tripwire condition
+    expect(await runCallsArrived(stateDir, "run-empty", 500)).toBe(false);
+  });
+
+  test("an absent store never cries wolf", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "beagle-trip-"));
+    expect(await runCallsArrived(stateDir, "any", 300)).toBe(true);
+  });
+
+  test("hook rows never satisfy the EXPORT tripwire — a dead exporter can't hide behind tool traffic", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "beagle-trip-"));
+    const store = Store.open(stateDir);
+    // only a HOOK row lands (PostToolUse works, OTel export dead/diverted)
+    store.insertCall({
+      id: ulid(), sessionId: "s1", runId: "otel", source: "otel", agent: "claude",
+      provider: "anthropic", endpoint: "otel:tool_output:Bash", tsRequest: Date.now(),
+      scanState: "ok", captureState: "ok", sessionTier: "run",
+      requestBody: null, requestHeaders: null, responseBody: null,
+      responseHeaders: null, sseRaw: null, searchText: "x",
+    });
+    store.close();
+    expect(await otelCallsArrivedSince(stateDir, Date.now() - 1000, 400)).toBe(false);
+    // an EXPORT row (the turn) does satisfy it
+    const s2 = Store.open(stateDir);
+    s2.insertCall({
+      id: ulid(), sessionId: "s1", runId: "otel", source: "otel", agent: "claude",
+      provider: "anthropic", endpoint: "otel:claude_code.turn", tsRequest: Date.now(),
+      scanState: "ok", captureState: "ok", sessionTier: "run",
+      requestBody: null, requestHeaders: null, responseBody: null,
+      responseHeaders: null, sseRaw: null, searchText: "y",
+    });
+    s2.close();
+    expect(await otelCallsArrivedSince(stateDir, Date.now() - 1000, 400)).toBe(true);
+  });
+
+  test("otelCallsArrivedSince is timestamp-based — old rows don't count, deletions can't fake a zero", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "beagle-trip-"));
+    const store = Store.open(stateDir);
+    const old = Date.now() - 3_600_000; // an hour-old otel row from a PREVIOUS run
+    store.insertCall({
+      id: ulid(old), sessionId: "s1", runId: "otel", source: "otel", agent: "codex",
+      provider: "openai", endpoint: "otel:codex:user_prompt", tsRequest: old,
+      scanState: "ok", captureState: "ok", sessionTier: "run",
+      requestBody: null, requestHeaders: null, responseBody: null,
+      responseHeaders: null, sseRaw: null, searchText: "old",
+    });
+    store.close();
+    // a run that started NOW must not be satisfied by the stale row
+    expect(await otelCallsArrivedSince(stateDir, Date.now(), 400)).toBe(false);
+    // …but a row landing within the run window (with clock margin) counts
+    const store2 = Store.open(stateDir);
+    store2.insertCall({
+      id: ulid(), sessionId: "s1", runId: "otel", source: "otel", agent: "codex",
+      provider: "openai", endpoint: "otel:codex:user_prompt", tsRequest: Date.now(),
+      scanState: "ok", captureState: "ok", sessionTier: "run",
+      requestBody: null, requestHeaders: null, responseBody: null,
+      responseHeaders: null, sseRaw: null, searchText: "fresh",
+    });
+    store2.close();
+    expect(await otelCallsArrivedSince(stateDir, Date.now() - 1000, 400)).toBe(true);
+  });
+});
+
