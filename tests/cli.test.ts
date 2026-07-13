@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, interpretAskAnswer, otelCallsArrivedSince, parseRunArgs, resolveRunMode, runCallsArrived } from "../src/cli/commands";
+import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, interpretAskAnswer, otelCallsArrivedSince, parseRunArgs, readCodexApiKey, resolveRunMode, runCallsArrived } from "../src/cli/commands";
 import { buildRunEnv, AGENTS } from "../src/cli/agents";
 import { Store, type CallRecord } from "../src/core/store/store";
 import { ulid } from "../src/core/store/ulid";
@@ -289,6 +289,19 @@ describe("__hook forwarder safety (Mode B tool-output hook)", () => {
     ]);
     expect(code).toBe(0); // exited on its own (not the 6s kill fallback)
     expect(Date.now() - t0).toBeLessThan(5000); // bounded by the 1.5s stdin deadline + fetch
+  });
+});
+
+describe("readCodexApiKey (fail-open: supply codex's key from auth.json)", () => {
+  test("reads OPENAI_API_KEY from $CODEX_HOME/auth.json; null when absent", () => {
+    const h = mkdtempSync(join(tmpdir(), "beagle-cxk-"));
+    writeFileSync(join(h, "auth.json"), '{"auth_mode":"apikey","OPENAI_API_KEY":"sk-fromfile"}');
+    expect(readCodexApiKey(h)).toBe("sk-fromfile");
+    writeFileSync(join(h, "auth.json"), '{"auth_mode":"apikey"}'); // no key field
+    expect(readCodexApiKey(h)).toBeNull();
+    writeFileSync(join(h, "auth.json"), "not json");
+    expect(readCodexApiKey(h)).toBeNull();
+    expect(readCodexApiKey(mkdtempSync(join(tmpdir(), "beagle-empty-")))).toBeNull(); // no file
   });
 });
 

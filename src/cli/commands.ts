@@ -500,6 +500,21 @@ export function interpretAskAnswer(line: string): "wire" | "telemetry" | null {
   return null;
 }
 
+/** Read codex's stored API key from auth.json (honoring $CODEX_HOME) so the
+ *  custom-provider redirect can authenticate when the key isn't in the env.
+ *  This is the ONE place Beagle reads the key value from disk — the same key
+ *  it already proxies and scrubs from storage; it is passed only to the child
+ *  codex process's env, never logged or persisted. Returns null if absent. */
+export function readCodexApiKey(codexHome: string | undefined): string | null {
+  try {
+    const dir = codexHome || join(homedir(), ".codex");
+    const raw = JSON.parse(readFileSync(join(dir, "auth.json"), "utf8")) as { OPENAI_API_KEY?: unknown };
+    return typeof raw?.OPENAI_API_KEY === "string" && raw.OPENAI_API_KEY.length > 0 ? raw.OPENAI_API_KEY : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function cmdRun(stateDir: string, agentName: string, rawArgs: string[]): Promise<number> {
   const spec = AGENTS[agentName];
   if (!spec) {
@@ -688,11 +703,29 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
       modeEnv = {};
     } else if (spec.wireArgs) {
       // Arg-driven redirect (codex): it ignores OPENAI_BASE_URL, so prepend
-      // `-c` flags defining a custom provider pointed at the proxy. The user's
-      // OPENAI_API_KEY (read by the provider's env_key) rides through unchanged;
-      // Beagle scrubs it before storing.
-      finalArgs = [...spec.wireArgs(runBaseUrl(daemon.proxyPort, runId)), ...agentArgs];
-      modeEnv = {};
+      // `-c` flags defining a custom provider pointed at the proxy. The custom
+      // provider authenticates via env_key=OPENAI_API_KEY.
+      //
+      // Fail-open guard (R2, §8 — Beagle must never break the agent): if the
+      // key lives ONLY in codex's auth.json (the `codex login --api-key` flow,
+      // no env var), the custom provider errors with "Missing environment
+      // variable" and codex dies. So supply the key from the same auth.json we
+      // read for detection — the key Beagle already proxies, and scrubs before
+      // storing. If there's no key anywhere, don't redirect at all: run codex
+      // direct (uncaptured, warned) rather than break it.
+      const key = process.env.OPENAI_API_KEY || readCodexApiKey(process.env.CODEX_HOME);
+      if (key) {
+        finalArgs = [...spec.wireArgs(runBaseUrl(daemon.proxyPort, runId)), ...agentArgs];
+        modeEnv = process.env.OPENAI_API_KEY ? {} : { OPENAI_API_KEY: key };
+      } else {
+        // No key to authenticate the redirect — leave codex untouched.
+        finalArgs = agentArgs;
+        modeEnv = {};
+        process.stderr.write(
+          `beagle ▲ ${agentName} has no OPENAI_API_KEY (env or ~/.codex/auth.json) — running WITHOUT capture.\n` +
+            `  Export OPENAI_API_KEY (or 'codex login --api-key') to enable proxy capture.\n`,
+        );
+      }
     } else {
       modeEnv = buildRunEnv(agentName, daemon.proxyPort, runId);
     }
