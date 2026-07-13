@@ -78,41 +78,44 @@ under the proxy, and `beagle watch` shims its PATH entry:
 | opencode | runs under the local proxy (via a temporary Beagle-written config) | ✓ wire (full fidelity) |
 | pi | runs under the local proxy (via a one-run Beagle extension, `pi -e`) | ✓ wire (full fidelity) |
 
-**How the wrapping works.** Claude Code and Codex honor a standard
-environment variable that changes where they send their API traffic;
-`beagle run` sets it to the local proxy for that run and nothing else.
-opencode doesn't read such a variable — its endpoint lives in a config
-file — so for the duration of the run Beagle hands it a **temporary config
-file of its own** (your real settings merged in, plus the proxy address).
-pi has the cleanest knob of all: its `-e` flag loads an extension for one
-run, so Beagle passes a **generated three-line extension** that re-points
-pi's provider at the proxy — no config or auth files are even read. In
-every case your real config files are never modified, and the generated
-file is deleted when the run ends.
+**How the wrapping works.**
 
-**Subscription logins are different.** A Claude.ai (Pro/Max) login only
-works over Anthropic's own client-server connection, so Beagle stays off
-that wire entirely. Instead, `beagle run claude --telemetry` switches on
-Claude Code's **built-in usage reporting** (its vendor-shipped OpenTelemetry
-export) and receives those reports on a local port. That means you see what
-Claude Code *says* it sent rather than the bytes themselves — which is why
-those rows are badged **agent** (*agent-reported*) in the dashboard instead
-of **✓ wire**. This is **validated against Claude Code 2.1.193**: it
-captures your prompts, the assistant's responses, tool inputs, **and tool
-outputs** — so a secret that appears only in a file the agent reads (the
-most common accidental leak) is caught too. Claude Code's telemetry omits
-tool-result content, so Beagle also registers a `PostToolUse` hook (via the
-vendor's own `--settings`, merged with your hooks, never replacing them)
-that forwards each tool result to the local receiver for scanning. It's
-still a self-report, so it differs from wire capture in a few honest ways:
-reports are batched (alerts lag seconds, not wire-instant), the tool-output
-hook is best-effort (a dropped report is a miss, never a block), and it
-relies on Claude Code's hook system (which `--bare` turns off). Details and
-the reproduction: [Phase-0 spike results](docs/mode-b-spike.md). Codex on a "Sign in with
-ChatGPT" login is designed to work as a pure passthrough (Beagle forwards
-the client's own login unchanged and never injects anything), but that path
-is **still pending validation** — until then, API-key mode is the supported
-way to watch Codex.
+- **Claude Code / Codex (API key)** — both honor a standard environment
+  variable that changes where they send their API traffic; `beagle run`
+  sets it to the local proxy for that run and nothing else.
+- **Claude Code / Codex (subscription)** — subscription logins are
+  different. A Claude.ai (Pro/Max) login only works over Anthropic's own
+  client-server connection, so Beagle stays off that wire entirely:
+  `beagle run claude --telemetry` switches on Claude Code's **built-in
+  usage reporting** (its vendor-shipped OpenTelemetry export) and receives
+  those reports on a local port. You see what Claude Code *says* it sent
+  rather than the bytes themselves — hence the **agent** badge instead of
+  **✓ wire**. This is **validated against Claude Code 2.1.193**: it captures
+  your prompts, the assistant's responses, tool inputs, **and tool outputs**
+  — so a secret that appears only in a file the agent reads (the most common
+  accidental leak) is caught too. Claude Code's telemetry omits tool-result
+  content, so Beagle also registers a `PostToolUse` hook (via the vendor's
+  own `--settings`, merged with your hooks, never replacing them) that
+  forwards each tool result to the local receiver for scanning. It's still a
+  self-report, so it differs from wire capture in a few honest ways: reports
+  are batched (alerts lag seconds, not wire-instant), the tool-output hook
+  is best-effort (a dropped report is a miss, never a block), and it relies
+  on Claude Code's hook system (which `--bare` turns off). Details and the
+  reproduction: [Phase-0 spike results](docs/mode-b-spike.md). Codex on a
+  "Sign in with ChatGPT" login is designed to work as a pure passthrough
+  (Beagle forwards the client's own login unchanged and never injects
+  anything), but that path is **still pending validation** — until then,
+  API-key mode is the supported way to watch Codex.
+- **opencode** — no base-URL variable; its endpoint lives in a config file.
+  For the duration of the run Beagle hands it a **temporary config file of
+  its own** (your real settings merged in, plus the proxy address).
+- **pi** — the cleanest knob of all: its `-e` flag loads an extension for
+  one run, so Beagle passes a **generated three-line extension** that
+  re-points pi's provider at the proxy — no config or auth files are even
+  read.
+
+In every case your real config files are never modified, and anything
+Beagle generates is deleted when the run ends.
 
 Desktop apps, IDE extensions, and web UIs launch their own processes and
 don't inherit either mechanism, so their traffic is **not** captured in v1 —
