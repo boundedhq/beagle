@@ -1,7 +1,8 @@
 import { join } from "node:path";
 
 // The four v1 CLI agents (R2) and their redirect knobs. claude/codex honor a
-// base-URL env var; opencode is config-driven via a Beagle-owned config file.
+// base-URL env var; opencode is config-driven via a Beagle-owned config file;
+// pi loads a Beagle-owned extension via its per-run `-e` flag.
 export interface ConfigRedirect {
   /** Env var that overrides the config-file location (e.g. OPENCODE_CONFIG). */
   configEnv: string;
@@ -12,6 +13,13 @@ export interface ConfigRedirect {
   realConfigCandidates: (home: string) => string[];
 }
 
+export interface ExtensionRedirect {
+  /** CLI flag that loads an extension file for one run (pi: `-e`). */
+  flag: string;
+  /** Provider id whose baseUrl the generated extension re-points. */
+  baseUrlProvider: string;
+}
+
 export interface AgentSpec {
   command: string;
   provider: string;
@@ -19,6 +27,7 @@ export interface AgentSpec {
   authLocation: string;
   baseUrlEnv?: string;
   config?: ConfigRedirect;
+  extension?: ExtensionRedirect;
   extraHeaders?: Array<[string, string]>;
 }
 
@@ -58,9 +67,12 @@ export const AGENTS: Record<string, AgentSpec> = {
     provider: "openai",
     upstream: "https://api.openai.com",
     authLocation: "authorization",
-    // pi is config-driven, but its exact config-override knob is not yet
-    // confirmed by the Phase-0 spike; left without a `config` descriptor so
-    // `beagle run pi` refuses honestly rather than guessing the env var.
+    // Verified against pi's docs (badlogic/pi-mono, coding-agent):
+    // `pi -e <file.ts>` loads an extension for one run, and
+    // `pi.registerProvider("openai", { baseUrl })` re-points the builtin
+    // provider while keeping all its models. No config or auth files are
+    // touched — the least invasive redirect of the four agents.
+    extension: { flag: "-e", baseUrlProvider: "openai" },
   },
 };
 

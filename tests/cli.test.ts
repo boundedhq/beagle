@@ -181,9 +181,10 @@ describe("run env mapping", () => {
     expect(buildRunEnv("opencode", 1, "x")).toEqual({});
   });
 
-  test("pi has no confirmed config mechanism yet (spike-pending)", () => {
+  test("pi is extension-driven: -e flag re-points the openai provider", () => {
     expect(AGENTS.pi!.baseUrlEnv).toBeUndefined();
     expect(AGENTS.pi!.config).toBeUndefined();
+    expect(AGENTS.pi!.extension).toEqual({ flag: "-e", baseUrlProvider: "openai" });
   });
 });
 
@@ -206,4 +207,36 @@ describe("config-driven run redirect (opencode)", () => {
     expect(merged.provider.openai.options.apiKey).toBe("sk-mine"); // preserved
     expect(merged.theme).toBe("dark"); // preserved
   });
+});
+
+describe("pi extension redirect (run-level)", () => {
+  test("run pi injects -e <beagle extension> before user args, deletes it after", async () => {
+    const { existsSync, readFileSync, writeFileSync, chmodSync } = await import("node:fs");
+    const stateDir = mkdtempSync(join(tmpdir(), "beagle-pi-"));
+    // A faithful argv printer as the fake "agent". NOT /bin/echo: GNU echo
+    // eats "-e" as its own escape flag (BSD echo prints it), which is exactly
+    // the argument this test needs to see.
+    const fakeAgent = join(stateDir, "argv-printer.sh");
+    writeFileSync(fakeAgent, '#!/bin/sh\nprintf "%s\\n" "$@"\n');
+    chmodSync(fakeAgent, 0o755);
+    const run = Bun.spawnSync(
+      ["bun", join(import.meta.dir, "..", "src", "cli", "main.ts"),
+       "run", "pi", "--real", fakeAgent, "--", "user-arg"],
+      { env: { ...process.env, BEAGLE_STATE_DIR: stateDir } },
+    );
+    const argv = run.stdout.toString().trim().split("\n");
+    expect(argv[0]).toBe("-e"); // beagle's flag first
+    expect(argv[1]).toMatch(/agent-config\/pi-[0-9a-f-]+\.ts$/); // per-RUN path (concurrent runs must not collide)
+    expect(argv[2]).toBe("user-arg"); // user args after
+    // the Beagle-owned extension is deleted once the agent exits
+    const { readdirSync } = await import("node:fs");
+    expect(readdirSync(join(stateDir, "agent-config"))).toEqual([]);
+
+    // reap the auto-started ephemeral daemon
+    try {
+      const info = JSON.parse(readFileSync(join(stateDir, "daemon.json"), "utf8")) as { socketPath: string };
+      const { controlRequest } = await import("../src/daemon/control");
+      await controlRequest(info.socketPath, { cmd: "shutdown" });
+    } catch { /* already gone */ }
+  }, 20_000);
 });
