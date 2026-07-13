@@ -39,6 +39,26 @@ export interface AgentSpec {
    *  PostToolUse hook for tool output, `codex` via `-c` config flags (its export
    *  carries tool output natively). */
   telemetry?: "claude" | "codex";
+  /** Wire redirect via prepended CLI args instead of a base-URL env var, for an
+   *  agent that ignores the env var (codex). Given the per-run proxy URL,
+   *  returns the argv to inject before the user's own args. */
+  wireArgs?: (baseUrl: string) => string[];
+}
+
+/** Codex ignores OPENAI_BASE_URL and refuses to override its built-in `openai`
+ *  provider, so wire capture needs a CUSTOM provider pointed at the proxy
+ *  (verified live: codex 0.144.x POSTs to <base_url>/responses). env_key reads
+ *  the user's own OPENAI_API_KEY (Beagle scrubs it before storing); the run URL
+ *  carries no /v1 — codex appends /responses and the proxy prepends the
+ *  upstream's /v1. */
+export function buildCodexWireArgs(baseUrl: string): string[] {
+  return [
+    "-c", 'model_provider="beagle"',
+    "-c", 'model_providers.beagle.name="beagle"',
+    "-c", `model_providers.beagle.base_url="${baseUrl}"`,
+    "-c", 'model_providers.beagle.env_key="OPENAI_API_KEY"',
+    "-c", 'model_providers.beagle.wire_api="responses"',
+  ];
 }
 
 export const AGENTS: Record<string, AgentSpec> = {
@@ -53,13 +73,14 @@ export const AGENTS: Record<string, AgentSpec> = {
   codex: {
     command: "codex",
     provider: "openai",
-    // codex's OPENAI_BASE_URL default is https://api.openai.com/v1 and it
-    // appends only /responses — the /v1 must live in the upstream.
+    // codex appends /responses to the custom provider's base_url — the /v1
+    // lives in the upstream, which the proxy prepends.
     upstream: "https://api.openai.com/v1",
     authLocation: "authorization",
-    baseUrlEnv: "OPENAI_BASE_URL",
-    // Codex on a ChatGPT login can't be wire-redirected (built-in openai
-    // provider is locked), but --telemetry captures it via its own OTel export.
+    // NOT baseUrlEnv: codex ignores OPENAI_BASE_URL (verified live). Wire mode
+    // (API-key login) redirects via a custom provider; a ChatGPT login can't
+    // be wire-redirected at all, so --telemetry captures it via OTel instead.
+    wireArgs: buildCodexWireArgs,
     telemetry: "codex",
   },
   opencode: {

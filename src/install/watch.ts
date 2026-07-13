@@ -50,7 +50,7 @@ function wireSupported(agent: string): boolean {
   const spec = AGENTS[agent];
   // The shim execs `beagle run <agent>`, so anything cmdRun can redirect is
   // shimmable: env-base-URL, config-driven, or extension-driven agents.
-  return Boolean(spec && (spec.baseUrlEnv || spec.config || spec.extension));
+  return Boolean(spec && (spec.baseUrlEnv || spec.config || spec.extension || spec.wireArgs));
 }
 
 function telemetrySupported(agent: string): boolean {
