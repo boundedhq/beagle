@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/core/store/store";
-import { redactBody, redactValues, redactionPlaceholder } from "../src/transform/redact";
+import { redactBody, redactValues, redactValuesInText, redactionPlaceholder } from "../src/transform/redact";
 import { quarantineCorruptDb } from "../src/core/store/quarantine";
 import type { Finding } from "../src/core/scanner/engine";
 
@@ -45,6 +45,13 @@ describe("redact-on-capture (R11)", () => {
     const resp = enc("the word key appears often, key key key");
     const out = redactValues(resp, [{ value: "key", type: "x" }]);
     expect(dec(out!)).toBe("the word key appears often, key key key");
+  });
+
+  test("redactValuesInText scrubs derived text (summary, search index) by value", () => {
+    const secret = "AKIAZQ3DRSTUVWXY2345";
+    const out = redactValuesInText(`my key ${secret} leaked`, [{ value: secret, type: "aws-access-key-id" }]);
+    expect(out).not.toContain(secret);
+    expect(out).toContain("[REDACTED:aws-access-key-id:");
   });
 
   test("placeholder is stable for the same secret, distinct per type", () => {

@@ -11,7 +11,7 @@ import type { AlertEvent } from "../src/core/alert/engine";
 // Claude Code's real Mode-B export (event schema, verified in the Phase-0
 // spike): a turn is a user_prompt + api_request + assistant_response sharing
 // session.id/prompt.id. The run token rides the HTTP header, not an attribute.
-function otlpBody(_token: string, prompt: string, sessionId = "otel-conv-1") {
+function otlpBody(_token: string, prompt: string, sessionId = "otel-conv-1", response: string | null = "acknowledged") {
   const ev = (name: string, attrs: Record<string, string | number>) => ({
     timeUnixNano: String(Date.now() * 1e6),
     body: { stringValue: `claude_code.${name}` },
@@ -33,7 +33,7 @@ function otlpBody(_token: string, prompt: string, sessionId = "otel-conv-1") {
         logRecords: [
           ev("user_prompt", { prompt }),
           ev("api_request", { model: "claude-sonnet-5", input_tokens: 50, output_tokens: 4 }),
-          ev("assistant_response", { model: "claude-sonnet-5", response: "acknowledged" }),
+          ...(response === null ? [] : [ev("assistant_response", { model: "claude-sonnet-5", response })]),
         ],
       }],
     }],
@@ -90,6 +90,28 @@ describe("Mode B end-to-end through the daemon", () => {
     expect(alerts[0]!.title).toContain("aws-access-key-id");
     const store = Store.openReadOnly(stateDir);
     expect(listLeakEvents(store).length).toBe(1);
+    store.close();
+  });
+
+  test("redact-on-capture scrubs Mode B body, search text, and summary", async () => {
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    // No assistant_response in the batch: the summary falls back to the raw
+    // prompt line — exactly where the secret sits.
+    await post(otlpBody(token, "my key AKIAZQ3DRSTUVWXY2345 leaked", "otel-conv-r", null));
+    await Bun.sleep(150);
+    const store = Store.openReadOnly(stateDir);
+    // the leak event still exists (audit value kept)...
+    expect(listLeakEvents(store).length).toBe(1);
+    // ...but the raw secret is gone from the body, the index, and the summary
+    expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
+    const hit = store.searchLiteral("my key")[0]!;
+    const call = store.getCall(hit.callId)!;
+    expect(call.redacted).toBe(true);
+    const body = new TextDecoder().decode(call.requestBody!);
+    expect(body).not.toContain("AKIAZQ3DRSTUVWXY2345");
+    expect(body).toContain("[REDACTED:aws-access-key-id:");
+    expect(call.summary).not.toContain("AKIAZQ3DRSTUVWXY2345");
+    expect(call.summary).toContain("[REDACTED:aws-access-key-id:");
     store.close();
   });
 

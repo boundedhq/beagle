@@ -11,7 +11,7 @@ import type { AlertEvent } from "../src/core/alert/engine";
 import { createServer, type Server } from "node:net";
 
 // fake upstream that replies with a fixed Anthropic-ish JSON body
-function fakeUpstream(): Promise<{ server: Server; port: number; seen: string[] }> {
+function fakeUpstream(replyBody?: string): Promise<{ server: Server; port: number; seen: string[] }> {
   const seen: string[] = [];
   const server = createServer((sock) => {
     let buf = "";
@@ -24,7 +24,7 @@ function fakeUpstream(): Promise<{ server: Server; port: number; seen: string[] 
       if (buf.length < need) return;
       seen.push(buf.slice(0, need));
       buf = "";
-      const body = JSON.stringify({
+      const body = replyBody ?? JSON.stringify({
         model: "claude-sonnet-5",
         content: [{ type: "text", text: "done!" }],
         usage: { input_tokens: 9, output_tokens: 3 },
@@ -284,6 +284,50 @@ describe("Daemon end-to-end", () => {
     const full = store.getCall(anyEx!.id)!;
     expect(new TextDecoder().decode(full.requestBody!)).toContain("[REDACTED:aws-access-key-id:");
     store.close();
+  });
+
+  // The summary derives from the same raw messages the body redaction already
+  // scrubbed — it must not carry the secret into the always-visible feed,
+  // `beagle show`, or the viewer.
+  async function silentRun(runId: string): Promise<Awaited<ReturnType<typeof fakeUpstream>>> {
+    // A reply with no text: buildSummary falls back to the last user message —
+    // the line that carries the secret.
+    const silent = await fakeUpstream(JSON.stringify({ model: "claude-sonnet-5", content: [], usage: {} }));
+    await controlRequest(daemon.socketPath, {
+      cmd: "register-run",
+      args: { id: runId, agent: "claude-code", provider: "anthropic", upstream: `http://127.0.0.1:${silent.port}`, authLocation: "x-api-key" },
+    });
+    return silent;
+  }
+
+  test("redact-on-capture scrubs the secret from the summary", async () => {
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    const silent = await silentRun("run-summary");
+    await sendThroughProxy(daemon.proxyPort, "run-summary", requestBody("my key AKIAZQ3DRSTUVWXY2345 leaked"));
+    await Bun.sleep(200);
+    const store = Store.openReadOnly(stateDir);
+    const ex = listCalls(store, 10).find((e) => e.hasLeak)!;
+    expect(ex.summary).not.toContain("AKIAZQ3DRSTUVWXY2345");
+    expect(ex.summary).toContain("[REDACTED:aws-access-key-id:");
+    store.close();
+    silent.server.close();
+  });
+
+  test("summary redaction survives the 100-char truncation splitting the secret", async () => {
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    const silent = await silentRun("run-straddle");
+    // Secret starts at char 95: truncating first and scrubbing after would
+    // keep the secret's head, so the scrub must run before the cap.
+    await sendThroughProxy(
+      daemon.proxyPort, "run-straddle",
+      requestBody("p".repeat(94) + " AKIAZQ3DRSTUVWXY2345"),
+    );
+    await Bun.sleep(200);
+    const store = Store.openReadOnly(stateDir);
+    const ex = listCalls(store, 10).find((e) => e.hasLeak)!;
+    expect(ex.summary).not.toContain("AKIA");
+    store.close();
+    silent.server.close();
   });
 
   test("excluded agent traffic is forwarded but never captured", async () => {

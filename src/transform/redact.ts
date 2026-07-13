@@ -27,20 +27,29 @@ export function redactBody(bytes: Uint8Array, findings: Finding[]): { bytes: Uin
   return { bytes: new TextEncoder().encode(out), values };
 }
 
-// Scrub known secret values by literal match wherever they appear — used on the
-// response body so an echoed key doesn't survive request-side redaction.
+// Scrub known secret values by literal match wherever they appear — used on
+// derived text (summary, search text) built from parsed messages rather than
+// the stored bytes, so a body-side redaction can't be undone by a re-derive.
+export function redactValuesInText(
+  text: string,
+  values: Array<{ value: string; type: string }>,
+): string {
+  for (const { value, type } of values) {
+    if (value.length >= 8 && text.includes(value)) {
+      text = text.split(value).join(redactionPlaceholder(type, value));
+    }
+  }
+  return text;
+}
+
+// Byte variant — used on the response body so an echoed key doesn't survive
+// request-side redaction.
 export function redactValues(
   bytes: Uint8Array | null,
   values: Array<{ value: string; type: string }>,
 ): Uint8Array | null {
   if (!bytes || values.length === 0) return bytes;
-  let text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-  let changed = false;
-  for (const { value, type } of values) {
-    if (value.length >= 8 && text.includes(value)) {
-      text = text.split(value).join(redactionPlaceholder(type, value));
-      changed = true;
-    }
-  }
-  return changed ? new TextEncoder().encode(text) : bytes;
+  const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  const out = redactValuesInText(text, values);
+  return out === text ? bytes : new TextEncoder().encode(out);
 }
