@@ -6,12 +6,12 @@
 **See exactly what your AI agents send to remote models — with leaked secrets
 flagged the moment they leave your machine.**
 
-AI coding agents read your files, your shell output, your git history — and
-ship chunks of all of it to a model provider on every turn. Today that
-traffic is invisible: you can't see what left, you can't search it, and if an
-agent sent your AWS key along for the ride, nobody tells you. Beagle is a
-local transparency proxy that makes that traffic visible, searchable, and
-scanned for secrets — in one command, without changing your setup.
+AI agents read your files, your shell output, your git history — and ship
+chunks of all of it to a model provider on every turn. Today that traffic is
+invisible: you can't see what left, you can't search it, and if an agent
+sent your AWS key along for the ride, nobody tells you. Beagle is a local
+transparency proxy that makes that traffic visible, searchable, and scanned
+for secrets — in one command, without changing your setup.
 
 ![The Beagle dashboard: a live feed of every model call, with a leaked AWS key highlighted inline](docs/assets/dashboard.png)
 
@@ -19,7 +19,7 @@ scanned for secrets — in one command, without changing your setup.
 
 ```sh
 brew install boundedhq/tap/beagle    # or see Install below
-beagle run claude                    # run your agent under beagle — that's it
+beagle run claude                    # wraps the `claude` CLI in your terminal — that's it
 ```
 
 `beagle run` wraps a single agent session and changes nothing on your system.
@@ -27,14 +27,17 @@ While it runs, every model call is captured locally; if a secret goes out,
 you get an OS notification the moment it happens. Afterwards:
 
 ```sh
-$ beagle search sk-live-abc123     # "was this key ever sent?"
-found in 1 call across 1 session:
-  01KXAK6K  2026-07-12T14:23:00Z  session a1b2c3d4
+$ beagle leaks                     # did anything leak? every call was already scanned
+1 leak event:
+  2026-07-12T14:22:15.000Z  aws-access-key-id → anthropic  ×3  first: 01KXAK6K
 
-$ beagle ui                        # or browse it in the dashboard
+$ beagle ui                        # or browse it — leaks are highlighted inline
 dashboard: http://127.0.0.1:52341/?boot=…
 (the link is one-time; run `beagle ui` again for a fresh one)
 ```
+
+You never have to tell Beagle what your secrets look like — detection runs
+automatically on every outbound call.
 
 ## How it works (and what it is *not*)
 
@@ -54,30 +57,60 @@ Just as important, what Beagle is **not**:
 
 - **Not a TLS man-in-the-middle.** No CA certificate is installed, no TLS is
   intercepted, no system proxy is configured. If an app doesn't honor the
-  base-URL variable, its traffic simply doesn't route through Beagle — it
-  can't silently observe anything else.
+  redirect (the env var or per-run config), its traffic simply doesn't
+  route through Beagle — it can't silently observe anything else.
 - **Not a cloud service.** No account, no server, no telemetry, no
   phone-home. The only outbound connections are the ones your agent was
   already making, forwarded verbatim.
-- **Not a blocker.** v1 observes and alerts; it never rewrites or drops
-  what the agent sends upstream (the optional `redact-on-capture` scrubs
-  secrets from *the local copy*, not from the wire).
+- **Not a blocker.** v1 observes and alerts; it never rewrites, drops, or
+  delays anything. What reaches the provider is byte-for-byte what your
+  agent sent. (There's an optional setting to censor detected secrets in
+  *Beagle's own local records* so they aren't stored on your disk — but
+  that only changes what Beagle keeps, never what goes over the wire.)
 
 ## Supported agents
 
-| Agent | How it's wrapped | Capture |
-|---|---|---|
-| Claude Code (API key) | `ANTHROPIC_BASE_URL` | ✓ wire (full fidelity) |
-| Codex CLI | `OPENAI_BASE_URL` | ✓ wire (full fidelity) |
-| opencode | Beagle-owned config redirect, reverted after the run | ✓ wire (full fidelity) |
-| pi | Beagle-owned config redirect, reverted after the run | ✓ wire (full fidelity) |
-| Claude Code (Claude.ai subscription) | `beagle run claude --telemetry` — Claude Code's own OpenTelemetry export posts to Beagle's loopback receiver; nothing sits on the wire | *agent-reported* (Mode B) |
+v1 wraps **terminal CLI agents** — `beagle run` launches the agent's CLI
+under the proxy, and `beagle watch` shims its PATH entry:
 
-Every row in the dashboard is labeled **✓ wire** (observed on the wire) or
-**agent** (the agent's own self-report), so you always know which kind of
-evidence you're looking at. Mode B is implemented and unit-tested but **not
-yet validated against a real Claude Code build** — treat it as best-effort
+| Agent | How Beagle sees the traffic | Capture |
+|---|---|---|
+| Claude Code CLI (API key) | runs under the local proxy (via `ANTHROPIC_BASE_URL`) | ✓ wire (full fidelity) |
+| Claude Code CLI (Claude.ai subscription) | Claude Code's own usage telemetry, received locally — see below | *agent-reported* (Mode B) |
+| Codex CLI (API key) | runs under the local proxy (via `OPENAI_BASE_URL`) | ✓ wire (full fidelity) |
+| opencode | runs under the local proxy (via a temporary Beagle-written config) | ✓ wire (full fidelity) |
+| pi | detected, but not wired yet — see below | *not yet* |
+
+**How the wrapping works.** Claude Code and Codex honor a standard
+environment variable that changes where they send their API traffic;
+`beagle run` sets it to the local proxy for that run and nothing else.
+opencode doesn't read such a variable — its endpoint lives in a config
+file — so for the duration of the run Beagle hands it a **temporary config
+file of its own** (your real settings merged in, plus the proxy address).
+Your real config files are never modified, and the temporary one is
+deleted when the run ends. **pi** is config-driven too, but its
+config-override mechanism hasn't been verified yet — `beagle run pi` says
+so and refuses, rather than guessing and silently watching nothing.
+Support lands once the knob is confirmed.
+
+**Subscription logins are different.** A Claude.ai (Pro/Max) login only
+works over Anthropic's own client-server connection, so Beagle stays off
+that wire entirely. Instead, `beagle run claude --telemetry` switches on
+Claude Code's **built-in usage reporting** (its vendor-shipped OpenTelemetry
+export) and receives those reports on a local port. That means you see what
+Claude Code *says* it sent rather than the bytes themselves — which is why
+those rows are badged **agent** (*agent-reported*) in the dashboard instead
+of **✓ wire**. Mode B is implemented and unit-tested but **not yet
+validated against a real Claude Code build** — treat it as best-effort
 until the [Phase-0 spike checklist](docs/mode-b-spike.md) is complete.
+Codex on a "Sign in with ChatGPT" login is designed to work as a pure
+passthrough (Beagle forwards the client's own login unchanged and never
+injects anything), but that path is **also pending validation** — until
+then, API-key mode is the supported way to watch Codex.
+
+Desktop apps, IDE extensions, and web UIs launch their own processes and
+don't inherit either mechanism, so their traffic is **not** captured in v1 —
+`beagle status` always tells you exactly what is and isn't covered.
 
 ## Install
 
@@ -107,12 +140,15 @@ beagle run <agent>         # watch one agent run; nothing changed on your system
 beagle watch <agent>       # opt in to always-on (one PATH shim; revert any time)
 beagle unwatch <agent>     # stop watching, restore your setup
 beagle status              # trust strip: coverage, store size, retention, what changed
-beagle search <string>     # "was this password ever sent?" — a definitive answer
-beagle leaks               # the leak log
+beagle leaks               # the leak log — every detected secret, deduped, automatic
+beagle search [string]     # was this exact string ever sent? for things the detector
+                           # can't know (an internal password, a hostname). With no
+                           # argument it reads stdin, keeping the term out of history
 beagle show <id>           # one call, summarized or raw
 beagle ui                  # open the dashboard (loopback, one-time token)
 beagle purge [all|panic]   # erase captured data (panic = secure wipe + vacuum)
-beagle config redact-on-capture on   # drop raw secret values at capture time
+beagle config redact-on-capture on   # censor detected secrets in Beagle's local
+                                     # store (never changes what's on the wire)
 ```
 
 The whole loop works headless — a skeptic never has to start the viewer.
@@ -197,6 +233,23 @@ demand.
 No. Coverage is opt-in per agent (`run` for one session, `watch` for
 always-on). There is no system proxy, no packet capture, no TLS
 interception.
+
+**Does it cover the Claude Code desktop app, IDE extensions, or web UIs?**
+Not in v1. Beagle wraps processes launched from your terminal — `beagle
+run` spawns the CLI under the proxy, and `beagle watch` shims the CLI's
+PATH entry. GUI apps launch their own processes and inherit neither, so
+their traffic isn't captured. `beagle status` reports coverage honestly
+rather than implying more than it sees.
+
+**How do I find out whether a secret leaked?**
+You don't have to go looking — every outbound call is scanned
+automatically, and anything detected is in `beagle leaks` and highlighted
+inline in the dashboard. Don't feed real keys into commands to check.
+`beagle search` is for strings the detector *can't* know about (an internal
+password, a customer hostname); if you ever do search for something
+sensitive, run `beagle search` with no argument and it reads the term from
+stdin, keeping it out of argv and shell history. The search runs locally
+against your local store.
 
 **Why should I trust the detector?**
 It's the gitleaks ruleset (vendored as data, sha256-pinned) run through a

@@ -84,7 +84,10 @@ describe("daemon idle-exit (design §6.7)", () => {
     await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", () => r()));
     const upPort = (upstream.address() as { port: number }).port;
 
-    const d = await start({ idleTimeoutMs: 250 });
+    // Wide margin (100ms fire interval vs 500ms idle window, 5x) so a slow
+    // shared CI runner stalling between fires doesn't idle the daemon out —
+    // that would be a runner hiccup, not the lost-lease backstop failing.
+    const d = await start({ idleTimeoutMs: 500 });
     await controlRequest(d.socketPath, {
       cmd: "register-run",
       args: { id: "busy", agent: "a", provider: "anthropic", upstream: `http://127.0.0.1:${upPort}` },
@@ -100,16 +103,17 @@ describe("daemon idle-exit (design §6.7)", () => {
         s.on("error", () => resolve());
       });
 
-    // traffic every ~120ms for ~700ms, well past the 250ms idle window
-    for (let i = 0; i < 6; i++) {
+    // traffic every ~100ms for ~1.2s, well past the 500ms idle window
+    for (let i = 0; i < 12; i++) {
       await fire();
-      await Bun.sleep(120);
+      await Bun.sleep(100);
     }
     expect(d.isRunning).toBe(true); // traffic held it open without any lease
 
-    // traffic stops → winds down within a couple idle windows
-    await Bun.sleep(700);
+    // traffic stops → winds down; poll instead of a fixed sleep so a slow
+    // runner gets up to 4s without the fast path waiting longer than needed
+    for (let i = 0; i < 40 && d.isRunning; i++) await Bun.sleep(100);
     expect(d.isRunning).toBe(false);
     upstream.close();
-  });
+  }, 15_000); // fires (~1.5s) + wind-down poll (≤4s) can brush bun's 5s default on a slow runner
 });

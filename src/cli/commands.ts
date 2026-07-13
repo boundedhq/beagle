@@ -260,11 +260,28 @@ export function cmdUnwatch(stateDir: string, agent: string): string {
   return unwatchAgent(agent, buildWatchEnv(stateDir, true)).message;
 }
 
-function readLineSync(): string {
+// Reads one line from stdin (until newline or EOF, capped at 64 KB). Exported
+// for `beagle search` with no argument — piping the term in keeps secrets out
+// of shell history and `ps` output.
+export function readLineSync(): string {
   try {
-    const buf = new Uint8Array(256);
-    const n = require("node:fs").readSync(0, buf, 0, 256, null) as number;
-    return new TextDecoder().decode(buf.subarray(0, n));
+    const fs = require("node:fs") as typeof import("node:fs");
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const buf = new Uint8Array(4096);
+      const n = fs.readSync(0, buf, 0, buf.length, null);
+      if (n <= 0) break;
+      chunks.push(buf.subarray(0, n));
+      total += n;
+      if (buf.subarray(0, n).includes(10) || total >= 65536) break; // \n or cap
+    }
+    const all = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) { all.set(c, off); off += c.length; }
+    const text = new TextDecoder().decode(all);
+    const nl = text.indexOf("\n");
+    return nl === -1 ? text : text.slice(0, nl + 1);
   } catch {
     return "";
   }

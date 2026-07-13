@@ -53,6 +53,39 @@ describe("CLI commands (headless loop, R12)", () => {
     expect(out.toLowerCase()).toContain("no matches");
   });
 
+  test("search: with no argument, reads the term from stdin (keeps secrets out of shell history)", () => {
+    // `echo $SECRET | beagle search` / `pbpaste | beagle search` — the term
+    // must never have to appear in argv, where it would land in shell
+    // history and `ps` output.
+    const run = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "cli", "main.ts"), "search"], {
+      stdin: new TextEncoder().encode("hunter2\n"),
+      env: { ...process.env, BEAGLE_STATE_DIR: stateDir },
+    });
+    expect(run.stdout.toString()).toContain("found in 1 call");
+  });
+
+  test("search: stdin longer than 256 bytes is read whole (JWT-sized terms)", () => {
+    // Seed a call whose text contains a 300-char run of 'y'. Then search for
+    // 301 'y's via stdin: a reader that truncates at 256 bytes would search
+    // the shorter prefix and WRONGLY report "found"; a full read gives the
+    // honest "no matches". This pins the difference.
+    const store = Store.open(stateDir);
+    store.insertCall({
+      id: ulid(), sessionId: "s9", runId: "r9", source: "wire", agent: "claude-code",
+      provider: "anthropic", endpoint: "/v1/messages", tsRequest: Date.now(),
+      scanState: "ok", captureState: "ok", sessionTier: "run",
+      requestBody: null, requestHeaders: null, responseBody: null,
+      responseHeaders: null, sseRaw: null, searchText: "y".repeat(300),
+    });
+    store.close();
+    const run = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "cli", "main.ts"), "search"], {
+      stdin: new TextEncoder().encode("y".repeat(301) + "\n"),
+      env: { ...process.env, BEAGLE_STATE_DIR: stateDir },
+    });
+    expect(run.stdout.toString().toLowerCase()).toContain("no matches");
+    expect(run.exitCode).toBe(0);
+  });
+
   test("leaks: lists events with type/destination/occurrences", () => {
     const out = cmdLeaks(stateDir);
     expect(out).toContain("generic-api-key");
