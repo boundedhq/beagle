@@ -1,8 +1,9 @@
 // OTLP/HTTP receiver (design §6.2, Mode B). Minimal loopback endpoint that
-// accepts json-only OTel logs, gated by a per-run token. Protobuf is rejected
-// by construction — hand-decoding proto has no place in the zero-dep budget.
-// Two routes: /v1/logs (Claude Code's OTel export) and /v1/hook (its
-// PostToolUse hook, which carries the tool-output content the export omits).
+// accepts json-only OTel logs, gated by a per-daemon token. Protobuf is
+// rejected by construction — hand-decoding proto has no place in the zero-dep
+// budget. Two routes: /v1/logs (agent OTel exports — Claude Code's and
+// Codex's, discriminated by the payload's event schema) and /v1/hook (Claude
+// Code's PostToolUse hook, carrying the tool-output content its export omits).
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { mapHookToCall, mapOtlpLogsToCalls, type OtelCall } from "../../parsers/otlp-map";

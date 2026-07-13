@@ -146,3 +146,87 @@ describe("Mode B tool-output capture (PostToolUse hook)", () => {
     expect(alerts[0]!.title).toContain("aws-access-key-id");
   });
 });
+
+// Codex on a ChatGPT login can't be wire-proxied; --telemetry captures it via
+// Codex's own OTel export (codex.* schema, scope codex_otel.log_only). Unlike
+// Claude Code, that export carries tool OUTPUT inline — no hook needed.
+function codexBody(name: string, attrs: Record<string, string>) {
+  return {
+    resourceLogs: [{
+      scopeLogs: [{
+        scope: { name: "codex_otel.log_only" },
+        logRecords: [{
+          timeUnixNano: String(Date.now() * 1e6),
+          attributes: [
+            { key: "event.name", value: { stringValue: name } },
+            { key: "conversation.id", value: { stringValue: "codex-conv-1" } },
+            ...Object.entries(attrs).map(([key, value]) => ({ key, value: { stringValue: value } })),
+          ],
+        }],
+      }],
+    }],
+  };
+}
+
+describe("Codex Mode B end-to-end through the daemon", () => {
+  let stateDir: string;
+  let daemon: Daemon;
+  let alerts: AlertEvent[];
+  let otlpPort: number;
+  let token: string;
+
+  beforeEach(async () => {
+    stateDir = mkdtempSync(join(tmpdir(), "beagle-codex-"));
+    alerts = [];
+    daemon = await Daemon.start({ stateDir, alertSinkForTest: (a) => alerts.push(a), persistent: true });
+    const status = await controlRequest(daemon.socketPath, { cmd: "status" });
+    const data = status.data as { otlpPort: number; otlpToken: string };
+    otlpPort = data.otlpPort;
+    token = data.otlpToken;
+  });
+  afterEach(async () => { await daemon.stop(); });
+
+  const post = (body: unknown) =>
+    fetch(`http://127.0.0.1:${otlpPort}/v1/logs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-beagle-run": token },
+      body: JSON.stringify(body),
+    });
+
+  test("a codex prompt is captured, labeled codex/openai, and scanned", async () => {
+    const r = await post(codexBody("codex.user_prompt", { prompt: "refactor the parser", model: "gpt-5.6" }));
+    expect(r.status).toBe(200);
+    await Bun.sleep(100);
+    const store = Store.openReadOnly(stateDir);
+    const hits = store.searchLiteral("refactor the parser");
+    expect(hits.length).toBe(1);
+    const call = store.getCall(hits[0]!.callId)!;
+    expect(call.source).toBe("otel");
+    expect(call.agent).toBe("codex");
+    expect(call.provider).toBe("openai");
+    store.close();
+  });
+
+  test("a secret in a codex PROMPT fires the leak alert", async () => {
+    await post(codexBody("codex.user_prompt", { prompt: "ship it with AKIAZQ3DRSTUVWXY2345" }));
+    await Bun.sleep(100);
+    expect(alerts.length).toBe(1);
+    expect(alerts[0]!.title).toContain("aws-access-key-id");
+  });
+
+  test("a secret in a codex TOOL OUTPUT (cat key.txt) fires the leak alert — no hook needed", async () => {
+    // Codex exports the tool result inline, so the secret is visible in Mode B
+    // without the PostToolUse hook Claude Code requires for the same coverage.
+    await post(codexBody("codex.tool_result", {
+      tool_name: "exec_command",
+      arguments: '{"cmd":"cat key.txt"}',
+      output: "token = AKIAZQ3DRSTUVWXY2345",
+    }));
+    await Bun.sleep(100);
+    expect(alerts.length).toBe(1);
+    expect(alerts[0]!.title).toContain("aws-access-key-id");
+    const store = Store.openReadOnly(stateDir);
+    expect(listLeakEvents(store).length).toBe(1);
+    store.close();
+  });
+});

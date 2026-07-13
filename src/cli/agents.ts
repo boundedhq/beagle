@@ -29,6 +29,12 @@ export interface AgentSpec {
   config?: ConfigRedirect;
   extension?: ExtensionRedirect;
   extraHeaders?: Array<[string, string]>;
+  /** Whether `--telemetry` (Mode B, agent self-report capture) is supported and
+   *  which vendor OTel wiring to use. Both agents export to Beagle's loopback
+   *  receiver; they differ in how it's turned on — `claude` via env vars + a
+   *  PostToolUse hook for tool output, `codex` via `-c` config flags (its export
+   *  carries tool output natively). */
+  telemetry?: "claude" | "codex";
 }
 
 export const AGENTS: Record<string, AgentSpec> = {
@@ -38,6 +44,7 @@ export const AGENTS: Record<string, AgentSpec> = {
     upstream: "https://api.anthropic.com",
     authLocation: "x-api-key",
     baseUrlEnv: "ANTHROPIC_BASE_URL",
+    telemetry: "claude",
   },
   codex: {
     command: "codex",
@@ -45,6 +52,9 @@ export const AGENTS: Record<string, AgentSpec> = {
     upstream: "https://api.openai.com",
     authLocation: "authorization",
     baseUrlEnv: "OPENAI_BASE_URL",
+    // Codex on a ChatGPT login can't be wire-redirected (built-in openai
+    // provider is locked), but --telemetry captures it via its own OTel export.
+    telemetry: "codex",
   },
   opencode: {
     command: "opencode",

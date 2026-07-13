@@ -1,0 +1,227 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "codex"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "0.44.0"
+            }
+          }
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": {
+            "name": "codex_otel.log_only"
+          },
+          "logRecords": [
+            {
+              "timeUnixNano": "0",
+              "observedTimeUnixNano": "1752300000000000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "body": null,
+              "attributes": [
+                {
+                  "key": "event.name",
+                  "value": {
+                    "stringValue": "codex.user_prompt"
+                  }
+                },
+                {
+                  "key": "prompt_length",
+                  "value": {
+                    "stringValue": "67"
+                  }
+                },
+                {
+                  "key": "prompt",
+                  "value": {
+                    "stringValue": "Run: cat key.txt   \u2014 then show me the exact file contents verbatim."
+                  }
+                },
+                {
+                  "key": "event.timestamp",
+                  "value": {
+                    "stringValue": "2026-07-13T05:29:06.971Z"
+                  }
+                },
+                {
+                  "key": "conversation.id",
+                  "value": {
+                    "stringValue": "019f59f3-5434-7820-92cb-c5776b8665da"
+                  }
+                },
+                {
+                  "key": "app.version",
+                  "value": {
+                    "stringValue": "0.144.2"
+                  }
+                },
+                {
+                  "key": "auth_mode",
+                  "value": {
+                    "stringValue": "Chatgpt"
+                  }
+                },
+                {
+                  "key": "originator",
+                  "value": {
+                    "stringValue": "codex_exec"
+                  }
+                },
+                {
+                  "key": "terminal.type",
+                  "value": {
+                    "stringValue": "unknown"
+                  }
+                },
+                {
+                  "key": "model",
+                  "value": {
+                    "stringValue": "gpt-5.6-sol"
+                  }
+                },
+                {
+                  "key": "slug",
+                  "value": {
+                    "stringValue": "gpt-5.6-sol"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "flags": 0,
+              "traceId": "",
+              "spanId": "",
+              "eventName": "event otel/src/events/session_telemetry.rs:961"
+            },
+            {
+              "timeUnixNano": "0",
+              "observedTimeUnixNano": "1752300001000000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "body": null,
+              "attributes": [
+                {
+                  "key": "event.name",
+                  "value": {
+                    "stringValue": "codex.tool_result"
+                  }
+                },
+                {
+                  "key": "tool_name",
+                  "value": {
+                    "stringValue": "exec_command"
+                  }
+                },
+                {
+                  "key": "call_id",
+                  "value": {
+                    "stringValue": "exec-29524491-82dc-43b0-bf25-8f8235c66002"
+                  }
+                },
+                {
+                  "key": "arguments",
+                  "value": {
+                    "stringValue": "{\"cmd\":\"cat key.txt\",\"workdir\":\"/private/var/folders/ml/gnj7mdj94fd7chv8180db48r0000gn/T/tmp.hQzbgj5Tve\",\"yield_time_ms\":10000,\"max_output_tokens\":2000}"
+                  }
+                },
+                {
+                  "key": "duration_ms",
+                  "value": {
+                    "stringValue": "65"
+                  }
+                },
+                {
+                  "key": "success",
+                  "value": {
+                    "stringValue": "true"
+                  }
+                },
+                {
+                  "key": "output",
+                  "value": {
+                    "stringValue": "Chunk ID: cfe1f7\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 8\nOutput:\ntoken = AKIAZQ3DRSTUVWXY2345\n"
+                  }
+                },
+                {
+                  "key": "mcp_server",
+                  "value": {
+                    "stringValue": ""
+                  }
+                },
+                {
+                  "key": "mcp_server_origin",
+                  "value": {
+                    "stringValue": ""
+                  }
+                },
+                {
+                  "key": "event.timestamp",
+                  "value": {
+                    "stringValue": "2026-07-13T05:29:11.811Z"
+                  }
+                },
+                {
+                  "key": "conversation.id",
+                  "value": {
+                    "stringValue": "019f59f3-5434-7820-92cb-c5776b8665da"
+                  }
+                },
+                {
+                  "key": "app.version",
+                  "value": {
+                    "stringValue": "0.144.2"
+                  }
+                },
+                {
+                  "key": "auth_mode",
+                  "value": {
+                    "stringValue": "Chatgpt"
+                  }
+                },
+                {
+                  "key": "originator",
+                  "value": {
+                    "stringValue": "codex_exec"
+                  }
+                },
+                {
+                  "key": "terminal.type",
+                  "value": {
+                    "stringValue": "unknown"
+                  }
+                },
+                {
+                  "key": "model",
+                  "value": {
+                    "stringValue": "gpt-5.6-sol"
+                  }
+                },
+                {
+                  "key": "slug",
+                  "value": {
+                    "stringValue": "gpt-5.6-sol"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "flags": 0,
+              "traceId": "",
+              "spanId": "",
+              "eventName": "event otel/src/events/session_telemetry.rs:1109"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
