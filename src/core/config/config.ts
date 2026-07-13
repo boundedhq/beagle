@@ -10,6 +10,10 @@ export interface BeagleConfig {
   eventWindowDays: number;
   redactOnCapture: boolean;
   excludedAgents: string[];
+  /** Remembered answer to "API key or subscription?" per agent — how
+   *  `beagle run <agent>` captures when no flag is passed. Set by the one-time
+   *  prompt or `beagle config run-mode`. Absent = auto-detect each run. */
+  agentRunMode: Record<string, "wire" | "telemetry">;
 }
 
 export const DEFAULT_CONFIG: BeagleConfig = {
@@ -18,6 +22,7 @@ export const DEFAULT_CONFIG: BeagleConfig = {
   eventWindowDays: 90,
   redactOnCapture: false,
   excludedAgents: [],
+  agentRunMode: {},
 };
 
 export function loadConfig(stateDir: string): BeagleConfig {

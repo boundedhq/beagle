@@ -9,7 +9,7 @@ import { loadConfig, saveConfig } from "../core/config/config";
 import { controlRequest, openLease } from "../daemon/control";
 import { Notifier, stripControlChars } from "../notifier/notifier";
 import { GraduationTracker } from "../install/graduation";
-import { codexAuthMode, detectAgents, knownExtraLocations, pathDirsFromEnv } from "../install/detect";
+import { claudeAuthMode, codexAuthMode, detectAgents, knownExtraLocations, pathDirsFromEnv } from "../install/detect";
 import { watchAgent, unwatchAgent, type WatchEnv, type WatchModeRequest } from "../install/watch";
 import { ChangeManifest } from "../install/manifest";
 import { listLeakEvents } from "../viewer/feed-query";
@@ -270,11 +270,16 @@ function buildWatchEnv(stateDir: string, yes: boolean): WatchEnv {
       const line = readLineSync();
       return /^y(es)?$/i.test(line.trim());
     },
-    // Codex records its login kind in auth.json (label + key presence only —
-    // token values are never read). Claude Code's auth isn't statically
-    // detectable, so it stays wire unless --telemetry is passed; the wire
-    // tripwire in cmdRun catches the mismatch at run time.
-    detectSubscription: (agent) => detectSubscriptionFor(agent, homedir(), process.env.CODEX_HOME),
+    // Codex records its login kind in auth.json; Claude Code leaves an
+    // oauthAccount record in ~/.claude.json (presence only — no values are
+    // read). Detection failing open is safe: the wire tripwire in cmdRun
+    // catches a missed subscription at run time.
+    detectSubscription: (agent) =>
+      detectSubscriptionFor(agent, homedir(), {
+        codexHome: process.env.CODEX_HOME,
+        claudeConfigDir: process.env.CLAUDE_CONFIG_DIR,
+        hasAnthropicApiKey: Boolean(process.env.ANTHROPIC_API_KEY),
+      }),
   };
 }
 
@@ -312,9 +317,17 @@ export function parseWatchArgs(
 }
 
 /** Is this agent on a subscription login the proxy can't see? Pure and
- *  home-injectable for tests; buildWatchEnv wires it with the real home. */
-export function detectSubscriptionFor(agent: string, home: string, codexHome?: string): boolean {
-  return agent === "codex" && codexAuthMode(home, codexHome) === "chatgpt";
+ *  home-injectable for tests; buildWatchEnv wires it with the real env. */
+export function detectSubscriptionFor(
+  agent: string,
+  home: string,
+  opts: { codexHome?: string; claudeConfigDir?: string; hasAnthropicApiKey?: boolean } = {},
+): boolean {
+  if (agent === "codex") return codexAuthMode(home, opts.codexHome) === "chatgpt";
+  if (agent === "claude") {
+    return claudeAuthMode(home, opts.hasAnthropicApiKey ?? false, opts.claudeConfigDir) === "subscription";
+  }
+  return false;
 }
 
 export function cmdWatch(
@@ -363,9 +376,13 @@ export function readLineSync(): string {
 export async function cmdConfig(stateDir: string, args: string[]): Promise<string> {
   const cfg = loadConfig(stateDir);
   if (args.length === 0) {
+    const modes = Object.entries(cfg.agentRunMode)
+      .map(([a, m]) => `${a}=${m}`)
+      .join(", ");
     return (
       `redact-on-capture: ${cfg.redactOnCapture}\n` +
       `excluded agents: ${cfg.excludedAgents.join(", ") || "(none)"}\n` +
+      `run mode: ${modes || "(auto-detect)"}\n` +
       `retention: ${cfg.payloadWindowDays}d / ${cfg.sizeCapMB} MB payloads · ${cfg.eventWindowDays}d events`
     );
   }
@@ -376,8 +393,19 @@ export async function cmdConfig(stateDir: string, args: string[]): Promise<strin
     update.excludedAgents = [...new Set([...cfg.excludedAgents, args[1]])];
   } else if (args[0] === "unexclude" && args[1]) {
     update.excludedAgents = cfg.excludedAgents.filter((a) => a !== args[1]);
+  } else if (args[0] === "run-mode" && args[1] && args[2]) {
+    // The remembered answer to "API key or subscription?" — `auto` forgets it
+    // so the next run re-detects (or asks again).
+    if (args[2] === "auto") {
+      const { [args[1]]: _drop, ...rest } = cfg.agentRunMode;
+      update.agentRunMode = rest;
+    } else if (args[2] === "wire" || args[2] === "telemetry") {
+      update.agentRunMode = { ...cfg.agentRunMode, [args[1]]: args[2] };
+    } else {
+      return "usage: beagle config run-mode <agent> <wire|telemetry|auto>";
+    }
   } else {
-    return "usage: beagle config [redact-on-capture on|off | exclude <agent> | unexclude <agent>]";
+    return "usage: beagle config [redact-on-capture on|off | exclude <agent> | unexclude <agent> | run-mode <agent> <wire|telemetry|auto>]";
   }
   const daemon = await pingDaemon(stateDir);
   if (daemon) {
@@ -410,6 +438,7 @@ export async function cmdUi(stateDir: string): Promise<string> {
 // (--telemetry present when the shim was installed in telemetry mode).
 export function parseRunArgs(rawArgs: string[]): {
   telemetry: boolean;
+  wire: boolean;
   realBinary: string | null;
   agentArgs: string[];
 } {
@@ -418,14 +447,57 @@ export function parseRunArgs(rawArgs: string[]): {
   const realIdx = beagleArgs.indexOf("--real");
   return {
     telemetry: beagleArgs.includes("--telemetry"),
+    wire: beagleArgs.includes("--wire"),
     realBinary: realIdx !== -1 ? (beagleArgs[realIdx + 1] ?? null) : null,
     agentArgs:
       sepIdx !== -1
         ? rawArgs.slice(sepIdx + 1)
         : rawArgs.filter(
-            (a, i) => a !== "--telemetry" && a !== "--real" && rawArgs[i - 1] !== "--real",
+            (a, i) => a !== "--telemetry" && a !== "--wire" && a !== "--real" && rawArgs[i - 1] !== "--real",
           ),
   };
+}
+
+/** How a telemetry-capable agent's login was detected for THIS run. */
+export function detectAuthForRun(agent: string): "api-key" | "subscription" | "unknown" {
+  if (agent === "claude") {
+    return claudeAuthMode(homedir(), Boolean(process.env.ANTHROPIC_API_KEY), process.env.CLAUDE_CONFIG_DIR);
+  }
+  if (agent === "codex") {
+    const m = codexAuthMode(homedir(), process.env.CODEX_HOME);
+    return m === "chatgpt" ? "subscription" : m === "api-key" ? "api-key" : "unknown";
+  }
+  return "unknown";
+}
+
+/** Decide how `beagle run` captures a telemetry-capable agent when the user
+ *  didn't say. Precedence: explicit flag > remembered answer > detected login
+ *  > ask (interactive only) > wire. A wrong guess is never fatal — telemetry
+ *  still captures an API-key run (lower fidelity), and a wire run that
+ *  captures nothing trips the zero-capture warning. Pure; exported for tests. */
+export function resolveRunMode(
+  flags: { telemetry: boolean; wire: boolean },
+  saved: "wire" | "telemetry" | undefined,
+  detected: "api-key" | "subscription" | "unknown",
+  isTTY: boolean,
+): { mode: "wire" | "telemetry"; source: "flag" | "saved" | "detected" | "default" } | { mode: "ask" } {
+  if (flags.telemetry) return { mode: "telemetry", source: "flag" };
+  if (flags.wire) return { mode: "wire", source: "flag" };
+  if (saved) return { mode: saved, source: "saved" };
+  if (detected === "subscription") return { mode: "telemetry", source: "detected" };
+  if (detected === "api-key") return { mode: "wire", source: "detected" };
+  if (isTTY) return { mode: "ask" };
+  return { mode: "wire", source: "default" };
+}
+
+/** Strict parse of the one-time login question: only an unambiguous 1 or 2
+ *  counts — anything else (empty line, EOF, typo) is null so a fumbled
+ *  keystroke is never remembered as an answer. Exported for tests. */
+export function interpretAskAnswer(line: string): "wire" | "telemetry" | null {
+  const t = line.trim();
+  if (t === "1") return "wire";
+  if (t === "2") return "telemetry";
+  return null;
 }
 
 export async function cmdRun(stateDir: string, agentName: string, rawArgs: string[]): Promise<number> {
@@ -437,14 +509,79 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
   // Mode B (R2): --telemetry watches via the agent's own OTel export instead
   // of the wire — for subscription logins (Claude Code on Claude.ai, Codex on
   // ChatGPT) whose traffic can't be proxied. Capture is labeled agent-reported.
-  const { telemetry, realBinary: realOverride, agentArgs } = parseRunArgs(rawArgs);
-  if (telemetry && !spec.telemetry) {
+  const { telemetry: telemetryFlag, wire: wireFlag, realBinary: realOverride, agentArgs } = parseRunArgs(rawArgs);
+  if (telemetryFlag && !spec.telemetry) {
     const supported = Object.entries(AGENTS)
       .filter(([, s]) => s.telemetry)
       .map(([n]) => n)
       .join(", ");
     console.error(`--telemetry (agent self-report capture) is supported for ${supported}.`);
     return 2;
+  }
+  if (telemetryFlag && wireFlag) {
+    console.error("--telemetry and --wire are mutually exclusive.");
+    return 2;
+  }
+  // For agents with two capture modes, work out which one this login needs —
+  // so a subscription user can type plain `beagle run claude` and have it
+  // just work, instead of silently capturing nothing in wire mode.
+  let telemetry = telemetryFlag;
+  if (spec.telemetry && !telemetryFlag && !wireFlag) {
+    const cfg = loadConfig(stateDir);
+    const resolved = resolveRunMode(
+      { telemetry: telemetryFlag, wire: wireFlag },
+      cfg.agentRunMode[agentName],
+      detectAuthForRun(agentName),
+      // Never ask through the PATH shim (--real marks it): the user set up
+      // watch precisely to not be interrupted — an unknown login there falls
+      // through to wire + the zero-capture warning. The shim's exec keeps the
+      // terminal's stdin, so a TTY check alone would NOT protect it.
+      Boolean(process.stdin.isTTY) && realOverride === null,
+    );
+    if (resolved.mode === "ask") {
+      // Beagle couldn't tell and we have a terminal: ask ONCE, remember.
+      let answer: "wire" | "telemetry" | null = null;
+      for (let attempt = 0; attempt < 2 && answer === null; attempt++) {
+        process.stderr.write(
+          `beagle: how is ${agentName} signed in? (couldn't tell automatically)\n` +
+            `  [1] API key — full-fidelity proxy capture\n` +
+            `  [2] Subscription (Claude.ai / ChatGPT) — the agent reports its own usage\n` +
+            `choice [1/2]: `,
+        );
+        answer = interpretAskAnswer(readLineSync());
+        if (answer === null) process.stderr.write("beagle: please answer 1 or 2.\n");
+      }
+      if (answer === null) {
+        // Invalid/EOF: use wire for THIS run only — a fumbled keystroke must
+        // not become a permanently remembered (and wrong) answer.
+        telemetry = false;
+        process.stderr.write(
+          `beagle: no valid answer — using wire capture for this run only. ` +
+            `Set it with: beagle config run-mode ${agentName} <wire|telemetry>\n`,
+        );
+      } else {
+        telemetry = answer === "telemetry";
+        // Re-read config at save time (the prompt is human-paced — a stale
+        // pre-prompt snapshot could clobber a concurrent save), and route
+        // through a running daemon, the config's single writer when up.
+        const latest = loadConfig(stateDir);
+        const agentRunMode = { ...latest.agentRunMode, [agentName]: answer };
+        const running = await pingDaemon(stateDir);
+        if (running) await controlRequest(running.socketPath, { cmd: "set-config", args: { agentRunMode } });
+        else saveConfig(stateDir, { ...latest, agentRunMode });
+        process.stderr.write(
+          `beagle: saved — future runs use ${answer}. Change with: beagle config run-mode ${agentName} <wire|telemetry|auto>\n`,
+        );
+      }
+    } else {
+      telemetry = resolved.mode === "telemetry";
+      if (telemetry && resolved.source === "detected") {
+        process.stderr.write(
+          `beagle: ${agentName} subscription login detected — capturing via its telemetry ` +
+            `(agent-reported). Pass --wire to force proxy capture.\n`,
+        );
+      }
+    }
   }
   if (!telemetry && !spec.baseUrlEnv && !spec.config && !spec.extension) {
     console.error(
@@ -584,9 +721,13 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
     } else if (!(await runCallsArrived(stateDir, runId))) {
       // Wire: the big one is a subscription login — its traffic never crosses
       // the proxy, so the run "works" while Beagle sees nothing.
+      const savedWire = loadConfig(stateDir).agentRunMode[agentName] === "wire";
       const alt = spec.telemetry
         ? `  If ${agentName} signs in with a subscription (not an API key), the proxy can't see its traffic —\n` +
-          `  use: beagle run ${agentName} --telemetry   (or: beagle watch ${agentName} --telemetry)\n`
+          `  use: beagle run ${agentName} --telemetry   (or: beagle watch ${agentName} --telemetry)\n` +
+          (savedWire
+            ? `  Note: a saved answer is forcing wire mode — reset it with: beagle config run-mode ${agentName} auto\n`
+            : "")
         : `  Check \`beagle status\` for coverage.\n`;
       warned = true;
       process.stderr.write(

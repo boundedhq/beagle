@@ -20,8 +20,7 @@ command, without changing your setup.
 ```sh
 brew install boundedhq/tap/beagle   # single binary — more options under Install
 beagle detect                       # finds your agents, prints the command for each
-beagle run claude                   # API-key login. Claude.ai Pro/Max login?
-                                    # add --telemetry — see the table below
+beagle run claude                   # wrap one session — that's it
 ```
 
 `beagle run` wraps a single agent session and changes nothing on your system.
@@ -38,42 +37,48 @@ $ beagle ui                        # or browse it — leaks are highlighted inli
 
 ## Which command for your agent?
 
-Beagle wraps four terminal agents: **Claude Code, Codex, opencode, and pi**.
-For Claude Code and Codex the command depends on how you sign in — find your
-row, and the command on the right is all you need:
+Beagle wraps four terminal agents — **Claude Code, Codex, opencode, and pi** —
+and the command is the same for all of them:
 
-| Your agent | Signed in with | One session (`run`) | Always-on (`watch`) |
-|---|---|---|---|
-| **Claude Code** | Anthropic API key | `beagle run claude` | `beagle watch claude` |
-| **Claude Code** | Claude.ai subscription (Pro/Max) | `beagle run claude --telemetry` | `beagle watch claude --telemetry` |
-| **Codex** | OpenAI API key | `beagle run codex` | `beagle watch codex` |
-| **Codex** | "Sign in with ChatGPT" | `beagle run codex --telemetry` | `beagle watch codex` *(detects the login, picks telemetry)* |
-| **opencode** | API key **or** ChatGPT sign-in | `beagle run opencode` | `beagle watch opencode` |
-| **pi** | OpenAI API key | `beagle run pi` | `beagle watch pi` |
+```sh
+beagle run <agent>      # claude, codex, opencode, or pi — one session
+beagle watch <agent>    # the same, every session
+```
 
-Not sure how you're signed in? Run the plain command — if a real session
-(more than a few seconds) captured nothing, Beagle prints a warning
-afterwards naming the command to use instead.
+Beagle detects how the agent is signed in and picks the right capture mode:
+
+| Your agent | Signed in with | What happens |
+|---|---|---|
+| **Claude Code** | Anthropic API key | wire capture — full fidelity |
+| **Claude Code** | Claude.ai subscription (Pro/Max) | telemetry capture, auto-detected |
+| **Codex** | OpenAI API key | wire capture — full fidelity |
+| **Codex** | "Sign in with ChatGPT" | telemetry capture, auto-detected |
+| **opencode** | API key **or** ChatGPT sign-in | wire capture — full fidelity |
+| **pi** | OpenAI API key | wire capture — full fidelity |
+
+If Beagle can't tell how an agent is signed in, it asks once at the terminal
+and remembers your answer (`beagle config run-mode <agent> wire|telemetry|auto`
+to change it; `--wire` / `--telemetry` force a mode for one run). And if a
+wrong guess ever slips through, a session that captured nothing prints a
+warning afterwards naming the fix.
 
 `beagle watch` shows you the changes it wants to make before making them — a
 PATH shim for that agent, plus (the first time only) a background service so
 watched agents stay covered across reboots — and `beagle unwatch <agent>`
 reverts both.
 
-**Why the `--telemetry` rows?** A subscription login only works over the
-vendor's own connection, so a proxy can't sit on that wire. `--telemetry`
-captures those sessions from the agent's own usage reporting instead. Your
-prompts, tool inputs, and tool outputs (including files the agent reads) are
-still scanned — but it's the agent's self-report, not observed wire bytes.
-Those rows are badged **agent** in the dashboard, and alerts can lag a few
-seconds. Nothing leaves your machine: the report goes to a loopback receiver
-on `127.0.0.1`, and the vendor's reporting flags are set per run, never
-written to your agent's config. Two footnotes: Codex records its sign-in
-method on disk, so `watch` can auto-detect it — Claude Code doesn't, hence
-the explicit flag. And if your agent already exports telemetry to a company
-collector, that export is redirected to Beagle only for the duration of the
-run. (opencode's ChatGPT sign-in needs none of this — its traffic proxies
-normally at full fidelity.)
+**What's telemetry capture?** A subscription login only works over the
+vendor's own connection, so a proxy can't sit on that wire. Instead, Beagle
+captures those sessions from the agent's own usage reporting. Your prompts,
+tool inputs, and tool outputs (including files the agent reads) are still
+scanned — but it's the agent's self-report, not observed wire bytes. Those
+rows are badged **agent** in the dashboard, and alerts can lag a few seconds.
+Nothing leaves your machine: the report goes to a loopback receiver on
+`127.0.0.1`, and the vendor's reporting flags are set per run, never written
+to your agent's config. One footnote: if your agent already exports telemetry
+to a company collector, that export is redirected to Beagle only for the
+duration of the run. (opencode's ChatGPT sign-in needs none of this — its
+traffic proxies normally at full fidelity.)
 
 ## How it works (and what it is *not*)
 

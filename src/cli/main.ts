@@ -12,13 +12,14 @@ const HELP = `beagle ${VERSION} — a local transparency proxy for AI agents
 
 usage:
   beagle run <agent> [args...]   watch one agent run (claude, codex, opencode, pi)
-  beagle run <agent> --telemetry watch via the agent's own telemetry, for
-                                 subscription logins that can't be wired
-                                 through a proxy (claude, codex) — nothing sits
-                                 on the wire; capture is agent-reported
+  beagle run <agent> [--telemetry|--wire]
+                                 subscription logins (claude, codex) capture
+                                 via the agent's own telemetry — detected
+                                 automatically; Beagle asks once if it can't
+                                 tell. Flags force a mode.
   beagle watch <agent> [--yes]   watch an agent automatically (PATH shim);
-                                 --telemetry for subscription logins (auto-
-                                 detected for codex), --wire to force proxy
+                                 subscription logins auto-detected (claude,
+                                 codex); --telemetry/--wire to force a mode
   beagle unwatch <agent>         stop watching, restore your setup
   beagle detect                  find supported agents on this machine
   beagle status                  trust strip: coverage, store, retention
@@ -28,7 +29,8 @@ usage:
   beagle leaks                   the leak log
   beagle show <id-prefix>        one call, summarized
   beagle purge [all|panic]       erase captured data
-  beagle config [...]            view/set redact-on-capture, exclusions
+  beagle config [...]            view/set redact-on-capture, exclusions,
+                                 run-mode <agent> <wire|telemetry|auto>
   beagle ui                      open the dashboard (fresh one-time link)
   beagle daemon                  run the daemon in the foreground
 `;
