@@ -38,6 +38,9 @@ export interface WatchResult {
   applied: boolean;
   message: string;
   verdict?: CoverageVerdict;
+  /** unwatch only: the shared background service was torn down too (this was
+   *  the last watched agent) — the caller may also stop a running daemon. */
+  serviceRemoved?: boolean;
 }
 
 /** How a watched agent is captured. "auto" resolves per agent: telemetry when
@@ -241,6 +244,7 @@ export function unwatchAgent(agent: string, env: WatchEnv): WatchResult {
   if (!removed) return { applied: false, message: `${agent} was not being watched.` };
   return {
     applied: true,
+    serviceRemoved,
     message:
       `unwatched ${agent} — shim removed, config restored.` +
       (serviceRemoved ? " Background service removed (no agents left watched)." : ""),

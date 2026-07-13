@@ -224,6 +224,43 @@ export async function cmdPurge(stateDir: string, kind: string): Promise<string> 
   return `purged (${kind}).`;
 }
 
+/** Stop the running beagle daemon (graceful, via its control socket). An
+ *  agent mid-capture holds a lease — refuse then, unless forced, so stopping
+ *  can't silently drop a live session's capture. */
+export async function cmdStop(stateDir: string, force = false): Promise<string> {
+  const daemon = await pingDaemon(stateDir);
+  if (!daemon) return "no beagle daemon is running.";
+  const status = await controlRequest(daemon.socketPath, { cmd: "status" });
+  const leases = (status.data as { leases?: number } | undefined)?.leases ?? 0;
+  if (leases > 0 && !force) {
+    return (
+      `the daemon is capturing for ${leases} live agent session${leases === 1 ? "" : "s"} — ` +
+      `stopping now would drop that capture.\nFinish those sessions first, or force with: beagle stop --force`
+    );
+  }
+  await controlRequest(daemon.socketPath, { cmd: "shutdown" });
+  // confirm it actually went down (the shutdown is async on the daemon side)
+  for (let i = 0; i < 20; i++) {
+    await Bun.sleep(100);
+    if (!(await pingDaemon(stateDir))) return `daemon stopped (pid ${daemon.pid}).`;
+  }
+  return `asked the daemon (pid ${daemon.pid}) to stop, but it is still responding — check \`beagle status\`.`;
+}
+
+/** One detect line per agent: what login Beagle sees and what capture mode a
+ *  plain `beagle run <agent>` would therefore pick. Exported for tests. */
+export function detectLine(agent: string, auth: "api-key" | "subscription" | "unknown"): string {
+  const login =
+    auth === "subscription" ? "subscription login" : auth === "api-key" ? "API-key login" : "login not detected";
+  const mode =
+    auth === "subscription"
+      ? "telemetry capture"
+      : auth === "api-key"
+        ? "wire capture"
+        : "asks on first run";
+  return `  ${agent.padEnd(9)} ${login.padEnd(19)} beagle run ${agent}   (${mode})`;
+}
+
 export function cmdDetect(): string {
   const found = detectAgents({
     pathDirs: pathDirsFromEnv(process.env.PATH),
@@ -236,9 +273,13 @@ export function cmdDetect(): string {
       "To point one manually, set its base URL to Beagle's proxy — see the README."
     );
   }
-  const names = found.map((f) => f.agent).join(" and ");
-  const first = found[0]!;
-  return `Found ${names}. Try: ${first.runCommand}`;
+  const lines = found.map((f) => {
+    // opencode wire-captures both logins, pi is API-key only — for those the
+    // login detail doesn't change the command or the mode.
+    if (f.agent === "claude" || f.agent === "codex") return detectLine(f.agent, detectAuthForRun(f.agent));
+    return `  ${f.agent.padEnd(9)} ${"".padEnd(19)} beagle run ${f.agent}   (wire capture)`;
+  });
+  return `Found ${found.length} agent${found.length === 1 ? "" : "s"}:\n${lines.join("\n")}\nAlways-on instead: beagle watch <agent>`;
 }
 
 function buildWatchEnv(stateDir: string, yes: boolean): WatchEnv {
@@ -342,8 +383,25 @@ export function cmdWatch(
   return { ok: r.applied, message: r.message };
 }
 
-export function cmdUnwatch(stateDir: string, agent: string): string {
-  return unwatchAgent(agent, buildWatchEnv(stateDir, true)).message;
+export async function cmdUnwatch(stateDir: string, agent: string): Promise<string> {
+  const r = unwatchAgent(agent, buildWatchEnv(stateDir, true));
+  // Leave no trace: when the LAST watched agent goes, the service is removed —
+  // also stop a still-running daemon (launchd kills its own; this catches
+  // ephemeral/manually-started ones). Graceful: an active capture (lease)
+  // keeps it alive; those daemons idle-exit on their own afterwards.
+  if (r.serviceRemoved) {
+    const daemon = await pingDaemon(stateDir);
+    if (daemon) {
+      const status = await controlRequest(daemon.socketPath, { cmd: "status" });
+      const leases = (status.data as { leases?: number } | undefined)?.leases ?? 0;
+      if (leases === 0) {
+        await controlRequest(daemon.socketPath, { cmd: "shutdown" });
+        return r.message + " Daemon stopped.";
+      }
+      return r.message + ` Daemon left running (${leases} live capture session${leases === 1 ? "" : "s"}) — it stops when they end, or run: beagle stop`;
+    }
+  }
+  return r.message;
 }
 
 // Reads one line from stdin (until newline or EOF, capped at 64 KB). Exported

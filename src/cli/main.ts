@@ -2,7 +2,7 @@
 // leaks, show, purge — the whole product without the viewer.
 import {
   cmdConfig, cmdDetect, cmdHookForward, cmdLeaks, cmdPurge, cmdRun, cmdSearch, cmdShow,
-  cmdStatus, cmdUnwatch, cmdWatch, defaultStateDir, parseWatchArgs, readLineSync,
+  cmdStatus, cmdStop, cmdUnwatch, cmdWatch, defaultStateDir, parseWatchArgs, readLineSync,
 } from "./commands";
 import { BEAGLE_VERSION } from "../core/version";
 
@@ -20,7 +20,10 @@ usage:
   beagle watch <agent> [--yes]   watch an agent automatically (PATH shim);
                                  subscription logins auto-detected (claude,
                                  codex); --telemetry/--wire to force a mode
-  beagle unwatch <agent>         stop watching, restore your setup
+  beagle unwatch <agent>         stop watching, restore your setup (stops the
+                                 daemon too when nothing is left watched)
+  beagle stop [--force]          stop the background daemon (refuses while an
+                                 agent session is being captured)
   beagle detect                  find supported agents on this machine
   beagle status                  trust strip: coverage, store, retention
   beagle search [string]         was this ever sent? definitive answer
@@ -33,6 +36,7 @@ usage:
                                  run-mode <agent> <wire|telemetry|auto>
   beagle ui                      open the dashboard (fresh one-time link)
   beagle daemon                  run the daemon in the foreground
+  beagle help                    this text
 `;
 
 export async function run(argv: string[]): Promise<number> {
@@ -42,6 +46,11 @@ export async function run(argv: string[]): Promise<number> {
     case "--version":
     case "-v":
       console.log(`beagle ${VERSION}`);
+      return 0;
+    case "help":
+    case "--help":
+    case "-h":
+      console.log(HELP);
       return 0;
     case "run": {
       const [agent, ...agentArgs] = rest;
@@ -57,9 +66,12 @@ export async function run(argv: string[]): Promise<number> {
     }
     case "unwatch": {
       if (!rest[0]) { console.error("usage: beagle unwatch <agent>"); return 2; }
-      console.log(cmdUnwatch(stateDir, rest[0]));
+      console.log(await cmdUnwatch(stateDir, rest[0]));
       return 0;
     }
+    case "stop":
+      console.log(await cmdStop(stateDir, rest.includes("--force")));
+      return 0;
     case "detect":
       console.log(cmdDetect());
       return 0;

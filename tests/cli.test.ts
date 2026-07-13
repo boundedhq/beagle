@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, interpretAskAnswer, otelCallsArrivedSince, parseRunArgs, readCodexApiKey, resolveRunMode, runCallsArrived } from "../src/cli/commands";
+import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, detectLine, interpretAskAnswer, otelCallsArrivedSince, parseRunArgs, readCodexApiKey, resolveRunMode, runCallsArrived } from "../src/cli/commands";
 import { buildRunEnv, AGENTS } from "../src/cli/agents";
 import { Store, type CallRecord } from "../src/core/store/store";
 import { ulid } from "../src/core/store/ulid";
@@ -302,6 +302,31 @@ describe("readCodexApiKey (fail-open: supply codex's key from auth.json)", () =>
     writeFileSync(join(h, "auth.json"), "not json");
     expect(readCodexApiKey(h)).toBeNull();
     expect(readCodexApiKey(mkdtempSync(join(tmpdir(), "beagle-empty-")))).toBeNull(); // no file
+  });
+});
+
+describe("beagle help / detect surfaces", () => {
+  test("'beagle help' prints the command list and exits 0 (not the unknown-command path)", () => {
+    for (const arg of ["help", "--help", "-h"]) {
+      const run = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "cli", "main.ts"), arg]);
+      expect(run.exitCode).toBe(0);
+      expect(run.stdout.toString()).toContain("beagle run <agent>");
+      expect(run.stdout.toString()).toContain("beagle stop");
+    }
+  });
+
+  test("an unknown command still prints help but exits 2", () => {
+    const run = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "cli", "main.ts"), "bogus-cmd"]);
+    expect(run.exitCode).toBe(2);
+  });
+
+  test("detectLine names the login and the capture mode a plain run would pick", () => {
+    expect(detectLine("claude", "subscription")).toContain("subscription login");
+    expect(detectLine("claude", "subscription")).toContain("telemetry capture");
+    expect(detectLine("codex", "api-key")).toContain("wire capture");
+    expect(detectLine("codex", "unknown")).toContain("asks on first run");
+    // the command itself is always the plain one — no flags to memorize
+    expect(detectLine("claude", "subscription")).toContain("beagle run claude");
   });
 });
 

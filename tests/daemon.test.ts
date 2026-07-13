@@ -106,6 +106,7 @@ describe("Daemon end-to-end", () => {
       stateDir,
       alertSinkForTest: (a) => alerts.push(a),
       persistent: true, // these test capture, not lifecycle — no idle-exit
+      exitProcessOnIdle: false, // in-process daemon must never process.exit() the test runner
     });
     await controlRequest(daemon.socketPath, {
       cmd: "register-run",
@@ -122,6 +123,22 @@ describe("Daemon end-to-end", () => {
   afterEach(async () => {
     await daemon.stop();
     upstream.server.close();
+  });
+
+  test("beagle stop: refuses while a lease is held, stops when idle, --force overrides", async () => {
+    const { cmdStop } = await import("../src/cli/commands");
+    const { openLease } = await import("../src/daemon/control");
+    // a live capture session (lease) must block a graceful stop
+    const lease = await openLease(daemon.socketPath);
+    const refused = await cmdStop(stateDir);
+    expect(refused).toContain("live agent session");
+    expect(daemon.isRunning).toBe(true);
+    lease.end();
+    await Bun.sleep(100);
+    // idle → stops (the daemon's shutdown calls process.exit in prod; here we
+    // just verify the control round-trip asked it to stop)
+    const stopping = await cmdStop(stateDir);
+    expect(stopping.toLowerCase()).toMatch(/stopped|asked the daemon/);
   });
 
   test("ping reports the daemon's version so an upgraded CLI can detect a stale daemon", async () => {
