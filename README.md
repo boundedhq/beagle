@@ -6,12 +6,12 @@
 **See exactly what your AI agents send to remote models — with leaked secrets
 flagged the moment they leave your machine.**
 
-AI coding agents read your files, your shell output, your git history — and
-ship chunks of all of it to a model provider on every turn. Today that
-traffic is invisible: you can't see what left, you can't search it, and if an
-agent sent your AWS key along for the ride, nobody tells you. Beagle is a
-local transparency proxy that makes that traffic visible, searchable, and
-scanned for secrets — in one command, without changing your setup.
+AI agents read your files, your shell output, your git history — and ship
+chunks of all of it to a model provider on every turn. Today that traffic is
+invisible: you can't see what left, you can't search it, and if an agent
+sent your AWS key along for the ride, nobody tells you. Beagle is a local
+transparency proxy that makes that traffic visible, searchable, and scanned
+for secrets — in one command, without changing your setup.
 
 ![The Beagle dashboard: a live feed of every model call, with a leaked AWS key highlighted inline](docs/assets/dashboard.png)
 
@@ -19,7 +19,7 @@ scanned for secrets — in one command, without changing your setup.
 
 ```sh
 brew install boundedhq/tap/beagle    # or see Install below
-beagle run claude                    # run your agent under beagle — that's it
+beagle run claude                    # wraps the `claude` CLI in your terminal — that's it
 ```
 
 `beagle run` wraps a single agent session and changes nothing on your system.
@@ -27,9 +27,9 @@ While it runs, every model call is captured locally; if a secret goes out,
 you get an OS notification the moment it happens. Afterwards:
 
 ```sh
-$ beagle search sk-live-abc123     # "was this key ever sent?"
-found in 1 call across 1 session:
-  01KXAK6K  2026-07-12T14:23:00Z  session a1b2c3d4
+$ pbpaste | beagle search          # "was this key ever sent?" — pipe the term
+found in 1 call across 1 session:  # in (or type at the prompt) so the secret
+  01KXAK6K  2026-07-12T…  session a1b2c3d4   # never lands in shell history
 
 $ beagle ui                        # or browse it in the dashboard
 dashboard: http://127.0.0.1:52341/?boot=…
@@ -65,13 +65,20 @@ Just as important, what Beagle is **not**:
 
 ## Supported agents
 
+v1 wraps **terminal CLI agents** — `beagle run` launches the agent's CLI
+under the proxy, and `beagle watch` shims its PATH entry:
+
 | Agent | How it's wrapped | Capture |
 |---|---|---|
-| Claude Code (API key) | `ANTHROPIC_BASE_URL` | ✓ wire (full fidelity) |
+| Claude Code CLI (API key) | `ANTHROPIC_BASE_URL` | ✓ wire (full fidelity) |
 | Codex CLI | `OPENAI_BASE_URL` | ✓ wire (full fidelity) |
 | opencode | Beagle-owned config redirect, reverted after the run | ✓ wire (full fidelity) |
 | pi | Beagle-owned config redirect, reverted after the run | ✓ wire (full fidelity) |
-| Claude Code (Claude.ai subscription) | `beagle run claude --telemetry` — Claude Code's own OpenTelemetry export posts to Beagle's loopback receiver; nothing sits on the wire | *agent-reported* (Mode B) |
+| Claude Code CLI (Claude.ai subscription) | `beagle run claude --telemetry` — Claude Code's own OpenTelemetry export posts to Beagle's loopback receiver; nothing sits on the wire | *agent-reported* (Mode B) |
+
+Desktop apps, IDE extensions, and web UIs launch their own processes and
+don't inherit either mechanism, so their traffic is **not** captured in v1 —
+`beagle status` always tells you exactly what is and isn't covered.
 
 Every row in the dashboard is labeled **✓ wire** (observed on the wire) or
 **agent** (the agent's own self-report), so you always know which kind of
@@ -107,7 +114,9 @@ beagle run <agent>         # watch one agent run; nothing changed on your system
 beagle watch <agent>       # opt in to always-on (one PATH shim; revert any time)
 beagle unwatch <agent>     # stop watching, restore your setup
 beagle status              # trust strip: coverage, store size, retention, what changed
-beagle search <string>     # "was this password ever sent?" — a definitive answer
+beagle search [string]     # "was this password ever sent?" — a definitive answer
+                           # (no argument: reads the term from stdin — pipe a real
+                           #  secret in rather than putting it in shell history)
 beagle leaks               # the leak log
 beagle show <id>           # one call, summarized or raw
 beagle ui                  # open the dashboard (loopback, one-time token)
@@ -197,6 +206,19 @@ demand.
 No. Coverage is opt-in per agent (`run` for one session, `watch` for
 always-on). There is no system proxy, no packet capture, no TLS
 interception.
+
+**Does it cover the Claude Code desktop app, IDE extensions, or web UIs?**
+Not in v1. Beagle wraps processes launched from your terminal — `beagle
+run` spawns the CLI under the proxy, and `beagle watch` shims the CLI's
+PATH entry. GUI apps launch their own processes and inherit neither, so
+their traffic isn't captured. `beagle status` reports coverage honestly
+rather than implying more than it sees.
+
+**How do I search for a real secret without leaking it into shell history?**
+Run `beagle search` with no argument — it reads the term from stdin. Pipe
+it (`pbpaste | beagle search`) or type it at the prompt; either way the
+secret never appears in argv, shell history, or `ps` output. (The search
+itself runs locally against your local store.)
 
 **Why should I trust the detector?**
 It's the gitleaks ruleset (vendored as data, sha256-pinned) run through a

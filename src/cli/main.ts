@@ -2,7 +2,7 @@
 // leaks, show, purge — the whole product without the viewer.
 import {
   cmdConfig, cmdDetect, cmdLeaks, cmdPurge, cmdRun, cmdSearch, cmdShow, cmdStatus,
-  cmdUnwatch, cmdWatch, defaultStateDir,
+  cmdUnwatch, cmdWatch, defaultStateDir, readLineSync,
 } from "./commands";
 
 export const VERSION = "0.1.0";
@@ -18,7 +18,9 @@ usage:
   beagle unwatch <agent>         stop watching, restore your setup
   beagle detect                  find supported agents on this machine
   beagle status                  trust strip: coverage, store, retention
-  beagle search <string>         was this ever sent? definitive answer
+  beagle search [string]         was this ever sent? definitive answer
+                                 (no argument: reads the term from stdin, so
+                                 secrets stay out of your shell history)
   beagle leaks                   the leak log
   beagle show <id-prefix>        one call, summarized
   beagle purge [all|panic]       erase captured data
@@ -68,8 +70,14 @@ export async function run(argv: string[]): Promise<number> {
       return 0;
     }
     case "search": {
-      const term = rest.join(" ");
-      if (!term) { console.error("usage: beagle search <string>"); return 2; }
+      // No argument → read the term from stdin (`pbpaste | beagle search`),
+      // so a real secret never has to appear in argv / shell history.
+      let term = rest.join(" ");
+      if (!term) {
+        if (process.stdin.isTTY) console.error("beagle: paste the term to search, then press Enter:");
+        term = readLineSync().trim();
+      }
+      if (!term) { console.error("usage: beagle search [string]  (or pipe the term via stdin)"); return 2; }
       console.log(cmdSearch(stateDir, term));
       return 0;
     }
