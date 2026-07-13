@@ -483,9 +483,10 @@ export async function cmdHookForward(): Promise<number> {
     const endpoint = process.env.BEAGLE_HOOK_ENDPOINT;
     const token = process.env.BEAGLE_HOOK_TOKEN;
     if (endpoint && token) {
-      // Bounded read: a runaway tool output can't balloon this short-lived
-      // process, and we never send more than the receiver would accept anyway.
-      const body = await readStdinCapped(33 << 20);
+      // Bounded read (size AND time): a runaway or never-closing tool output
+      // can't balloon or hang this short-lived process. The read cap matches
+      // the receiver's body cap — anything larger wouldn't be accepted anyway.
+      const body = await readStdinCapped(32 << 20, 1500);
       if (body) {
         // Hard timeout: PostToolUse runs synchronously inside the agent's loop,
         // so a hung/slow receiver must NEVER stall the agent. Best-effort.
@@ -503,22 +504,26 @@ export async function cmdHookForward(): Promise<number> {
   return 0;
 }
 
-// Read stdin up to `cap` bytes, then stop (drop the rest). The receiver caps
-// the POST too; this just keeps the hook process from reading an unbounded
-// payload into memory.
-async function readStdinCapped(cap: number): Promise<string> {
+// Read stdin up to `cap` bytes OR `deadlineMs`, whichever comes first, then
+// stop. Bounds both memory (a huge payload) and time (stdin that never reaches
+// EOF) so the hook can't balloon or hang the agent — the whole point of a hook
+// forwarder is to never disrupt the agent.
+async function readStdinCapped(cap: number, deadlineMs: number): Promise<string> {
   const reader = (Bun.stdin.stream() as ReadableStream<Uint8Array>).getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
+  // On the deadline, cancel the reader — the pending read() then resolves done.
+  const timer = setTimeout(() => void reader.cancel().catch(() => {}), deadlineMs);
   try {
     for (;;) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done || !value) break;
       chunks.push(value);
       total += value.length;
       if (total >= cap) break;
     }
   } finally {
+    clearTimeout(timer);
     reader.cancel().catch(() => {});
   }
   return new TextDecoder().decode(Buffer.concat(chunks));

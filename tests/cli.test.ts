@@ -262,4 +262,24 @@ describe("__hook forwarder safety (Mode B tool-output hook)", () => {
     expect(run.stdout.toString()).toBe("");
     expect(Date.now() - t0).toBeLessThan(4000); // bounded by the 2s AbortSignal, not hung
   });
+
+  test("stdin that never reaches EOF is time-bounded (the read can't hang the agent)", async () => {
+    // A partial payload with stdin left OPEN: the read must not block forever
+    // waiting for EOF — the 1.5s deadline cancels it, then the process exits.
+    const proc = Bun.spawn(bin(), {
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, BEAGLE_HOOK_ENDPOINT: "http://127.0.0.1:1/v1/hook", BEAGLE_HOOK_TOKEN: "t" },
+    });
+    proc.stdin.write('{"tool_response":"partial'); // never closed
+    proc.stdin.flush();
+    const t0 = Date.now();
+    const code = await Promise.race([
+      proc.exited,
+      new Promise<number>((r) => setTimeout(() => { proc.kill(); r(-1); }, 6000)),
+    ]);
+    expect(code).toBe(0); // exited on its own (not the 6s kill fallback)
+    expect(Date.now() - t0).toBeLessThan(5000); // bounded by the 1.5s stdin deadline + fetch
+  });
 });
