@@ -121,7 +121,7 @@ export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null):
   if (otelCalls > 0) {
     lines.push(
       `  ${otelCalls} agent-reported (Mode B, --telemetry): self-report — prompts, ` +
-        `responses, tool inputs, and tool outputs are scanned; alerts lag seconds`,
+        `tool inputs, and tool outputs are scanned; alerts lag seconds`,
     );
   }
   lines.push(
@@ -371,8 +371,8 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
     return 2;
   }
   // Mode B (R2): --telemetry watches via the agent's own OTel export instead
-  // of the wire — for Claude Code on a Claude.ai subscription, where putting
-  // a proxy on the wire is off-limits. Capture is labeled agent-reported.
+  // of the wire — for subscription logins (Claude Code on Claude.ai, Codex on
+  // ChatGPT) whose traffic can't be proxied. Capture is labeled agent-reported.
   const { telemetry, realBinary: realOverride, agentArgs } = parseRunArgs(rawArgs);
   if (telemetry && !spec.telemetry) {
     const supported = Object.entries(AGENTS)
@@ -402,7 +402,9 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
   }
 
   const runId = randomUUID();
-  let modeEnv: Record<string, string>;
+  // `undefined` entries mean "remove this var from the child env" (codex needs
+  // inherited OTLP compression vars gone — see buildCodexOtelEnv).
+  let modeEnv: Record<string, string | undefined>;
   let finalArgs = agentArgs;
   // Beagle-owned per-run file to delete when the agent exits (redirect config,
   // pi extension, or the Mode-B hook settings). Named per RUN so concurrent
@@ -422,7 +424,7 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
       // Codex exports the full leak surface — prompt, tool commands, AND tool
       // output — inline in its own OTel stream, so no PostToolUse hook is
       // needed. Point its exporter at the receiver via `-c` config flags
-      // prepended to the user's argv; the run token rides an env var (never
+      // prepended to the user's argv; the auth token rides an env var (never
       // argv, where it would leak to other local users via `ps`/audit logs).
       modeEnv = buildCodexOtelEnv(data.otlpToken);
       finalArgs = [...buildCodexOtelArgs(base), ...agentArgs];
@@ -473,7 +475,48 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
       modeEnv = buildRunEnv(agentName, daemon.proxyPort, runId);
     }
   }
-  return await execAgent(daemon.socketPath, realBinary, finalArgs, modeEnv, stateDir, agentName, cleanupFile, telemetry);
+  const otelBefore = telemetry ? countOtelCalls(stateDir) : -1;
+  const exitCode = await execAgent(daemon.socketPath, realBinary, finalArgs, modeEnv, stateDir, agentName, cleanupFile, telemetry);
+  // Telemetry capture has real silent-failure modes the wire path doesn't: an
+  // agent version without OTel export, a user env/config that displaces the
+  // exporter. The agent runs fine either way — so if nothing arrived, say so
+  // loudly rather than let the user believe the run was watched.
+  if (telemetry && !(await otelCallsArrived(stateDir, otelBefore))) {
+    process.stderr.write(
+      `beagle ▲ nothing arrived from ${agentName}'s telemetry this run — it was likely NOT captured.\n` +
+        `  Check \`beagle status\`, and that your ${agentName} version supports telemetry export.\n`,
+    );
+  }
+  return exitCode;
+}
+
+// COUNT of agent-reported calls in the store; -1 when unreadable (never block
+// or false-alarm the run over a store hiccup).
+function countOtelCalls(stateDir: string): number {
+  const store = openStore(stateDir);
+  if (store === null || isStoreError(store)) return -1;
+  try {
+    return store.queryAll<{ n: number }>("SELECT COUNT(*) AS n FROM exchanges WHERE source='otel'")[0]?.n ?? 0;
+  } catch {
+    return -1;
+  } finally {
+    store.close();
+  }
+}
+
+// Did any agent-reported call land since `before`? Exports are batched, so the
+// last batch can trail the agent's exit — poll briefly before concluding zero.
+// (Another concurrent Mode B run can also bump the count — that's fine, the
+// warning is a best-effort tripwire, not an accounting.)
+async function otelCallsArrived(stateDir: string, before: number, deadlineMs = 4000): Promise<boolean> {
+  if (before < 0) return true; // store unreadable → don't cry wolf
+  const t0 = Date.now();
+  for (;;) {
+    const n = countOtelCalls(stateDir);
+    if (n < 0 || n > before) return true;
+    if (Date.now() - t0 >= deadlineMs) return false;
+    await Bun.sleep(250);
+  }
 }
 
 // The shell command Claude Code runs for the tool-output hook: this same
@@ -546,7 +589,7 @@ async function execAgent(
   socketPath: string,
   realBinary: string,
   agentArgs: string[],
-  modeEnv: Record<string, string>,
+  modeEnv: Record<string, string | undefined>,
   stateDir: string,
   agentName: string,
   redirectCfg: string | null,
@@ -566,8 +609,12 @@ async function execAgent(
   const lease = await openLease(socketPath).catch(() => null);
 
   try {
+    // An `undefined` modeEnv entry REMOVES the var from the child env (an
+    // inherited var can break the agent-side capture — see buildCodexOtelEnv).
+    const childEnv: Record<string, string | undefined> = { ...process.env, ...modeEnv };
+    for (const k of Object.keys(childEnv)) if (childEnv[k] === undefined) delete childEnv[k];
     const child = Bun.spawn([realBinary, ...agentArgs], {
-      env: { ...process.env, ...modeEnv },
+      env: childEnv as Record<string, string>,
       stdio: ["inherit", "inherit", "inherit"],
     });
     const exitCode = await child.exited;

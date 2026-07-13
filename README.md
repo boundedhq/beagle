@@ -92,10 +92,13 @@ under the proxy, and `beagle watch` shims its PATH entry:
   (including files the agent reads). It's the agent's self-report, not observed
   wire bytes, so those rows are badged **agent** and alerts are batched (lag
   seconds) and best-effort. Nothing is sent anywhere: Beagle points the agent's
-  telemetry at a loopback receiver on your own machine, authed with a per-run
-  token. The vendor content flags apply only to that one run — set per-run
-  (env vars for Claude Code, `-c` overrides for Codex), never written to your
-  agent's config.
+  telemetry at a loopback receiver on your own machine, authed with a token the
+  daemon mints. The vendor content flags apply only to that one run — set
+  per-run (env vars for Claude Code, `-c` overrides for Codex), never written
+  to your agent's config. One side effect to know about: if your agent already
+  exports its own OpenTelemetry data (say, to a company collector), Beagle's
+  per-run settings redirect that export to the local receiver for the duration
+  of the run.
 - **opencode** — no base-URL variable; its endpoint lives in a config file.
   For the duration of the run Beagle hands it a **temporary config file of
   its own** (your real settings merged in, plus the proxy address).

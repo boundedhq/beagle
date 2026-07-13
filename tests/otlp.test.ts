@@ -376,6 +376,49 @@ describe("Codex OTLP → Call mapping (Codex Mode B, codex.* schema)", () => {
     expect(mapCodexOtlpToCalls({ resourceLogs: "nope" })).toEqual([]);
   });
 
+  test("tool_result chunks sharing a call_id merge into ONE scan surface — a split secret still matches", () => {
+    // codex streams long exec output across several tool_result records; a
+    // secret cut at a chunk boundary must be reassembled or the detector regex
+    // can never see it whole.
+    const calls = mapCodexOtlpToCalls(
+      codexLogs([
+        codexEvent("codex.tool_result", {
+          "conversation.id": "c", call_id: "call-7", tool_name: "exec_command",
+          arguments: '{"cmd":"cat key.txt"}', output: "half of it: AKIAZQ3DRS",
+        }, "1752300000000000000"),
+        codexEvent("codex.tool_result", {
+          "conversation.id": "c", call_id: "call-7", tool_name: "exec_command",
+          arguments: '{"cmd":"cat key.txt"}', output: "TUVWXY2345 and the rest",
+        }, "1752300001000000000"),
+      ]),
+    );
+    expect(calls.length).toBe(1); // one Call per call_id, not per chunk
+    const scanned = decode(calls[0]!.request.bodyBytes);
+    expect(scanned).toContain("AKIAZQ3DRS\nTUVWXY2345"); // chunks adjacent, newline-joined
+    expect(scanned.match(/cat key\.txt/g)?.length).toBe(1); // repeated arguments deduped
+    // distinct call_ids stay distinct rows
+    const two = mapCodexOtlpToCalls(
+      codexLogs([
+        codexEvent("codex.tool_result", { "conversation.id": "c", call_id: "a", tool_name: "exec", output: "x" }),
+        codexEvent("codex.tool_result", { "conversation.id": "c", call_id: "b", tool_name: "exec", output: "y" }),
+      ]),
+    );
+    expect(two.length).toBe(2);
+  });
+
+  test("sse_event token counts attach to the conversation's prompt Call", () => {
+    const calls = mapCodexOtlpToCalls(
+      codexLogs([
+        codexEvent("codex.user_prompt", { "conversation.id": "c", prompt: "hi" }),
+        codexEvent("codex.sse_event", { "conversation.id": "c", "event.kind": "response.completed", input_token_count: 100, output_token_count: 7 }),
+        codexEvent("codex.sse_event", { "conversation.id": "c", "event.kind": "response.completed", input_token_count: 40, output_token_count: 3 }),
+      ]),
+    );
+    expect(calls.length).toBe(1); // sse_events feed meta, never their own rows
+    expect(calls[0]!.meta.tokensIn).toBe(140);
+    expect(calls[0]!.meta.tokensOut).toBe(10);
+  });
+
   test("timeUnixNano='0' (codex's real sentinel) falls back to observedTimeUnixNano — never 1970", () => {
     // Regression: real codex sets timeUnixNano to literal "0" on EVERY record;
     // taking it at face value dated all codex rows 1970-01-01 with zeroed ulids
@@ -434,11 +477,27 @@ describe("buildCodexOtelArgs / buildCodexOtelEnv (vendor knobs only, R2)", () =>
     expect(args.join(" ")).not.toContain("x-beagle-run");
   });
 
-  test("the run token rides an env var (OTEL_EXPORTER_OTLP_HEADERS), not argv", () => {
+  test("the token rides the SIGNAL-SPECIFIC header var, not argv, not the generic var", () => {
     const env = buildCodexOtelEnv("run-token-xyz");
-    expect(env.OTEL_EXPORTER_OTLP_HEADERS).toBe("x-beagle-run=run-token-xyz");
+    // codex's otlp crate resolves LOGS_HEADERS **or else** the generic var —
+    // replace, not merge (verified live). Only the signal-specific var
+    // guarantees the token wins over a user's own OTLP env; and leaving the
+    // generic var alone preserves it for codex's child processes.
+    expect(env.OTEL_EXPORTER_OTLP_LOGS_HEADERS).toBe("x-beagle-run=run-token-xyz");
+    expect(env.OTEL_EXPORTER_OTLP_HEADERS).toBeUndefined();
     // and the args builder — the only thing on the command line — never sees it
     expect(buildCodexOtelArgs("http://127.0.0.1:4318").join(" ")).not.toContain("run-token-xyz");
+  });
+
+  test("inherited OTLP compression vars are marked for removal (codex lacks gzip support)", () => {
+    const env = buildCodexOtelEnv("t");
+    // present as keys with undefined values — execAgent deletes those from the
+    // child env; codex is compiled without gzip, so an inherited =gzip kills
+    // its exporter at startup (silent zero capture).
+    expect("OTEL_EXPORTER_OTLP_COMPRESSION" in env).toBe(true);
+    expect(env.OTEL_EXPORTER_OTLP_COMPRESSION).toBeUndefined();
+    expect("OTEL_EXPORTER_OTLP_LOGS_COMPRESSION" in env).toBe(true);
+    expect(env.OTEL_EXPORTER_OTLP_LOGS_COMPRESSION).toBeUndefined();
   });
 });
 
