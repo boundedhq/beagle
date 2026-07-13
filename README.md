@@ -36,9 +36,6 @@ dashboard: http://127.0.0.1:52341/?boot=…
 (the link is one-time; run `beagle ui` again for a fresh one)
 ```
 
-You never have to tell Beagle what your secrets look like — detection runs
-automatically on every outbound call.
-
 ## How it works (and what it is *not*)
 
 `beagle run claude` starts a loopback proxy and points the agent at it using
