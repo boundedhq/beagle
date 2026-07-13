@@ -122,7 +122,7 @@ export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null):
     lines.push(
       `  ${otelCalls} agent-reported (Mode B, --telemetry): self-report — prompts, ` +
         `responses, tool inputs, and tool outputs (via a PostToolUse hook) are ` +
-        `scanned; alerts lag seconds. see docs/mode-b-spike.md`,
+        `scanned; alerts lag seconds`,
     );
   }
   lines.push(

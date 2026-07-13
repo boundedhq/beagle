@@ -2,10 +2,10 @@
 // export → canonical Call, marked source='otel' → the agent-reported badge
 // (R7): this is the agent's self-report, not wire bytes.
 //
-// Real schema (verified against Claude Code 2.1.193 in the Phase-0 spike —
-// docs/mode-b-spike.md; scope "com.anthropic.claude_code.events"). This is NOT
-// the OpenTelemetry GenAI semconv — there is no `gen_ai.prompt`/`gen_ai.
-// completion`. Instead one user turn is SPLIT across several event log records
+// Real schema (verified live against Claude Code 2.1.193; scope
+// "com.anthropic.claude_code.events"). This is NOT the OpenTelemetry GenAI
+// semconv — there is no `gen_ai.prompt`/`gen_ai.completion`. Instead one user
+// turn is SPLIT across several event log records
 // that share (session.id, prompt.id):
 //   event.name=user_prompt        → prompt (verbatim), prompt.id, session.id
 //   event.name=tool_result        → tool_input (verbatim), tool_name — but NO
