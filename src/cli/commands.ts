@@ -583,7 +583,7 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
       }
     }
   }
-  if (!telemetry && !spec.baseUrlEnv && !spec.config && !spec.extension) {
+  if (!telemetry && !spec.baseUrlEnv && !spec.config && !spec.extension && !spec.wireArgs) {
     console.error(
       `${agentName} is config-driven and its config-override mechanism isn't confirmed yet — ` +
         `point it at Beagle manually for now (see the README).`,
@@ -685,6 +685,13 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
       const source = buildExtensionRedirect(spec.extension.baseUrlProvider, baseUrl);
       cleanupFile = writeRedirectExtension(stateDir, `${agentName}-${runId}`, source);
       finalArgs = [spec.extension.flag, cleanupFile, ...agentArgs];
+      modeEnv = {};
+    } else if (spec.wireArgs) {
+      // Arg-driven redirect (codex): it ignores OPENAI_BASE_URL, so prepend
+      // `-c` flags defining a custom provider pointed at the proxy. The user's
+      // OPENAI_API_KEY (read by the provider's env_key) rides through unchanged;
+      // Beagle scrubs it before storing.
+      finalArgs = [...spec.wireArgs(runBaseUrl(daemon.proxyPort, runId)), ...agentArgs];
       modeEnv = {};
     } else {
       modeEnv = buildRunEnv(agentName, daemon.proxyPort, runId);

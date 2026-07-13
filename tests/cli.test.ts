@@ -164,9 +164,17 @@ describe("run env mapping", () => {
     expect(env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:4242/run/uuid-1");
   });
 
-  test("codex uses OPENAI_BASE_URL", () => {
-    const env = buildRunEnv("codex", 4242, "uuid-2");
-    expect(env.OPENAI_BASE_URL).toBe("http://127.0.0.1:4242/run/uuid-2");
+  test("codex redirects via a custom provider, NOT OPENAI_BASE_URL (which it ignores)", () => {
+    // codex ignores OPENAI_BASE_URL (verified live) — buildRunEnv must not
+    // pretend otherwise, and the wire redirect is a custom model_provider.
+    expect(AGENTS.codex!.baseUrlEnv).toBeUndefined();
+    expect(buildRunEnv("codex", 4242, "uuid-2")).toEqual({});
+    const args = AGENTS.codex!.wireArgs!("http://127.0.0.1:4242/run/uuid-2");
+    expect(args).toContain('model_provider="beagle"');
+    expect(args).toContain('model_providers.beagle.base_url="http://127.0.0.1:4242/run/uuid-2"');
+    expect(args).toContain('model_providers.beagle.env_key="OPENAI_API_KEY"'); // reads the user's key
+    expect(args).toContain('model_providers.beagle.wire_api="responses"');
+    expect(args.filter((a) => a === "-c").length).toBe(5); // every knob a -c override
   });
 
   test("agent registry covers the four v1 CLI agents", () => {
