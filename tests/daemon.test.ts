@@ -330,6 +330,35 @@ describe("Daemon end-to-end", () => {
     silent.server.close();
   });
 
+  test("an incomplete scan under redact-on-capture withholds body, summary, and search text", async () => {
+    // A 0ms scan deadline fires before the worker can respond: every scan
+    // reports incomplete, the fail-safe path.
+    const dir2 = mkdtempSync(join(tmpdir(), "beagle-incomplete-"));
+    const up = await fakeUpstream();
+    const d2 = await Daemon.start({ stateDir: dir2, persistent: true, scanDeadlineMs: 0, alertSinkForTest: () => {} });
+    try {
+      await controlRequest(d2.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+      await controlRequest(d2.socketPath, {
+        cmd: "register-run",
+        args: { id: "run-inc", agent: "claude-code", provider: "anthropic", upstream: `http://127.0.0.1:${up.port}`, authLocation: "x-api-key" },
+      });
+      await sendThroughProxy(d2.proxyPort, "run-inc", requestBody("unverified AKIAZQ3DRSTUVWXY2345 here"));
+      await Bun.sleep(300);
+      const store = Store.openReadOnly(dir2);
+      const ex = listCalls(store, 10)[0]!;
+      expect(ex.scanState).toBe("incomplete");
+      expect(ex.summary).toBe("[REDACTION INCOMPLETE: content withheld]");
+      const full = store.getCall(ex.id)!;
+      expect(new TextDecoder().decode(full.requestBody!)).not.toContain("AKIAZQ3DRSTUVWXY2345");
+      expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
+      expect(store.searchLiteral("unverified")).toEqual([]); // search index withheld too
+      store.close();
+    } finally {
+      await d2.stop();
+      up.server.close();
+    }
+  });
+
   test("excluded agent traffic is forwarded but never captured", async () => {
     await controlRequest(daemon.socketPath, { cmd: "set-config", args: { excludedAgents: ["claude-code"] } });
     const resp = await sendThroughProxy(daemon.proxyPort, "run-e2e", requestBody("excluded content"));

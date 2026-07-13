@@ -5,13 +5,13 @@ import { join } from "node:path";
 import { Daemon } from "../src/daemon/daemon";
 import { controlRequest } from "../src/daemon/control";
 import { Store } from "../src/core/store/store";
-import { listLeakEvents } from "../src/viewer/feed-query";
+import { listCalls, listLeakEvents } from "../src/viewer/feed-query";
 import type { AlertEvent } from "../src/core/alert/engine";
 
 // Claude Code's real Mode-B export (event schema, verified in the Phase-0
 // spike): a turn is a user_prompt + api_request + assistant_response sharing
 // session.id/prompt.id. The run token rides the HTTP header, not an attribute.
-function otlpBody(_token: string, prompt: string, sessionId = "otel-conv-1", response: string | null = "acknowledged") {
+function otlpBody(_token: string, prompt: string | null, sessionId = "otel-conv-1", response: string | null = "acknowledged") {
   const ev = (name: string, attrs: Record<string, string | number>) => ({
     timeUnixNano: String(Date.now() * 1e6),
     body: { stringValue: `claude_code.${name}` },
@@ -31,7 +31,7 @@ function otlpBody(_token: string, prompt: string, sessionId = "otel-conv-1", res
       scopeLogs: [{
         scope: { name: "com.anthropic.claude_code.events" },
         logRecords: [
-          ev("user_prompt", { prompt }),
+          ...(prompt === null ? [] : [ev("user_prompt", { prompt })]),
           ev("api_request", { model: "claude-sonnet-5", input_tokens: 50, output_tokens: 4 }),
           ...(response === null ? [] : [ev("assistant_response", { model: "claude-sonnet-5", response })]),
         ],
@@ -113,6 +113,55 @@ describe("Mode B end-to-end through the daemon", () => {
     expect(call.summary).not.toContain("AKIAZQ3DRSTUVWXY2345");
     expect(call.summary).toContain("[REDACTED:aws-access-key-id:");
     store.close();
+  });
+
+  test("redact-on-capture scrubs a secret echoed in a response-only batch", async () => {
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    // The prompt that leaked the key rode an earlier batch; this batch carries
+    // only the assistant's echo — no request-side scan surface at all.
+    await post(otlpBody(token, null, "otel-conv-echo", "your key is AKIAZQ3DRSTUVWXY2345"));
+    await Bun.sleep(150);
+    const store = Store.openReadOnly(stateDir);
+    expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
+    const hit = store.searchLiteral("your key is")[0]!;
+    const call = store.getCall(hit.callId)!;
+    expect(call.redacted).toBe(true);
+    expect(new TextDecoder().decode(call.responseBody!)).toContain("[REDACTED:aws-access-key-id:");
+    expect(call.summary).not.toContain("AKIAZQ3DRSTUVWXY2345");
+    expect(call.summary).toContain("[REDACTED:aws-access-key-id:");
+    // Inbound content is redacted but never alerts — the outbound leak fired
+    // with the batch that carried the prompt.
+    expect(alerts.length).toBe(0);
+    store.close();
+  });
+
+  test("an incomplete Mode B scan withholds body, summary, and search text", async () => {
+    // A 0ms scan deadline fires before the worker can respond: every scan
+    // reports incomplete, the fail-safe path.
+    const dir2 = mkdtempSync(join(tmpdir(), "beagle-modeb-inc-"));
+    const d2 = await Daemon.start({ stateDir: dir2, persistent: true, scanDeadlineMs: 0, alertSinkForTest: () => {} });
+    try {
+      const status = await controlRequest(d2.socketPath, { cmd: "status" });
+      const data = status.data as { otlpPort: number; otlpToken: string };
+      await controlRequest(d2.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+      await fetch(`http://127.0.0.1:${data.otlpPort}/v1/logs`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-beagle-run": data.otlpToken },
+        body: JSON.stringify(otlpBody(data.otlpToken, "unverified AKIAZQ3DRSTUVWXY2345")),
+      });
+      await Bun.sleep(200);
+      const store = Store.openReadOnly(dir2);
+      expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
+      expect(store.searchLiteral("unverified")).toEqual([]); // search index withheld too
+      const ex = listCalls(store, 10)[0]!;
+      expect(ex.scanState).toBe("incomplete");
+      expect(ex.summary).toBe("[REDACTION INCOMPLETE: content withheld]");
+      const full = store.getCall(ex.id)!;
+      expect(new TextDecoder().decode(full.requestBody!)).toContain("[REDACTION INCOMPLETE");
+      store.close();
+    } finally {
+      await d2.stop();
+    }
   });
 
   test("wrong OTLP token is rejected, nothing captured", async () => {

@@ -30,6 +30,10 @@ export function redactBody(bytes: Uint8Array, findings: Finding[]): { bytes: Uin
 // Scrub known secret values by literal match wherever they appear — used on
 // derived text (summary, search text) built from parsed messages rather than
 // the stored bytes, so a body-side redaction can't be undone by a re-derive.
+// The 8-char floor avoids mangling unrelated text on common substrings; a
+// shorter value is still span-redacted from the body it was found in but
+// would survive here — no rule matches anything that short today, so revisit
+// the floor before adding one that does.
 export function redactValuesInText(
   text: string,
   values: Array<{ value: string; type: string }>,
@@ -52,4 +56,54 @@ export function redactValues(
   const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
   const out = redactValuesInText(text, values);
   return out === text ? bytes : new TextEncoder().encode(out);
+}
+
+export interface CaptureRedaction {
+  /** True only when the stored content was actually rewritten (viewer highlight). */
+  redacted: boolean;
+  /** Incomplete scan: bodies withheld outright — the caller must withhold its
+   *  derived text (summary, search index, raw stream) too. */
+  heldOut: boolean;
+  requestBody: Uint8Array;
+  responseBody: Uint8Array | null;
+  values: Array<{ value: string; type: string }>;
+}
+
+// One redact-on-capture outcome per captured call (design §4/R11), shared by
+// the wire and Mode B ingest paths. An incomplete scan can't trust any spans,
+// so the raw content is held out entirely (never write raw-and-hope);
+// otherwise each finding's span is substituted in the body it was found in,
+// and the caller scrubs its derived text with the returned values.
+export function applyCaptureRedaction(o: {
+  incomplete: boolean;
+  requestBytes: Uint8Array;
+  requestFindings: Finding[];
+  responseBody: Uint8Array | null;
+  responseFindings?: Finding[];
+}): CaptureRedaction {
+  if (o.incomplete) {
+    return {
+      redacted: true,
+      heldOut: true,
+      requestBody: new TextEncoder().encode("[REDACTION INCOMPLETE: scan did not verify this body]"),
+      responseBody: null,
+      values: [],
+    };
+  }
+  const respFindings = o.responseFindings ?? [];
+  if (o.requestFindings.length === 0 && respFindings.length === 0) {
+    return { redacted: false, heldOut: false, requestBody: o.requestBytes, responseBody: o.responseBody, values: [] };
+  }
+  const req = redactBody(o.requestBytes, o.requestFindings);
+  let responseBody = o.responseBody;
+  let values = req.values;
+  if (respFindings.length > 0 && responseBody) {
+    const resp = redactBody(responseBody, respFindings); // spans first: offsets index the original bytes
+    responseBody = resp.bytes;
+    values = [...req.values, ...resp.values];
+  }
+  // Value-scrub the response with the request's values in case the model
+  // echoed a leaked key back (request-side spans alone would miss it).
+  responseBody = redactValues(responseBody, req.values);
+  return { redacted: true, heldOut: false, requestBody: req.bytes, responseBody, values };
 }
