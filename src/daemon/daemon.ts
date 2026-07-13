@@ -43,6 +43,10 @@ export interface DaemonOptions {
   idleTimeoutMs?: number;
   /** Production run-mode daemon exits the process on idle; tests set false. */
   exitProcessOnIdle?: boolean;
+  /** Override the pending-entry TTL (default 10 min) — tests only. */
+  pendingTtlMs?: number;
+  /** Override the sweep cadence (default 15 min) — tests only. */
+  sweepIntervalMs?: number;
 }
 
 interface PendingCall {
@@ -58,6 +62,12 @@ interface PendingCall {
 // Pending entries whose capture never arrived (failed forward, abort before
 // response) are dropped after this — the map must not grow unboundedly.
 const PENDING_TTL_MS = 10 * 60_000;
+
+// Skip markers outlive pending entries by design: a marker is ~40 bytes (id +
+// timestamp) where a pending entry holds a parsed body, so the memory argument
+// for a short TTL doesn't apply — and expiring one early would let a paused-
+// time call be captured after all if its response outlived the marker.
+const SKIPPED_TTL_MS = 24 * 3600_000;
 
 const SWEEP_INTERVAL_MS = 15 * 60_000;
 
@@ -82,6 +92,10 @@ export class Daemon {
   otlpPort = 0;
   private otlpToken = "";
   private pending = new Map<string, PendingCall>();
+  // Calls whose request was skipped (paused / excluded agent) — the capture
+  // must drop these even if the daemon was resumed or the agent un-excluded
+  // before the response landed. Swept alongside `pending`.
+  private skipped = new Map<string, number>();
   private paused = false;
   private sweeper: ReturnType<typeof setInterval> | null = null;
   private leases = 0;
@@ -135,7 +149,7 @@ export class Daemon {
     d.otlpPort = await d.otlp.listen(0);
     d.control = await startControlServer(d.socketPath, (req, sock) => d.handleControl(req, sock));
     d.sweep();
-    d.sweeper = setInterval(() => d.sweep(), SWEEP_INTERVAL_MS);
+    d.sweeper = setInterval(() => d.sweep(), opts.sweepIntervalMs ?? SWEEP_INTERVAL_MS);
     d.sweeper.unref?.();
     writeFileSync(
       join(opts.stateDir, "daemon.json"),
@@ -172,7 +186,13 @@ export class Daemon {
 
   private async scanPipeline(bytes: Uint8Array, ctx: ScanContext): Promise<void> {
     this.lastActivityTs = Date.now();
-    if (this.paused || this.config.excludedAgents.includes(ctx.agent ?? "")) return;
+    if (this.paused || this.config.excludedAgents.includes(ctx.agent ?? "")) {
+      // The skip decision is per-call, made here: these bytes are never
+      // scanned, so the call must not be captured even if the state flips
+      // back mid-flight (§4 — never store an unscanned body as verified).
+      this.skipped.set(ctx.callId, Date.now());
+      return;
+    }
     const format = detectFormat(ctx.endpoint);
     const parsed = format === "unknown" ? null : parseRequest(format, bytes);
     // Session resolution is synchronous, before the first await: the capture
@@ -215,6 +235,7 @@ export class Daemon {
   }
 
   private async captureCall(call: CapturedCall): Promise<void> {
+    if (this.skipped.delete(call.id)) return; // request-time skip is final
     const stash = this.pending.get(call.id);
     // redact-on-capture (R11): await the scan verdict and substitute the raw
     // secret BEFORE the first write, so no raw value ever lands in the WAL.
@@ -246,16 +267,21 @@ export class Daemon {
       });
     }
 
+    // A missing stash means these bytes were never scanned (request skipped
+    // while paused, pending entry TTL-swept mid-flight, scan pipeline died) —
+    // never claim "ok" for a body no scan verified (§4).
+    const scanState: "ok" | "incomplete" = stash?.scanState ?? "incomplete";
     // redact-on-capture (§4/R11): see applyCaptureRedaction for the policy.
-    const redaction =
-      this.config.redactOnCapture && stash
-        ? applyCaptureRedaction({
-            incomplete: stash.scanState === "incomplete",
-            requestBytes: call.request.bodyBytes,
-            requestFindings: stash.findings,
-            responseBody: call.response.bodyBytes ?? null,
-          })
-        : null;
+    // Run it whenever scanState is unverified even if the stash is gone, so a
+    // never-scanned body is held out, not stored raw-and-hoped.
+    const redaction = this.config.redactOnCapture
+      ? applyCaptureRedaction({
+          incomplete: scanState === "incomplete",
+          requestBytes: call.request.bodyBytes,
+          requestFindings: stash?.findings ?? [],
+          responseBody: call.response.bodyBytes ?? null,
+        })
+      : null;
     const requestBody = redaction ? redaction.requestBody : call.request.bodyBytes;
     const responseBody = redaction ? redaction.responseBody : (call.response.bodyBytes ?? null);
     let sseRaw: Uint8Array | null = call.response.sseRaw ?? null;
@@ -300,7 +326,7 @@ export class Daemon {
       bytesReq: call.request.bodyBytes.byteLength,
       bytesResp: call.response.bodyBytes?.byteLength,
       summary,
-      scanState: stash?.scanState ?? "ok",
+      scanState,
       captureState: call.meta.captureState,
       sessionTier: resolution.tier,
       redacted: redaction?.redacted ?? false,
@@ -325,7 +351,7 @@ export class Daemon {
       tokensOut: respParsed?.tokensOut,
       bytesReq: call.request.bodyBytes.byteLength,
       summary,
-      scanState: stash?.scanState ?? "ok",
+      scanState,
       captureState: call.meta.captureState,
       sessionTier: resolution.tier,
       source: call.source,
@@ -471,9 +497,13 @@ export class Daemon {
       eventWindowMs: this.config.eventWindowDays * 24 * 3600_000,
       sizeCapBytes: this.config.sizeCapMB * (1 << 20),
     });
-    const cutoff = Date.now() - PENDING_TTL_MS;
+    const cutoff = Date.now() - (this.opts.pendingTtlMs ?? PENDING_TTL_MS);
     for (const [id, entry] of this.pending) {
       if (entry.createdTs < cutoff) this.pending.delete(id);
+    }
+    const skipCutoff = Date.now() - SKIPPED_TTL_MS;
+    for (const [id, ts] of this.skipped) {
+      if (ts < skipCutoff) this.skipped.delete(id);
     }
   }
 
