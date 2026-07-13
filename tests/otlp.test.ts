@@ -8,6 +8,7 @@ import {
   buildHookSettings,
   mapCodexOtlpToCalls,
   buildCodexOtelArgs,
+  buildCodexOtelEnv,
 } from "../src/parsers/otlp-map";
 import { OtlpReceiver } from "../src/core/otlp/receiver";
 
@@ -332,15 +333,39 @@ describe("Codex OTLP → Call mapping (Codex Mode B, codex.* schema)", () => {
     expect(calls[0]!.agent).toBe("codex");
   });
 
-  test("a malformed record is skipped, not fatal to the whole batch", () => {
+  test("a genuinely-throwing record is skipped, co-batched valid records still map", () => {
+    // `attributes: [null]` makes attrMap execute `null.key` → a real TypeError
+    // INSIDE the per-record try/catch (the Array.isArray guard doesn't catch
+    // this one — it's a non-empty array). Proves the catch actually isolates a
+    // throwing record rather than taking the whole secret-bearing batch down.
     const calls = mapCodexOtlpToCalls(
       codexLogs([
-        { attributes: "not-an-array" }, // malformed
-        codexEvent("codex.user_prompt", { "conversation.id": "c", prompt: "still scanned" }),
+        { attributes: [null] }, // throws mid-map
+        codexEvent("codex.user_prompt", { "conversation.id": "c", prompt: "still scanned AKIAZQ3DRSTUVWXY2345" }),
       ]),
     );
     expect(calls.length).toBe(1);
-    expect(decode(calls[0]!.request.bodyBytes)).toContain("still scanned");
+    expect(decode(calls[0]!.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
+  });
+
+  test("PII attributes (user.email, user.account_id) are never read into a Call", () => {
+    // The record CARRIES PII — this is the real test of the allowlist, not a
+    // fixture that had PII pre-stripped. Only content + conversation id survive.
+    const calls = mapCodexOtlpToCalls(
+      codexLogs([
+        codexEvent("codex.user_prompt", {
+          "conversation.id": "c",
+          "user.email": "victim@example.com",
+          "user.account_id": "acct-abc-123",
+          prompt: "refactor please",
+        }),
+      ]),
+    );
+    expect(calls.length).toBe(1);
+    const blob = decode(calls[0]!.request.bodyBytes) + JSON.stringify(calls[0]!.request.messages);
+    expect(blob).toContain("refactor please"); // content kept
+    expect(blob).not.toContain("victim@example.com"); // PII dropped
+    expect(blob).not.toContain("acct-abc-123");
   });
 
   test("malformed top-level payload degrades to [] (R3, fail-open)", () => {
@@ -377,17 +402,24 @@ describe("Codex OTLP mapper — against the REAL Codex capture (fixture)", () =>
   });
 });
 
-describe("buildCodexOtelArgs (vendor `-c` knobs only, R2)", () => {
-  test("points codex's exporter at /v1/logs with the run token in the header", () => {
-    const args = buildCodexOtelArgs("http://127.0.0.1:4318", "run-token-xyz");
-    // -c pairs: log_user_prompt on, exporter → the loopback receiver
+describe("buildCodexOtelArgs / buildCodexOtelEnv (vendor knobs only, R2)", () => {
+  test("points codex's exporter at /v1/logs via -c, with NO token on argv", () => {
+    const args = buildCodexOtelArgs("http://127.0.0.1:4318");
     expect(args).toContain("otel.log_user_prompt=true");
     const exporter = args[args.length - 1]!;
     expect(exporter).toContain('endpoint = "http://127.0.0.1:4318/v1/logs"');
     expect(exporter).toContain('protocol = "json"');
-    expect(exporter).toContain('"x-beagle-run" = "run-token-xyz"');
-    // every knob is passed as a `-c` override, never a config-file write
+    // every knob is a `-c` override, never a config-file write
     expect(args.filter((a) => a === "-c").length).toBe(2);
+    // the token must NOT appear anywhere on argv (ps / audit-log exposure)
+    expect(args.join(" ")).not.toContain("x-beagle-run");
+  });
+
+  test("the run token rides an env var (OTEL_EXPORTER_OTLP_HEADERS), not argv", () => {
+    const env = buildCodexOtelEnv("run-token-xyz");
+    expect(env.OTEL_EXPORTER_OTLP_HEADERS).toBe("x-beagle-run=run-token-xyz");
+    // and the args builder — the only thing on the command line — never sees it
+    expect(buildCodexOtelArgs("http://127.0.0.1:4318").join(" ")).not.toContain("run-token-xyz");
   });
 });
 

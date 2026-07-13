@@ -13,7 +13,7 @@ import { detectAgents, knownExtraLocations, pathDirsFromEnv } from "../install/d
 import { watchAgent, unwatchAgent, type WatchEnv } from "../install/watch";
 import { ChangeManifest } from "../install/manifest";
 import { listLeakEvents } from "../viewer/feed-query";
-import { buildCodexOtelArgs, buildHookSettings, buildOtelEnv } from "../parsers/otlp-map";
+import { buildCodexOtelArgs, buildCodexOtelEnv, buildHookSettings, buildOtelEnv } from "../parsers/otlp-map";
 import { buildExtensionRedirect, buildRedirectConfig, readFirstConfig, writeRedirectConfig, writeRedirectExtension } from "../install/config-redirect";
 import { AGENTS, buildRunEnv, runBaseUrl } from "./agents";
 
@@ -422,9 +422,10 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
       // Codex exports the full leak surface — prompt, tool commands, AND tool
       // output — inline in its own OTel stream, so no PostToolUse hook is
       // needed. Point its exporter at the receiver via `-c` config flags
-      // prepended to the user's argv; the run token rides the header.
-      modeEnv = {};
-      finalArgs = [...buildCodexOtelArgs(base, data.otlpToken), ...agentArgs];
+      // prepended to the user's argv; the run token rides an env var (never
+      // argv, where it would leak to other local users via `ps`/audit logs).
+      modeEnv = buildCodexOtelEnv(data.otlpToken);
+      finalArgs = [...buildCodexOtelArgs(base), ...agentArgs];
     } else {
       modeEnv = buildOtelEnv(base, data.otlpToken);
       // Close the OTel export's tool-output blind spot: register a Beagle-owned
@@ -472,7 +473,7 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
       modeEnv = buildRunEnv(agentName, daemon.proxyPort, runId);
     }
   }
-  return await execAgent(daemon.socketPath, realBinary, finalArgs, modeEnv, stateDir, agentName, cleanupFile);
+  return await execAgent(daemon.socketPath, realBinary, finalArgs, modeEnv, stateDir, agentName, cleanupFile, telemetry);
 }
 
 // The shell command Claude Code runs for the tool-output hook: this same
@@ -549,9 +550,15 @@ async function execAgent(
   stateDir: string,
   agentName: string,
   redirectCfg: string | null,
+  telemetry: boolean,
 ): Promise<number> {
+  // Graduation nudges the user toward `beagle watch`, which installs a
+  // WIRE-mode PATH shim. That shim can't do --telemetry, so for a subscription
+  // login (the only reason to use --telemetry) it would capture nothing while
+  // status reports coverage. Telemetry runs are therefore excluded from the
+  // graduation flow entirely — neither counted nor nudged.
   const grad = new GraduationTracker(stateDir);
-  const shouldNudge = grad.recordRunAndCheck(agentName);
+  const shouldNudge = !telemetry && grad.recordRunAndCheck(agentName);
 
   // Hold a lease for the agent's lifetime so an auto-started ephemeral daemon
   // stays up while we're watching, then winds down after we exit (§6.7). Both

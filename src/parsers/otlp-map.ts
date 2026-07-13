@@ -357,15 +357,22 @@ export function mapCodexOtlpToCalls(payload: unknown): OtelCall[] {
 /** The codex `-c` config overrides that point its OpenTelemetry exporter at
  *  Beagle's loopback receiver. Prepended to the user's codex argv (`-c` is a
  *  global flag, honored before the subcommand). `log_user_prompt` turns on
- *  prompt content; the exporter posts application/json to /v1/logs carrying the
- *  per-run token in the header the receiver gates on. Vendor knobs only (R2) —
- *  no patching, no config-file writes. `base`/`runToken` are Beagle-generated
- *  (loopback URL, hex token) so there's nothing to escape into the inline table. */
-export function buildCodexOtelArgs(base: string, runToken: string): string[] {
-  const exporter =
-    `otel.exporter={ "otlp-http" = { endpoint = "${base}/v1/logs", ` +
-    `protocol = "json", headers = { "x-beagle-run" = "${runToken}" } } }`;
+ *  prompt content; the exporter posts application/json to /v1/logs. Vendor
+ *  knobs only (R2) — no patching, no config-file writes. The per-run TOKEN is
+ *  NOT here: it rides the OTEL_EXPORTER_OTLP_HEADERS env var (buildCodexOtelEnv)
+ *  so it never lands on the process command line, where `ps`/audit logs would
+ *  leak it to other local users — the same invariant the Claude path holds.
+ *  `base` is a Beagle-generated loopback URL, nothing to escape. */
+export function buildCodexOtelArgs(base: string): string[] {
+  const exporter = `otel.exporter={ "otlp-http" = { endpoint = "${base}/v1/logs", protocol = "json" } }`;
   return ["-c", "otel.log_user_prompt=true", "-c", exporter];
+}
+
+/** The env carrying codex's per-run auth token as the OTLP header the receiver
+ *  gates on. Codex merges OTEL_EXPORTER_OTLP_HEADERS into the exporter defined
+ *  by buildCodexOtelArgs (verified live). Env, never argv — see above. */
+export function buildCodexOtelEnv(runToken: string): Record<string, string> {
+  return { OTEL_EXPORTER_OTLP_HEADERS: `x-beagle-run=${runToken}` };
 }
 
 // ---- tool-output capture via a PostToolUse hook (Mode B gap fix) ----
