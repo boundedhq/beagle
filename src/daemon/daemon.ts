@@ -43,6 +43,10 @@ export interface DaemonOptions {
   idleTimeoutMs?: number;
   /** Production run-mode daemon exits the process on idle; tests set false. */
   exitProcessOnIdle?: boolean;
+  /** Override the pending-entry TTL (default 10 min) — tests only. */
+  pendingTtlMs?: number;
+  /** Override the sweep cadence (default 15 min) — tests only. */
+  sweepIntervalMs?: number;
 }
 
 interface PendingCall {
@@ -58,6 +62,12 @@ interface PendingCall {
 // Pending entries whose capture never arrived (failed forward, abort before
 // response) are dropped after this — the map must not grow unboundedly.
 const PENDING_TTL_MS = 10 * 60_000;
+
+// Skip markers outlive pending entries by design: a marker is ~40 bytes (id +
+// timestamp) where a pending entry holds a parsed body, so the memory argument
+// for a short TTL doesn't apply — and expiring one early would let a paused-
+// time call be captured after all if its response outlived the marker.
+const SKIPPED_TTL_MS = 24 * 3600_000;
 
 const SWEEP_INTERVAL_MS = 15 * 60_000;
 
@@ -139,7 +149,7 @@ export class Daemon {
     d.otlpPort = await d.otlp.listen(0);
     d.control = await startControlServer(d.socketPath, (req, sock) => d.handleControl(req, sock));
     d.sweep();
-    d.sweeper = setInterval(() => d.sweep(), SWEEP_INTERVAL_MS);
+    d.sweeper = setInterval(() => d.sweep(), opts.sweepIntervalMs ?? SWEEP_INTERVAL_MS);
     d.sweeper.unref?.();
     writeFileSync(
       join(opts.stateDir, "daemon.json"),
@@ -268,6 +278,7 @@ export class Daemon {
     let responseBody: Uint8Array | null = call.response.bodyBytes ?? null;
     let sseRaw: Uint8Array | null = call.response.sseRaw ?? null;
     let searchText = buildSearchText(parsed, respParsed?.text, call);
+    let summary = buildSummary(parsed, respParsed?.text, respActions);
     // True only when the stored body was actually rewritten (viewer highlight).
     let redacted = false;
     if (this.config.redactOnCapture) {
@@ -277,6 +288,9 @@ export class Daemon {
         responseBody = null;
         sseRaw = null; // the raw stream could hold the unverified value
         searchText = "";
+        // The summary leads with response text, which could echo the very
+        // value the scan failed to verify — withhold it like the bodies.
+        summary = "[REDACTION INCOMPLETE: summary withheld]";
       } else if (stash && stash.findings.length > 0) {
         redacted = true;
         const scrubbed = redactBody(call.request.bodyBytes, stash.findings);
@@ -318,7 +332,7 @@ export class Daemon {
       tokensOut: respParsed?.tokensOut,
       bytesReq: call.request.bodyBytes.byteLength,
       bytesResp: call.response.bodyBytes?.byteLength,
-      summary: buildSummary(parsed, respParsed?.text, respActions),
+      summary,
       scanState,
       captureState: call.meta.captureState,
       sessionTier: resolution.tier,
@@ -343,7 +357,7 @@ export class Daemon {
       tokensIn: respParsed?.tokensIn,
       tokensOut: respParsed?.tokensOut,
       bytesReq: call.request.bodyBytes.byteLength,
-      summary: buildSummary(parsed, respParsed?.text, respActions),
+      summary,
       scanState,
       captureState: call.meta.captureState,
       sessionTier: resolution.tier,
@@ -461,12 +475,13 @@ export class Daemon {
       eventWindowMs: this.config.eventWindowDays * 24 * 3600_000,
       sizeCapBytes: this.config.sizeCapMB * (1 << 20),
     });
-    const cutoff = Date.now() - PENDING_TTL_MS;
+    const cutoff = Date.now() - (this.opts.pendingTtlMs ?? PENDING_TTL_MS);
     for (const [id, entry] of this.pending) {
       if (entry.createdTs < cutoff) this.pending.delete(id);
     }
+    const skipCutoff = Date.now() - SKIPPED_TTL_MS;
     for (const [id, ts] of this.skipped) {
-      if (ts < cutoff) this.skipped.delete(id);
+      if (ts < skipCutoff) this.skipped.delete(id);
     }
   }
 

@@ -1,10 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect } from "node:net";
 import { Daemon } from "../src/daemon/daemon";
-import type { CapturedCall } from "../src/core/proxy/server";
 import { controlRequest } from "../src/daemon/control";
 import { Store } from "../src/core/store/store";
 import { listCalls, listLeakEvents } from "../src/viewer/feed-query";
@@ -37,6 +36,39 @@ function fakeUpstream(): Promise<{ server: Server; port: number; seen: string[] 
   return new Promise((resolve) =>
     server.listen(0, "127.0.0.1", () =>
       resolve({ server, port: (server.address() as { port: number }).port, seen }),
+    ),
+  );
+}
+
+// Upstream that holds its response until release() — lets tests flip daemon
+// state (pause/resume, TTL sweep) while a call is in flight. `arrived`
+// resolves once the forwarded request reaches it.
+function slowUpstream(): Promise<{
+  server: Server;
+  port: number;
+  arrived: Promise<void>;
+  release: () => void;
+}> {
+  let requestArrived!: () => void;
+  const arrived = new Promise<void>((r) => (requestArrived = r));
+  let release!: () => void;
+  const released = new Promise<void>((r) => (release = r));
+  let sent = false;
+  const server = createServer((sock) => {
+    sock.on("data", () => {
+      requestArrived();
+      void released.then(() => {
+        if (sent) return; // the request may arrive chunked — reply exactly once
+        sent = true;
+        const body = JSON.stringify({ model: "m", content: [{ type: "text", text: "slow done" }] });
+        sock.write(`HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: ${body.length}\r\n\r\n${body}`);
+      });
+    });
+    sock.on("error", () => {});
+  });
+  return new Promise((resolve) =>
+    server.listen(0, "127.0.0.1", () =>
+      resolve({ server, port: (server.address() as { port: number }).port, arrived, release }),
     ),
   );
 }
@@ -271,27 +303,10 @@ describe("Daemon end-to-end", () => {
 
   test("call started while paused is dropped even if resumed before the response", async () => {
     await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
-    // Upstream that holds its response until released, so pause/resume can
-    // flip while the call is in flight.
-    let release!: () => void;
-    const released = new Promise<void>((r) => (release = r));
-    let requestArrived!: () => void;
-    const arrived = new Promise<void>((r) => (requestArrived = r));
-    const slow = createServer((sock) => {
-      sock.on("data", () => {
-        requestArrived();
-        void released.then(() => {
-          const body = JSON.stringify({ model: "m", content: [{ type: "text", text: "slow done" }] });
-          sock.write(`HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: ${body.length}\r\n\r\n${body}`);
-        });
-      });
-      sock.on("error", () => {});
-    });
-    await new Promise<void>((r) => slow.listen(0, "127.0.0.1", () => r()));
-    const sport = (slow.address() as { port: number }).port;
+    const slow = await slowUpstream();
     await controlRequest(daemon.socketPath, {
       cmd: "register-run",
-      args: { id: "run-slow", agent: "claude-code", provider: "anthropic", upstream: `http://127.0.0.1:${sport}`, authLocation: "x-api-key" },
+      args: { id: "run-slow", agent: "claude-code", provider: "anthropic", upstream: `http://127.0.0.1:${slow.port}`, authLocation: "x-api-key" },
     });
 
     await controlRequest(daemon.socketPath, { cmd: "pause" });
@@ -299,9 +314,9 @@ describe("Daemon end-to-end", () => {
       daemon.proxyPort, "run-slow",
       requestBody("paused-time secret AKIAZQ3DRSTUVWXY2345"),
     );
-    await arrived; // request forwarded → the skip decision is already made
+    await slow.arrived; // request forwarded → the skip decision is already made
     await controlRequest(daemon.socketPath, { cmd: "resume" });
-    release();
+    slow.release();
     await respP;
     await Bun.sleep(150);
 
@@ -318,38 +333,51 @@ describe("Daemon end-to-end", () => {
     store = Store.openReadOnly(stateDir);
     expect(store.searchLiteral("after the race").length).toBe(1);
     store.close();
-    slow.close();
+    slow.server.close();
   });
 
-  test("capture with no pending entry never claims scanState ok; redact-on-capture holds the body out", async () => {
-    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
-    // Simulate the stash being gone at capture time (pending entry TTL-swept
-    // during a long in-flight call) by driving the capture path directly with
-    // an id the scan pipeline never saw.
-    const enc = new TextEncoder();
-    const id = "01TESTSTASHGONE0000000000";
-    await (daemon as unknown as { captureCall(c: CapturedCall): Promise<void> }).captureCall({
-      id,
-      runId: "run-e2e",
-      source: "wire",
-      agent: "claude-code",
-      provider: "anthropic",
-      endpoint: "/v1/messages",
-      request: { headers: [], bodyBytes: enc.encode(requestBody("stash-gone secret AKIAZQ3DRSTUVWXY2345")) },
-      response: {
-        status: 200,
-        headers: [["content-type", "application/json"]],
-        bodyBytes: enc.encode('{"content":[{"type":"text","text":"done"}]}'),
-      },
-      meta: { tsRequest: Date.now(), tsResponse: Date.now(), captureState: "ok" },
+  test("a capture whose pending entry was TTL-swept mid-flight is stored incomplete, not raw-ok", async () => {
+    // A genuinely long in-flight call: the scan runs and a pending entry is
+    // created, but the sweep evicts it (TTL passed) before the slow response
+    // lands. captureCall then finds no stash — and must not label the never-
+    // trusted body scanState "ok". End-to-end via short TTL knobs, so the real
+    // sweep + capture path is exercised, not a hand-driven captureCall.
+    const dir = mkdtempSync(join(tmpdir(), "beagle-ttl-"));
+    const up = await slowUpstream();
+    const d = await Daemon.start({
+      stateDir: dir,
+      persistent: true,
+      pendingTtlMs: 120,
+      sweepIntervalMs: 60,
     });
-    const store = Store.openReadOnly(stateDir);
-    const call = store.getCall(id)!;
-    expect(call.scanState).toBe("incomplete");
-    expect(new TextDecoder().decode(call.requestBody!)).toContain("[REDACTION INCOMPLETE");
-    expect(call.responseBody).toBeNull();
-    expect(store.searchLiteral("stash-gone secret")).toEqual([]);
-    store.close();
+    try {
+      await controlRequest(d.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+      await controlRequest(d.socketPath, {
+        cmd: "register-run",
+        args: { id: "run-ttl", agent: "claude-code", provider: "anthropic", upstream: `http://127.0.0.1:${up.port}`, authLocation: "x-api-key" },
+      });
+      const respP = sendThroughProxy(d.proxyPort, "run-ttl", requestBody("stash-gone secret AKIAZQ3DRSTUVWXY2345"));
+      await up.arrived;
+      await Bun.sleep(300); // let the pending entry age past its TTL and a sweep evict it
+      up.release();
+      await respP;
+      await Bun.sleep(150);
+
+      const store = Store.openReadOnly(dir);
+      const rows = listCalls(store, 10); // body/summary are withheld, so find by feed row
+      expect(rows.length).toBe(1);
+      const call = store.getCall(rows[0]!.id)!;
+      expect(call.scanState).toBe("incomplete");
+      expect(new TextDecoder().decode(call.requestBody!)).toContain("[REDACTION INCOMPLETE");
+      expect(call.responseBody).toBeNull();
+      expect(call.summary).toContain("summary withheld");
+      expect(store.searchLiteral("stash-gone secret")).toEqual([]);
+      store.close();
+    } finally {
+      await d.stop();
+      up.server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("redact-on-capture removes the raw secret from the stored body", async () => {
