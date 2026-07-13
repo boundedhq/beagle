@@ -1,11 +1,14 @@
 # Mode B (subscription-auth capture) — Phase-0 spike results
 
 **Status: VALIDATED against Claude Code 2.1.193 (macOS, 2026-07-13).** Mode B
-now captures real Claude Code telemetry end to end — a secret in a prompt
-fires `beagle leaks` — with one documented content gap (tool *outputs* are not
-exported by the client). It remains **agent-reported** by nature (a
-self-report, not wire bytes) and is badged as such. See the per-criterion
-results below and the classification at the end.
+captures real Claude Code telemetry end to end — a secret in a prompt, a tool
+input, **or a tool's output** fires `beagle leaks`. Claude Code's OTel export
+omits tool-result content, so tool *outputs* are captured via a Beagle-owned
+`PostToolUse` hook (criterion #2). Mode B remains **agent-reported** by nature
+(a self-report, not wire bytes) and is badged as such; it differs from wire
+capture only in that reports are batched (alerts lag seconds) and the
+tool-output hook is best-effort. See the per-criterion results below and the
+classification at the end.
 
 > Reproduce: point Claude Code's OTel exporter at a dump server with
 > `buildOtelEnv`'s knobs and run one `claude -p` session. The exact captured
