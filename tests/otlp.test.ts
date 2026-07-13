@@ -252,10 +252,13 @@ describe("OTLP mapper — against the REAL Claude Code capture (spike fixture)",
 });
 
 // Build a Codex OTel log record (the REAL schema — codex.* events, scope
-// codex_otel.log_only, verified live against Codex 0.44.x).
+// codex_otel.log_only, verified live against Codex 0.44.x). Real codex sets
+// timeUnixNano to the literal "0" sentinel and puts the actual time in
+// observedTimeUnixNano — the helper mirrors that shape exactly.
 function codexEvent(name: string, attrs: Record<string, string | number>, tsNano = "1752300000000000000") {
   return {
-    timeUnixNano: tsNano,
+    timeUnixNano: "0",
+    observedTimeUnixNano: tsNano,
     attributes: [
       { key: "event.name", value: { stringValue: name } },
       ...Object.entries(attrs).map(([key, value]) =>
@@ -372,6 +375,18 @@ describe("Codex OTLP → Call mapping (Codex Mode B, codex.* schema)", () => {
     expect(mapCodexOtlpToCalls(null)).toEqual([]);
     expect(mapCodexOtlpToCalls({ resourceLogs: "nope" })).toEqual([]);
   });
+
+  test("timeUnixNano='0' (codex's real sentinel) falls back to observedTimeUnixNano — never 1970", () => {
+    // Regression: real codex sets timeUnixNano to literal "0" on EVERY record;
+    // taking it at face value dated all codex rows 1970-01-01 with zeroed ulids
+    // (caught live). The observed time must win over the 0 sentinel.
+    const calls = mapCodexOtlpToCalls(
+      codexLogs([codexEvent("codex.user_prompt", { "conversation.id": "c", prompt: "hi" }, "1752300000000000000")]),
+    );
+    expect(calls.length).toBe(1);
+    expect(calls[0]!.meta.tsRequest).toBe(1752300000000); // ms from observedTimeUnixNano
+    expect(calls[0]!.id.startsWith("0000")).toBe(false); // ulid seeded with a real time
+  });
 });
 
 describe("Codex OTLP mapper — against the REAL Codex capture (fixture)", () => {
@@ -391,6 +406,10 @@ describe("Codex OTLP mapper — against the REAL Codex capture (fixture)", () =>
     // The real tool output carried the file's contents back to the model — a
     // secret there is scanned. This is the gap Claude Code needs a hook for.
     expect(decode(tool.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
+    // Real codex records carry timeUnixNano="0" — the mapped time must come
+    // from observedTimeUnixNano, not the sentinel (1970 rows otherwise).
+    expect(prompt.meta.tsRequest).toBe(1752300000000);
+    expect(tool.meta.tsRequest).toBe(1752300001000);
   });
 
   test("no PII (email / account id) survives into any mapped Call", () => {

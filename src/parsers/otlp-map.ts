@@ -68,7 +68,17 @@ function addInt(a: number | undefined, b: number | undefined): number | undefine
 function nano(v: string | number | undefined): number | undefined {
   if (v === undefined || v === null) return undefined;
   const n = Number(v);
-  return Number.isFinite(n) ? n : undefined;
+  // OTLP uses 0 as the "unknown time" sentinel — never a real timestamp.
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+// The record's event time. Codex sets timeUnixNano to literal "0" on every
+// record (verified live, 0.44.x) and puts the real time in
+// observedTimeUnixNano — taking the 0 at face value dated every codex row
+// 1970-01-01 and zeroed its ulid. Prefer the event time, then the collector's
+// observed time, then a span's start time.
+function recordNano(rec: OtlpRecord): number | undefined {
+  return nano(rec.timeUnixNano) ?? nano(rec.observedTimeUnixNano) ?? nano(rec.startTimeUnixNano);
 }
 
 // A user prompt may be a plain string OR a JSON-encoded message array (long /
@@ -110,6 +120,7 @@ interface Turn {
 interface OtlpRecord {
   attributes?: Array<{ key: string; value: AttrValue }>;
   timeUnixNano?: string | number;
+  observedTimeUnixNano?: string | number;
   startTimeUnixNano?: string | number;
 }
 
@@ -201,7 +212,7 @@ export function mapOtlpLogsToCalls(payload: unknown, ctx: OtlpContext): OtelCall
           turn = { order: i, sessionId, toolInputs: [] };
           turns.set(key, turn);
         }
-        const ns = nano(rec.timeUnixNano ?? rec.startTimeUnixNano);
+        const ns = recordNano(rec);
         if (ns !== undefined && (turn.tsNano === undefined || ns < turn.tsNano)) turn.tsNano = ns;
         if (name === "user_prompt") {
           turn.prompt = str(a.get("prompt")) ?? turn.prompt;
@@ -302,7 +313,7 @@ function mapCodexRecords(records: OtlpRecord[]): OtelCall[] {
       if (!name || !CODEX_CONTENT.has(name)) continue;
       const convId = str(a.get("conversation.id"));
       const model = str(a.get("model"));
-      const ns = nano(rec.timeUnixNano ?? rec.startTimeUnixNano);
+      const ns = recordNano(rec);
       const ts = ns !== undefined ? Math.floor(ns / 1e6) : Date.now();
       if (name === "codex.user_prompt") {
         const prompt = str(a.get("prompt"));

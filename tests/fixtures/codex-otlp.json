@@ -24,8 +24,8 @@
           },
           "logRecords": [
             {
-              "timeUnixNano": "1752300000000000000",
-              "observedTimeUnixNano": "1783920546971791000",
+              "timeUnixNano": "0",
+              "observedTimeUnixNano": "1752300000000000000",
               "severityNumber": 9,
               "severityText": "INFO",
               "body": null,
@@ -104,8 +104,8 @@
               "eventName": "event otel/src/events/session_telemetry.rs:961"
             },
             {
-              "timeUnixNano": "1752300001000000000",
-              "observedTimeUnixNano": "1783920551811975000",
+              "timeUnixNano": "0",
+              "observedTimeUnixNano": "1752300001000000000",
               "severityNumber": 9,
               "severityText": "INFO",
               "body": null,
