@@ -108,11 +108,23 @@ export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null):
   if (isStoreError(store)) return lines.concat(store.error).join("\n");
   const calls = store?.countCalls() ?? 0;
   const leaks = store?.countLeakEvents() ?? 0;
+  // Agent-reported (Mode B) calls carry a known content gap — disclose it here
+  // (R2, spike criterion #2) whenever any exist, not just in the docs.
+  const otelCalls = store?.queryAll<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM exchanges WHERE source='otel'",
+  )[0]?.n ?? 0;
   store?.close();
   const dbPath = join(stateDir, "beagle.db");
   const sizeMb = existsSync(dbPath) ? (statSync(dbPath).size / (1 << 20)).toFixed(1) : "0.0";
   const cfg = loadConfig(stateDir);
   lines.push(`calls: ${calls} · leaks: ${leaks} · store: ${sizeMb} MB`);
+  if (otelCalls > 0) {
+    lines.push(
+      `  ${otelCalls} agent-reported (Mode B, --telemetry): self-report — prompts, ` +
+        `responses, tool inputs are scanned; tool-result content is not exported, ` +
+        `and alerts lag seconds. see docs/mode-b-spike.md`,
+    );
+  }
   lines.push(
     `retention: ${cfg.payloadWindowDays}d / ${cfg.sizeCapMB} MB payloads · ${cfg.eventWindowDays}d leak events`,
   );

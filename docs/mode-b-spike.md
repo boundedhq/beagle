@@ -1,19 +1,47 @@
-# Mode B (subscription-auth capture) — Phase-0 spike exit criteria
+# Mode B (subscription-auth capture) — Phase-0 spike results
 
-**Status: NOT YET VALIDATED against a real Claude Code build.** Mode B is
-implemented and unit-tested against synthetic OTLP payloads, but the exact
-shape of Claude Code's OpenTelemetry export — and whether its content flags
-carry enough for R5 secret scanning — can only be confirmed against the real
-client. This document is the checklist that gates trusting Mode B in
-production. Until every item is checked, `beagle run claude --telemetry`
-should be treated as **best-effort, agent-reported** capture, and the UI badge
-("agent-reported") plus the `status` disclosure must say so.
+**Status: VALIDATED against Claude Code 2.1.193 (macOS, 2026-07-13).** Mode B
+now captures real Claude Code telemetry end to end — a secret in a prompt
+fires `beagle leaks` — with one documented content gap (tool *outputs* are not
+exported by the client). It remains **agent-reported** by nature (a
+self-report, not wire bytes) and is badged as such. See the per-criterion
+results below and the classification at the end.
+
+> Reproduce: point Claude Code's OTel exporter at a dump server with
+> `buildOtelEnv`'s knobs and run one `claude -p` session. The exact captured
+> payload (PII stripped, a test key injected) is checked in at
+> `tests/fixtures/claude-code-otlp.json` and asserted against the mapper in
+> `tests/otlp.test.ts`.
 
 Background: for Claude Code signed in with a Claude.ai subscription, putting a
 proxy on the wire is off-limits (Anthropic restricts subscription OAuth to its
 official client). Mode B instead sets Claude Code's own vendor-shipped OTel
 knobs so its exporter posts a self-report to Beagle's loopback OTLP receiver.
 See PRD R2 (Mode B) and design §6.2.
+
+## The headline finding
+
+The mapper was originally written against the OpenTelemetry **GenAI semantic
+conventions** (`gen_ai.prompt`, `gen_ai.completion`, `gen_ai.usage.*`). Claude
+Code **does not emit those.** It emits its own **event schema** under scope
+`com.anthropic.claude_code.events`, where one user turn is split across several
+log records keyed by `(session.id, prompt.id)`:
+
+| `event.name` | content it carries |
+|---|---|
+| `user_prompt` | `prompt` (verbatim), `prompt.id`, `session.id`, `prompt_length` |
+| `tool_result` | `tool_input` (verbatim), `tool_name`, `*_size_bytes`, `success` — **no result content** |
+| `api_request` | `model`, `input_tokens`, `output_tokens`, `cost_usd`, `request_id` |
+| `assistant_response` | `response` (verbatim), `model`, `request_id` |
+
+Everything else it emits (`hook_*`, `mcp_server_connection`, `plugin_loaded`,
+`tool_decision`, `api_refusal`) is operational noise with no leak surface.
+
+Against real output the **old mapper produced zero exchanges** — Mode B
+captured nothing. The mapper is now rewritten (`src/parsers/otlp-map.ts`) to
+reassemble the split event stream into one Call per turn: `request.bodyBytes`
+(the scanned surface) = the user prompt + every tool input; `response.text` =
+the assistant response; tokens summed across `api_request` records.
 
 ## What Beagle sets (vendor knobs only — the bright line)
 
@@ -31,74 +59,90 @@ OTEL_BLRP_SCHEDULE_DELAY=1000               # trim batch lag toward ~1s
 OTEL_EXPORTER_OTLP_HEADERS=x-beagle-run=<token>
 ```
 
-No binary patching, no hosts/DNS tricks, no TLS interception. If any of these
-env var names has drifted in the current Claude Code, update `buildOtelEnv`;
-do **not** substitute a non-vendor mechanism.
+All honored by 2.1.193. No binary patching, no hosts/DNS tricks, no TLS
+interception.
 
-## Exit criteria — each must be observed on a real Claude Code build
+## Exit criteria — results
 
-1. **Env knobs are honored.** With the env above set, Claude Code POSTs to the
-   Beagle receiver at `/v1/logs` (or `/v1/traces`). Confirm the receiver
-   records exchanges during a real session. Record the actual OTLP path used.
+1. **Env knobs are honored — ✅ PASS.** With the env above set, Claude Code
+   POSTs to `http://127.0.0.1:<port>/v1/logs`, `content-type:
+   application/json`, `x-beagle-run` header present. OTLP path used:
+   **`/v1/logs`** (logs, not traces).
 
-2. **Content completeness for R5 scanning.** Confirm the content flags carry:
-   - verbatim user prompts (not truncated / not hashed),
-   - tool inputs and tool outputs (where a leaked secret most often appears),
-   - the assistant response text.
-   Run a session that deliberately includes a known test secret in a tool
-   result and confirm `beagle leaks` fires. If any content is redacted or
-   truncated by the client, document the gap — that is the honest cost of the
-   agent-reported badge, and `status`/docs must state it.
+2. **Content completeness for R5 scanning — ⚠️ PARTIAL (documented gap).**
+   - verbatim user prompts — ✅ present (`user_prompt.prompt`)
+   - assistant response text — ✅ present (`assistant_response.response`)
+   - tool **inputs** — ✅ present verbatim (`tool_result.tool_input`: bash
+     command lines, file paths, write payloads — real leak surfaces)
+   - tool **outputs / results** — ❌ **NOT exported.** `tool_result` carries
+     only `tool_result_size_bytes`, never the content. A secret that exists
+     *only* in a tool's output (e.g. the body of a file the agent `Read`) is
+     invisible to Mode B, even with `OTEL_LOG_TOOL_CONTENT=1`.
 
-3. **Payload shape.** Record whether GenAI data arrives as **logs**
-   (`resourceLogs`) or **spans** (`resourceSpans`), the exact attribute keys
-   used for prompt / completion / model / session id / token counts, and the
-   value encodings (int64 as JSON string vs number). The mapper already
-   handles both containers, both token-name conventions, string-encoded
-   int64, and a JSON-array prompt — but confirm the real keys match and add
-   any missing ones to `recordToExchange`. **If the client emits BOTH a span
-   and a log for the same inference**, the mapper would produce two exchanges
-   for one call — decide whether to de-duplicate (e.g. by a shared span/trace
-   id) once the real behavior is known. Also record the exact serialization of
-   `gen_ai.prompt` for nested content (tool_result blocks): the scanner reads
-   the raw prompt string so it catches secrets in any nested field, but
-   confirm the client doesn't truncate or hash that content.
+   End-to-end proof of the parts that ARE covered: a real `beagle run claude
+   --telemetry` session with `AKIAZQ3DRSTUVWXY2345` in the prompt fires
+   `beagle leaks` → `aws-access-key-id → anthropic`, and `beagle search`
+   finds it. **This gap is the honest cost of the agent-reported badge and is
+   stated in `status` and the README.**
 
-4. **Session attribute.** Confirm which attribute carries the conversation /
-   session id (currently mapped from `session.id`) so tier-1 session keying
-   works and dedup is correct across a multi-turn conversation.
+3. **Payload shape — ✅ recorded.** GenAI data arrives as **logs**
+   (`resourceLogs → scopeLogs → logRecords`), scope
+   `com.anthropic.claude_code.events` v2.1.193. Keys as tabled above. Token
+   ints arrive as JSON **numbers** here (`{"intValue": 4058}`); the mapper
+   also accepts the spec's string form. `session.id` on every record. **No
+   duplicate span+log** for one inference — logs only — so no cross-container
+   dedup is needed. A turn *is* split across records (and can be split across
+   POST batches); the mapper correlates by `(session.id, prompt.id)` per
+   delivered payload, and the scanner + fingerprint dedup make a batch-split
+   turn harmless (all content scanned, no double alert).
 
-5. **Protocol.** Confirm `http/json` is honored (the receiver rejects
-   protobuf with 415 by design). If the client only speaks protobuf for logs,
-   that is a blocking finding — decide before shipping whether to accept a
-   protobuf decode dependency (violates the zero-dep budget) or drop Mode B to
-   spans/another signal.
+4. **Session attribute — ✅ PASS.** `session.id` carries the conversation id;
+   `prompt.id` correlates the records of one turn. Tier-1 session keying and
+   multi-turn dedup work.
 
-6. **Batch latency.** Measure the real alert lag with
-   `OTEL_BLRP_SCHEDULE_DELAY=1000`. R6's ~1s target holds for wire capture but
-   not necessarily Mode B; record the residual and make sure `status`/docs
-   state it rather than implying wire-equal timing.
+5. **Protocol — ✅ PASS.** `http/json` is honored; the receiver's protobuf
+   415 path is never hit in practice.
 
-7. **Account safety.** Confirm that setting these env vars does not alter the
-   auth/refresh flow or the client fingerprint (nothing goes on the wire
-   between Claude Code and Anthropic; login/refresh ride their own untouched
-   connection). This is the whole reason Mode B exists — verify it holds.
+6. **Batch latency — ✅ measured.** With `OTEL_BLRP_SCHEDULE_DELAY=1000`, the
+   terminal `assistant_response` arrived **~0.06 s** after its event
+   timestamp (flushed on turn completion); earlier events in a batch waited up
+   to **~5 s** for the batch window. Alert lag is therefore batch-bound, not
+   wire-instant — **seconds, not the R6 ~1 s wire target.** `status`/docs must
+   not imply wire-equal timing for Mode B.
+
+7. **Account safety — ✅ by construction.** The env vars configure only the
+   OTel *exporter*; the telemetry is a separate loopback POST. No traffic
+   between Claude Code and Anthropic is touched — login/refresh ride their own
+   untouched connection, and no CA/DNS/proxy is involved. (Not wire-diffed;
+   the mechanism is exporter-only by design, which is the whole reason Mode B
+   exists.)
+
+## Also observed
+
+- **PII in every event.** Each record carries `user.email`, `user.id`,
+  `user.account_uuid`, `user.account_id`, `organization.id`. Beagle's mapper
+  reads only content/token/session attributes and **drops all of these** —
+  they never reach the store. (The spike fixture has them stripped too.)
 
 ## What is already covered (no spike needed)
 
-- Receiver: loopback bind, per-daemon-session run token (timing-safe compare),
-  JSON-only (protobuf → 415), body-size cap, chunk-safe UTF-8 decode.
-- Mapper: `resourceLogs` **and** `resourceSpans`; `input_tokens`/`prompt_tokens`
-  and `output_tokens`/`completion_tokens`; int64-as-string; plain-string **and**
-  JSON-array prompts; malformed payload → `[]`.
-- Pipeline parity: OTel exchanges run the identical scanner → session → alert →
+- Receiver: loopback bind, per-daemon-session run token (timing-safe compare
+  on the `x-beagle-run` header — the real gate), JSON-only (protobuf → 415),
+  body-size cap, chunk-safe UTF-8 decode.
+- Mapper: `resourceLogs` **and** `resourceSpans` (spans kept as a
+  forward-compat fallback), int64-as-number **and** -as-string, plain-string
+  **and** JSON-array prompts, malformed payload → `[]`.
+- Pipeline parity: OTel Calls run the identical scanner → session → alert →
   store path as wire capture, labeled `source='otel'`.
 
-## Ship posture until validated
+## Classification
 
-Per the PRD, V1 ship is gated on each subscription agent having a *classified*
-answer (sanctioned / gray / no-clean-path), not on Mode B being perfect.
-Current classification for Claude Code Mode B: **implemented, unvalidated** —
-ship as opt-in `--telemetry` with the agent-reported badge and this document
-linked from the release notes, and complete this checklist before promoting it
-to a default or a graduation nudge.
+**Sanctioned mechanism, partial fidelity.** Mode B is functional and validated
+for Claude Code 2.1.193: it captures prompts, assistant responses, and tool
+inputs, and fires real leak alerts on them — using only vendor-shipped OTel
+knobs, with the model↔Anthropic connection untouched. The one gap (tool output
+content is not exported) and the batch-bound latency are inherent to the
+self-report and are disclosed. Ship as `--telemetry` with the **agent-reported**
+badge; safe to keep opt-in. Before promoting it to a default or graduation
+nudge, re-run this spike against the then-current Claude Code (the event schema
+is a client implementation detail and can drift).

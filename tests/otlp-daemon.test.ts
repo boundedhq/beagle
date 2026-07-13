@@ -8,23 +8,33 @@ import { Store } from "../src/core/store/store";
 import { listLeakEvents } from "../src/viewer/feed-query";
 import type { AlertEvent } from "../src/core/alert/engine";
 
-function otlpBody(token: string, prompt: string, sessionId = "otel-conv-1") {
+// Claude Code's real Mode-B export (event schema, verified in the Phase-0
+// spike): a turn is a user_prompt + api_request + assistant_response sharing
+// session.id/prompt.id. The run token rides the HTTP header, not an attribute.
+function otlpBody(_token: string, prompt: string, sessionId = "otel-conv-1") {
+  const ev = (name: string, attrs: Record<string, string | number>) => ({
+    timeUnixNano: String(Date.now() * 1e6),
+    body: { stringValue: `claude_code.${name}` },
+    attributes: [
+      { key: "event.name", value: { stringValue: name } },
+      { key: "session.id", value: { stringValue: sessionId } },
+      { key: "prompt.id", value: { stringValue: "prompt-x" } },
+      ...Object.entries(attrs).map(([key, value]) =>
+        typeof value === "number"
+          ? { key, value: { intValue: value } }
+          : { key, value: { stringValue: value } },
+      ),
+    ],
+  });
   return {
     resourceLogs: [{
       scopeLogs: [{
-        logRecords: [{
-          timeUnixNano: String(Date.now() * 1e6),
-          attributes: [
-            { key: "gen_ai.system", value: { stringValue: "anthropic" } },
-            { key: "gen_ai.response.model", value: { stringValue: "claude-sonnet-5" } },
-            { key: "session.id", value: { stringValue: sessionId } },
-            { key: "gen_ai.prompt", value: { stringValue: prompt } },
-            { key: "gen_ai.completion", value: { stringValue: "acknowledged" } },
-            { key: "gen_ai.usage.input_tokens", value: { intValue: "50" } },
-            { key: "gen_ai.usage.output_tokens", value: { intValue: "4" } },
-            { key: "beagle.run_token", value: { stringValue: token } },
-          ],
-        }],
+        scope: { name: "com.anthropic.claude_code.events" },
+        logRecords: [
+          ev("user_prompt", { prompt }),
+          ev("api_request", { model: "claude-sonnet-5", input_tokens: 50, output_tokens: 4 }),
+          ev("assistant_response", { model: "claude-sonnet-5", response: "acknowledged" }),
+        ],
       }],
     }],
   };
