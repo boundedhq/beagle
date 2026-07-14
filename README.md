@@ -266,7 +266,11 @@ capture fails, your agent's traffic still flows; the gap is recorded as
 ```sh
 bun install
 bun run check          # lint + LOC budget + typecheck + tests
-bun run build          # dist/beagle single binary
+bun run build          # → dist/beagle (self-contained binary)
+
+# run your build as `beagle` from anywhere (both pick up later rebuilds):
+export PATH="$PWD/dist:$PATH"                     # this shell only (add to your shell rc to persist)
+ln -sf "$PWD/dist/beagle" /usr/local/bin/beagle   # or install it system-wide (may need sudo)
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Beagle is a product of
