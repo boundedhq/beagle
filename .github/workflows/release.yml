@@ -22,10 +22,30 @@ jobs:
       - name: Checksums
         working-directory: dist/release
         run: for f in beagle-*; do sha256sum "$f" > "$f.sha256"; done
-      # Signing (cosign/minisign) and GitHub Release upload steps go here;
-      # per the supply-chain rule, npm publishing bundles these same binaries
-      # per-platform and never fetches on post-install.
+      # Signing (cosign/minisign) is on the roadmap; the published sha256s are
+      # the integrity check until then.
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
           files: dist/release/*
+      # npm channel (primary): a launcher package + one binary package per
+      # platform (os/cpu-guarded optionalDependencies) — the binary rides the
+      # tarball, no post-install fetch. Skips cleanly until NPM_TOKEN is set, so
+      # the GitHub-release binaries still ship before npm auth is wired.
+      - name: Build npm packages
+        run: bun scripts/build-npm.ts
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "NPM_TOKEN not set — skipping npm publish (GitHub release still shipped)."
+            exit 0
+          fi
+          # Platform packages first so the launcher's optionalDependencies resolve.
+          for d in dist/npm/beagle-*; do npm publish "$d" --access public; done
+          npm publish dist/npm/beagle --access public

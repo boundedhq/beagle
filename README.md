@@ -18,7 +18,7 @@ command, without changing your setup.
 ## Quick start
 
 ```sh
-brew install boundedhq/tap/beagle   # single binary — more options under Install
+npm install -g @boundedhq/beagle   # single binary — more options under Install
 beagle detect                       # finds your agents, prints the command for each
 beagle run claude                   # wrap one session — that's it
 ```
@@ -186,17 +186,23 @@ Requirements: **none** — Beagle ships as a single self-contained binary
 (macOS and Linux, x64 and arm64; Windows is post-v1).
 
 ```sh
-# Homebrew (primary)
-brew install boundedhq/tap/beagle
+# npm (primary) — the prebuilt binary for your platform, from an audited
+# registry. No post-install script, no code fetched at install time.
+npm install -g @boundedhq/beagle
 
 # or the one-line script (downloads from GitHub Releases, verifies the
-# sha256 checksum before installing, never runs post-install code)
+# sha256 checksum before installing, never runs post-install code). For a
+# transparency tool, read it before you pipe it:
+#   curl -fsSL .../packaging/install.sh -o install.sh && less install.sh && sh install.sh
 curl -fsSL https://raw.githubusercontent.com/boundedhq/beagle/main/packaging/install.sh | sh
 
 # or build from source (requires Bun ≥ 1.3)
 git clone https://github.com/boundedhq/beagle && cd beagle
 bun install && bun run build     # → dist/beagle
 ```
+
+(A Homebrew formula lives in `packaging/beagle.rb` for a future tap; npm already
+covers macOS and Linux, so the tap isn't wired into releases yet.)
 
 ## Uninstall
 
