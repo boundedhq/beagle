@@ -102,7 +102,7 @@ describe("shim script", () => {
       beagleBinary: "/usr/local/bin/beagle",
       telemetry: true,
     });
-    expect(s).toContain('run codex --telemetry --real "/opt/homebrew/bin/codex" -- "$@"');
+    expect(s).toContain('run "codex" --telemetry --real "/opt/homebrew/bin/codex" -- "$@"');
     // and the default stays wire
     const wire = shimScript({ agent: "codex", realBinary: "/o/codex", beagleBinary: "/b" });
     expect(wire).not.toContain("--telemetry");
@@ -141,7 +141,7 @@ describe("isBeagleShim + shim-aware detection (fork-bomb & double-wrap defense)"
       beagleScript: "/repo/src/cli/main.ts",
       telemetry: true,
     });
-    expect(s).toContain('"/usr/local/bin/bun" "/repo/src/cli/main.ts" run claude --telemetry');
+    expect(s).toContain('"/usr/local/bin/bun" "/repo/src/cli/main.ts" run "claude" --telemetry');
   });
 });
 
@@ -206,6 +206,15 @@ describe("parseWatchArgs (strict watch flag parsing)", () => {
     const r = parseWatchArgs(["codex", "--telemetr"]);
     expect("error" in r && r.error).toContain("--telemetr");
     expect("error" in parseWatchArgs([])).toBe(true); // missing agent
+  });
+
+  test("a malicious agent name is rejected before it reaches the shim / sh -ic", () => {
+    // The agent flows into a generated /bin/sh shim and a `sh -ic` probe;
+    // shape-gate it so a metachar/newline can never reach those sinks.
+    for (const bad of ['x";rm -rf ~;"', "x\nrm -rf ~", "a b", "../evil", "Codex", "-x"]) {
+      expect("error" in parseWatchArgs([bad])).toBe(true);
+    }
+    expect(parseWatchArgs(["opencode"])).toEqual({ agent: "opencode", yes: false, mode: "auto" });
   });
 });
 

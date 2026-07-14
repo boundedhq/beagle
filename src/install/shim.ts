@@ -63,7 +63,7 @@ export function shimScript(spec: ShimSpec): string {
 ${SHIM_MARKER} for ${spec.agent} — created by 'beagle watch'.
 ${how} then execs the real
 # binary. Remove with 'beagle unwatch ${spec.agent}'. Your config is untouched.
-exec ${beagle} run ${spec.agent}${mode} --real ${real} -- "$@"
+exec ${beagle} run ${shQuote(spec.agent)}${mode} --real ${real} -- "$@"
 `;
 }
 

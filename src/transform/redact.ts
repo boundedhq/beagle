@@ -102,8 +102,14 @@ export function applyCaptureRedaction(o: {
     responseBody = resp.bytes;
     values = [...req.values, ...resp.values];
   }
-  // Value-scrub the response with the request's values in case the model
-  // echoed a leaked key back (request-side spans alone would miss it).
-  responseBody = redactValues(responseBody, req.values);
-  return { redacted: true, heldOut: false, requestBody: req.bytes, responseBody, values };
+  // Span redaction only masks the ONE occurrence the scanner reported, but a
+  // secret can appear more than once in a body (the codex request echoes the
+  // prompt across several fields) and an echoed key can reappear in the
+  // response. Value-scrub BOTH bodies with every detected value so no raw copy
+  // of a detected secret survives — in the stored bytes or the search index
+  // derived from them. Placeholders match redactBody's, so the viewer still
+  // highlights them.
+  const requestBody = redactValues(req.bytes, values) ?? req.bytes;
+  responseBody = redactValues(responseBody, values);
+  return { redacted: true, heldOut: false, requestBody, responseBody, values };
 }

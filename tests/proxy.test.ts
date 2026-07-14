@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { parseUpstream } from "../src/core/proxy/http1";
+import { parseUpstream, ResponseReader } from "../src/core/proxy/http1";
+import { decodeBody, scrubAuthHeaders } from "../src/core/normalize/normalize";
 import { createServer, type Server, type Socket } from "node:net";
 import { gzipSync } from "node:zlib";
 import { mkdtempSync } from "node:fs";
@@ -451,5 +452,41 @@ describe("proxy", () => {
       `POST /run/run-abc/v1/messages HTTP/1.1\r\nHost: h\r\nContent-Length: 2\r\n\r\n{}`);
     expect(upstream.requests.length).toBe(2);
     expect(upstream.connections).toBe(1);
+  });
+});
+
+describe("proxy hardening (malicious/compromised upstream)", () => {
+  test("decodeBody caps decompression — a zip bomb keeps raw bytes instead of OOMing", () => {
+    const bomb = gzipSync(Buffer.alloc(65 * 1024 * 1024, 0)); // decodes to 65 MB > 64 MB cap
+    expect(decodeBody(new Uint8Array(bomb), "gzip")).toEqual(new Uint8Array(bomb)); // over cap → raw
+    const ok = gzipSync(Buffer.from("hello")); // a normal body still decodes
+    expect(Buffer.from(decodeBody(new Uint8Array(ok), "gzip")).toString()).toBe("hello");
+  });
+
+  test("response Set-Cookie / WWW-Authenticate are scrubbed before storage", () => {
+    const s = scrubAuthHeaders(
+      [["set-cookie", "session=abc"], ["www-authenticate", "Bearer x"], ["content-type", "text/plain"]],
+      undefined,
+      "openai",
+    );
+    expect(s.find(([n]) => n === "set-cookie")![1]).toContain("[AUTH:");
+    expect(s.find(([n]) => n === "www-authenticate")![1]).toContain("[AUTH:");
+    expect(s.find(([n]) => n === "content-type")![1]).toBe("text/plain"); // non-auth untouched
+  });
+
+  test("ResponseReader bounds an endless-header stream and won't let the socket be pooled", () => {
+    const r = new ResponseReader(() => {});
+    r.feed(Buffer.from("HTTP/1.1 200 OK\r\n"));
+    for (let i = 0; i < 60 && !r.done; i++) r.feed(Buffer.from(`x-pad: ${"a".repeat(8192)}\r\n`));
+    expect(r.done).toBe(true); // capped, not growing without bound
+    expect(r.keepAlive).toBe(false); // → server.ts destroys instead of pooling
+  });
+
+  test("ResponseReader flags trailing (smuggled) bytes so the socket isn't reused", () => {
+    const r = new ResponseReader(() => {});
+    // a complete 2-byte response immediately followed by a forged second response
+    r.feed(Buffer.from("HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok" + "HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nEVIL!"));
+    expect(r.done).toBe(true);
+    expect(r.keepAlive).toBe(false); // leftover bytes → pool-poisoning defense
   });
 });

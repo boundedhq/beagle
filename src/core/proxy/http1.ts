@@ -62,6 +62,15 @@ export class ResponseReader {
     this.buf = this.buf.length === 0 ? data : Buffer.concat([this.buf, data]);
     if (this.stage === "head") this.parseHead();
     if (this.stage === "body") this.parseBody();
+    // Bound the pre-body buffer: a malicious upstream sending endless headers
+    // (or a never-terminated chunk-size line) would grow buf without limit with
+    // O(n²) concat. Body bytes are drained by onBody, so a real stream never
+    // trips this; over the cap, abandon the response.
+    if (!this.done && this.buf.length > 1 << 18) this.done = true;
+    // Leftover bytes after a complete response are a smuggled/pipelined extra
+    // response (or the overflow above): don't reuse this socket — server.ts
+    // pools only when keepAlive stays true. Defeats keep-alive pool poisoning.
+    if (this.done && this.buf.length > 0) this.keepAlive = false;
   }
 
   end(): void {
@@ -157,8 +166,7 @@ export class ConnectionPool {
   private idle = new Map<string, Socket[]>();
 
   acquire(up: Upstream): Promise<Socket> {
-    const key = `${up.scheme}://${up.authority}`;
-    const sock = this.idle.get(key)?.pop();
+    const sock = this.idle.get(`${up.scheme}://${up.authority}`)?.pop();
     if (sock && !sock.destroyed) return Promise.resolve(sock);
     return this.acquireFresh(up);
   }
@@ -170,14 +178,15 @@ export class ConnectionPool {
           ? tlsConnect({ host: up.host, port: up.port, servername: up.host }, () => resolve(s))
           : netConnect(up.port, up.host, () => resolve(s));
       s.on("error", reject);
+      // Slow-loris defense: a stalled upstream (or an idle pooled socket) that
+      // goes silent for 60s is destroyed rather than tying up daemon state.
+      s.setTimeout(60_000, () => s.destroy());
     });
   }
 
   release(up: Upstream, sock: Socket): void {
     if (sock.destroyed) return;
-    sock.removeAllListeners("data");
-    sock.removeAllListeners("error");
-    sock.removeAllListeners("close");
+    for (const ev of ["data", "error", "close"]) sock.removeAllListeners(ev);
     sock.on("error", () => sock.destroy());
     const key = `${up.scheme}://${up.authority}`;
     const list = this.idle.get(key) ?? [];

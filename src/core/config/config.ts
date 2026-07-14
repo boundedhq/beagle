@@ -20,7 +20,11 @@ export const DEFAULT_CONFIG: BeagleConfig = {
   payloadWindowDays: 7,
   sizeCapMB: 1024,
   eventWindowDays: 90,
-  redactOnCapture: false,
+  // Secure default: a secret-detection tool must not itself keep detected
+  // secrets in cleartext at rest. Only the matched secret spans are masked
+  // (`[REDACTED:type:hash]`) — surrounding content stays intact and searchable.
+  // Opt out (`beagle config redact-on-capture off`) for the raw-fidelity view.
+  redactOnCapture: true,
   excludedAgents: [],
   agentRunMode: {},
 };
