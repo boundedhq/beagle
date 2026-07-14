@@ -49,10 +49,22 @@ describe("npm packaging", () => {
     expect(existsSync(join(npmOut, "beagle", "bin", "beagle.cjs"))).toBe(true);
   });
 
-  test("launcher.cjs computes the same platform package names build-npm emits", () => {
-    // Mirror launcher.cjs's mapping and assert it lands on a real package name.
+  test("every platform the launcher resolves to has a matching published package", () => {
+    // launcher.cjs computes `@boundedhq/beagle-${process.platform}-${cpu}` where
+    // cpu maps x64→x64, arm64→arm64. Reproduce that mapping for each supported
+    // (platform, arch) and assert the launcher would land on a real optionalDep
+    // — this is the drift guard between launcher.cjs and build-npm.ts.
+    const main = JSON.parse(readFileSync(join(build(), "beagle", "package.json"), "utf8"));
+    const supported: Array<[string, string]> = [
+      ["darwin", "arm64"], ["darwin", "x64"], ["linux", "x64"], ["linux", "arm64"],
+    ];
+    for (const [platform, arch] of supported) {
+      const cpu = arch === "x64" ? "x64" : arch === "arm64" ? "arm64" : arch;
+      const name = `@boundedhq/beagle-${platform}-${cpu}`;
+      expect(main.optionalDependencies[name]).toBe(BEAGLE_VERSION);
+    }
+    // and the launcher source still uses that exact naming scheme
     const src = readFileSync(join(import.meta.dir, "..", "packaging", "npm", "launcher.cjs"), "utf8");
     expect(src).toContain("@boundedhq/beagle-${process.platform}-${cpu}");
-    for (const t of TARGETS) expect(TARGETS).toContain(t); // darwin/linux × arm64/x64 are the emitted set
   });
 });
