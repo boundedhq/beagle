@@ -378,13 +378,20 @@ describe("beagle help / detect surfaces", () => {
     expect(run.exitCode).toBe(2);
   });
 
-  test("detectLine names the login and the capture mode a plain run would pick", () => {
-    expect(detectLine("claude", "subscription")).toContain("subscription login");
-    expect(detectLine("claude", "subscription")).toContain("telemetry capture");
-    expect(detectLine("codex", "api-key")).toContain("wire capture");
-    expect(detectLine("codex", "unknown")).toContain("asks on first run");
+  test("detectLine puts the command on its own arrowed line, with a plain-English capture note", () => {
+    // The command must read as "type this" — its own line, marked, not buried
+    // mid-row between unlabeled facts (the old single-line format).
+    const sub = detectLine("claude", "subscription");
+    expect(sub).toContain("→ beagle run claude");
+    expect(sub.split("\n").length).toBe(2);
+    // no bare jargon: each login kind is explained in plain words
+    expect(sub).toContain("subscription");
+    expect(sub).toContain("usage report");
+    expect(detectLine("codex", "api-key")).toContain("API key");
+    expect(detectLine("codex", "api-key")).toContain("on the wire");
+    expect(detectLine("codex", "unknown")).toContain("asks once");
     // the command itself is always the plain one — no flags to memorize
-    expect(detectLine("claude", "subscription")).toContain("beagle run claude");
+    expect(detectLine("codex", "unknown")).toContain("→ beagle run codex");
   });
 });
 

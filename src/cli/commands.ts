@@ -358,16 +358,18 @@ const BEAGLE_STATE_ENTRIES = [
 
 /** One detect line per agent: what login Beagle sees and what capture mode a
  *  plain `beagle run <agent>` would therefore pick. Exported for tests. */
+// Two lines per agent: the COMMAND on its own arrowed line (a new user must
+// see it as "type this", not as description), then a plain-English note on
+// what Beagle detected and how that session gets captured — no bare
+// "wire/telemetry" jargon.
 export function detectLine(agent: string, auth: "api-key" | "subscription" | "unknown"): string {
-  const login =
-    auth === "subscription" ? "subscription login" : auth === "api-key" ? "API-key login" : "login not detected";
-  const mode =
+  const how =
     auth === "subscription"
-      ? "telemetry capture"
+      ? "signed in with a subscription — captured via the agent's own usage report"
       : auth === "api-key"
-        ? "wire capture"
-        : "asks on first run";
-  return `  ${agent.padEnd(9)} ${login.padEnd(19)} beagle run ${agent}   (${mode})`;
+        ? "signed in with an API key — captured on the wire, full fidelity"
+        : "couldn't tell how it's signed in — Beagle asks once on your first run";
+  return `  ${agent.padEnd(10)}→ beagle run ${agent}\n${" ".repeat(14)}${how}`;
 }
 
 export function cmdDetect(): string {
@@ -383,12 +385,16 @@ export function cmdDetect(): string {
     );
   }
   const lines = found.map((f) => {
-    // opencode wire-captures both logins, pi is API-key only — for those the
-    // login detail doesn't change the command or the mode.
+    // opencode and pi wire-capture BOTH login kinds — the login detail doesn't
+    // change the command or the capture, so no detection caveat is shown.
     if (f.agent === "claude" || f.agent === "codex") return detectLine(f.agent, detectAuthForRun(f.agent));
-    return `  ${f.agent.padEnd(9)} ${"".padEnd(19)} beagle run ${f.agent}   (wire capture)`;
+    return `  ${f.agent.padEnd(10)}→ beagle run ${f.agent}\n${" ".repeat(14)}captured on the wire, full fidelity`;
   });
-  return `Found ${found.length} agent${found.length === 1 ? "" : "s"}:\n${lines.join("\n")}\nAlways-on instead: beagle watch <agent>`;
+  return (
+    `Found ${found.length} agent${found.length === 1 ? "" : "s"} — to capture one session, run the command shown:\n\n` +
+    `${lines.join("\n")}\n\n` +
+    `To capture every session automatically:  beagle watch <agent>`
+  );
 }
 
 function buildWatchEnv(stateDir: string, yes: boolean): WatchEnv {
