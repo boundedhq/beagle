@@ -356,12 +356,10 @@ const BEAGLE_STATE_ENTRIES = [
   "graduation.json", "shims", "agent-config", "quarantine",
 ];
 
-/** One detect line per agent: what login Beagle sees and what capture mode a
- *  plain `beagle run <agent>` would therefore pick. Exported for tests. */
-// Two lines per agent: the COMMAND on its own arrowed line (a new user must
-// see it as "type this", not as description), then a plain-English note on
-// what Beagle detected and how that session gets captured — no bare
-// "wire/telemetry" jargon.
+/** Two lines per agent, for a first-time reader: the COMMAND on its own
+ *  arrowed line (it must read as "type this", not as a description), then a
+ *  plain-English note on the login Beagle detected and how that session gets
+ *  captured — no bare "wire/telemetry" jargon. Exported for tests. */
 export function detectLine(agent: string, auth: "api-key" | "subscription" | "unknown"): string {
   const how =
     auth === "subscription"
