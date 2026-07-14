@@ -175,8 +175,11 @@ in one sitting: start at [`src/core/`](src/core/).
 - **Your API key never rests.** Auth headers are scrubbed before anything
   is written; the credential exists only in memory, in flight.
 - **The store is the liability, minimized.** `0600` files, 7-day rolling
-  payload window, opt-in `redact-on-capture`, one-command panic purge with
-  secure delete.
+  payload window, and — on by default — `redact-on-capture`: a detected secret
+  is masked (`[REDACTED:type:hash]`) before it is ever written, so Beagle never
+  becomes a plaintext store of the very secrets it catches. Turn it off
+  (`beagle config redact-on-capture off`) for the raw-fidelity view.
+  One-command panic purge with secure delete.
 - **Auditable.** Found a hole? See [SECURITY.md](SECURITY.md) for private
   reporting.
 

@@ -275,12 +275,23 @@ export class Daemon {
     // redact-on-capture (§4/R11): see applyCaptureRedaction for the policy.
     // Run it whenever scanState is unverified even if the stash is gone, so a
     // never-scanned body is held out, not stored raw-and-hoped.
+    // Scan the response too, for REDACTION ONLY — never an alert. A "leak" is a
+    // secret going OUT (the request); a secret in the model's response came FROM
+    // the provider, so alerting on it would misattribute it to the agent. But it
+    // still must not sit raw at rest, and the pre-forward pass only scanned the
+    // request — so scan the response here purely to mask it. Deliberately
+    // symmetric with the Mode B ingest path (inbound content never alerts).
+    const respScan =
+      this.config.redactOnCapture && call.response.bodyBytes?.byteLength
+        ? await this.scanHost.scan(call.response.bodyBytes, {})
+        : null;
     const redaction = this.config.redactOnCapture
       ? applyCaptureRedaction({
-          incomplete: scanState === "incomplete",
+          incomplete: scanState === "incomplete" || respScan?.state === "incomplete",
           requestBytes: call.request.bodyBytes,
           requestFindings: stash?.findings ?? [],
           responseBody: call.response.bodyBytes ?? null,
+          responseFindings: respScan?.findings,
         })
       : null;
     const requestBody = redaction ? redaction.requestBody : call.request.bodyBytes;

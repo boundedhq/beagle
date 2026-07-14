@@ -161,7 +161,12 @@ export function watchAgent(agent: string, env: WatchEnv, requested: WatchModeReq
     return { applied: false, message: "cancelled — nothing changed." };
   }
 
-  mkdirSync(env.shimDir, { recursive: true, mode: 0o755 });
+  // 0700, and tighten the state-dir root too: `beagle watch` can be the first
+  // command to create ~/.local/state/beagle (before the daemon's Store.open
+  // sets 0700), and every other creator uses 0700. A 0755 root/shim dir would
+  // let other local users traverse it and read the shims.
+  mkdirSync(env.shimDir, { recursive: true, mode: 0o700 });
+  chmodSyncSafe(env.stateDir);
   const manifest = new ChangeManifest(env.stateDir);
   // Record BEFORE mutating (design §6.12). recordReplacing so re-watching (to
   // switch modes) updates the entry instead of stacking duplicates.

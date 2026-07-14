@@ -38,7 +38,7 @@ describe("watchAgent", () => {
     expect(existsSync(join(env.shimDir, "claude"))).toBe(true);
     const shim = readFileSync(join(env.shimDir, "claude"), "utf8");
     expect(shim).toContain("beagle");
-    expect(shim).toContain("run claude");
+    expect(shim).toContain('run "claude"');
     const entries = new ChangeManifest(env.stateDir).list();
     // shim + the always-on service (first graduation)
     expect(entries.map((e) => e.kind).sort()).toEqual(["service", "shim"]);
@@ -80,7 +80,7 @@ describe("watchAgent", () => {
     const r = watchAgent("opencode", env);
     expect(r.applied).toBe(true);
     const shim = readFileSync(join(env.shimDir, "opencode"), "utf8");
-    expect(shim).toContain("run opencode");
+    expect(shim).toContain('run "opencode"');
   });
 
   test("pi is shimmable via its extension redirect (the shim just execs `beagle run pi`)", () => {
@@ -88,7 +88,7 @@ describe("watchAgent", () => {
     const r = watchAgent("pi", env);
     expect(r.applied).toBe(true);
     const shim = readFileSync(join(env.shimDir, "pi"), "utf8");
-    expect(shim).toContain("run pi");
+    expect(shim).toContain('run "pi"');
     expect(shim).not.toContain("--telemetry"); // pi has no telemetry mode
   });
 });
@@ -113,7 +113,7 @@ describe("watchAgent — telemetry mode (subscription logins)", () => {
     expect(r.applied).toBe(true);
     expect(r.message).toContain("agent telemetry");
     const shim = readFileSync(join(env.shimDir, "claude"), "utf8");
-    expect(shim).toContain("run claude --telemetry --real");
+    expect(shim).toContain('run "claude" --telemetry --real');
     expect(shim.endsWith('-- "$@"\n')).toBe(true); // user args still forwarded
     // manifest records the mode so status/unwatch stay honest
     const entry = new ChangeManifest(env.stateDir).list().find((e) => e.kind === "shim")!;
@@ -164,7 +164,7 @@ describe("watchAgent — telemetry mode (subscription logins)", () => {
     const shim = readFileSync(join(env.shimDir, "codex"), "utf8");
     expect(shim).not.toContain("--telemetry");
     // the user's explicit choice must survive run-time login detection
-    expect(shim).toContain("run codex --wire --real");
+    expect(shim).toContain('run "codex" --wire --real');
   });
 
   test("auto-resolved wire is NOT pinned — run-time detection can self-heal a login change", () => {

@@ -407,7 +407,9 @@ function buildWatchEnv(stateDir: string, yes: boolean): WatchEnv {
     runType: (agent) => {
       try {
         const shell = process.env.SHELL ?? "/bin/sh";
-        const r = Bun.spawnSync([shell, "-ic", `type ${agent}`]);
+        // Pass the agent as a positional ($1), never interpolated into the
+        // script string — so an agent name can't break out of `sh -ic`.
+        const r = Bun.spawnSync([shell, "-ic", 'type "$1"', shell, agent]);
         return r.stdout.toString().trim() || r.stderr.toString().trim();
       } catch {
         return "";
@@ -459,6 +461,10 @@ export function parseWatchArgs(
   if (unknown) return { error: `unknown flag ${unknown} — usage: beagle watch <agent> [--telemetry|--wire] [--yes]` };
   const agent = rest.find((a) => !a.startsWith("--"));
   if (!agent) return { error: "usage: beagle watch <agent> [--telemetry|--wire] [--yes]" };
+  // Defense-in-depth: the agent name flows into a generated /bin/sh shim and a
+  // `sh -ic` probe. It's already gated to the AGENTS allowlist downstream, but
+  // pin the shape here too so a metachar/newline can never reach those sinks.
+  if (!/^[a-z][a-z0-9-]*$/.test(agent)) return { error: `invalid agent name '${agent}'` };
   if (rest.includes("--telemetry") && rest.includes("--wire")) {
     return { error: "--telemetry and --wire are mutually exclusive." };
   }

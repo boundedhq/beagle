@@ -287,6 +287,10 @@ describe("Daemon end-to-end", () => {
   });
 
   test("multi-turn conversation stays one session; re-sent secret alerts once", async () => {
+    // This case searches for the raw secret to prove session grouping, so it
+    // opts into raw capture — redaction is on by default now (secure default),
+    // which would mask the value out of the search index.
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: false } });
     const secret = 'key AKIAZQ3DRSTUVWXY2345';
     const turn1 = JSON.stringify({
       model: "m", system: "s",

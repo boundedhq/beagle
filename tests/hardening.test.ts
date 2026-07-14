@@ -4,11 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/core/store/store";
 import { applyCaptureRedaction, redactBody, redactValues, redactValuesInText, redactionPlaceholder } from "../src/transform/redact";
+import { DEFAULT_CONFIG } from "../src/core/config/config";
 import { quarantineCorruptDb } from "../src/core/store/quarantine";
 import type { Finding } from "../src/core/scanner/engine";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 const dec = (b: Uint8Array) => new TextDecoder().decode(b);
+
+describe("secure defaults", () => {
+  test("redact-on-capture is ON by default — a detection tool must not keep secrets in cleartext", () => {
+    expect(DEFAULT_CONFIG.redactOnCapture).toBe(true);
+  });
+});
 
 function tmp() {
   return mkdtempSync(join(tmpdir(), "beagle-hard-"));
@@ -84,6 +91,23 @@ describe("redact-on-capture (R11)", () => {
     expect(dec(out.responseBody!)).not.toContain(secret);
     expect(dec(out.responseBody!)).toContain("[REDACTED:aws-access-key-id:");
     expect(out.values).toEqual([{ value: secret, type: "aws-access-key-id" }]);
+  });
+
+  test("value-scrubs EVERY occurrence, not just the one span the scanner reported", () => {
+    // A secret appearing more than once in a body (codex echoes the prompt
+    // across fields) with only ONE reported finding must leave NO raw copy —
+    // else the store + FTS index keep the secret in cleartext. Verified live.
+    const secret = "AKIAZQ3DRSTUVWXY2345";
+    const body = `{"a":"my key ${secret}","b":"copy ${secret} here"}`;
+    const first = body.indexOf(secret);
+    const out = applyCaptureRedaction({
+      incomplete: false,
+      requestBytes: enc(body),
+      requestFindings: [finding(first, first + secret.length)], // only the first occurrence
+      responseBody: null,
+    });
+    expect(dec(out.requestBody)).not.toContain(secret); // both copies gone
+    expect(dec(out.requestBody).match(/\[REDACTED:/g)?.length).toBe(2);
   });
 
   test("placeholder is stable for the same secret, distinct per type", () => {

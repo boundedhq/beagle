@@ -50,6 +50,11 @@ function shQuote(s: string): string {
 }
 
 export function shimScript(spec: ShimSpec): string {
+  // Self-defending boundary: the agent name is interpolated raw into the
+  // comment lines below (and shell-quoted on the exec line). Rather than trust
+  // a caller-side gate not to rot, refuse anything outside the strict agent
+  // shape here — a newline/metachar could otherwise break out of a comment.
+  if (!/^[a-z][a-z0-9-]*$/.test(spec.agent)) throw new Error(`unsafe agent name for shim: ${spec.agent}`);
   // Dev (bun + entry script) needs both parts on the exec line; compiled is
   // just the binary. Without this, a dev-installed shim exec'd a bare runtime
   // with no script — every watched invocation would fail.
@@ -63,7 +68,7 @@ export function shimScript(spec: ShimSpec): string {
 ${SHIM_MARKER} for ${spec.agent} — created by 'beagle watch'.
 ${how} then execs the real
 # binary. Remove with 'beagle unwatch ${spec.agent}'. Your config is untouched.
-exec ${beagle} run ${spec.agent}${mode} --real ${real} -- "$@"
+exec ${beagle} run ${shQuote(spec.agent)}${mode} --real ${real} -- "$@"
 `;
 }
 
