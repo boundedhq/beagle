@@ -247,6 +247,71 @@ export async function cmdStop(stateDir: string, force = false): Promise<string> 
   return `asked the daemon (pid ${daemon.pid}) to stop, but it is still responding — check \`beagle status\`.`;
 }
 
+/** Full, safe teardown in one command: unwatch every watched agent (restoring
+ *  your PATH and removing the background service), stop the daemon, SECURELY
+ *  erase captured data, then remove the state dir. Ordered so it can't orphan a
+ *  shim or leave secret bytes on disk — the trap of a manual `rm -rf`. Does not
+ *  remove the beagle binary itself (a running process can't reliably delete its
+ *  own executable, and Beagle shouldn't guess how you installed it). */
+export async function cmdUninstall(stateDir: string, yes = false): Promise<string> {
+  const manifest = new ChangeManifest(stateDir);
+  const watched = [...new Set(manifest.list().filter((e) => e.kind === "shim" && e.agent).map((e) => e.agent!))];
+  const hasStore = existsSync(join(stateDir, "beagle.db"));
+  const daemonUp = (await pingDaemon(stateDir)) !== null;
+  if (!existsSync(stateDir) || (!watched.length && !hasStore && !daemonUp)) {
+    return "beagle isn't installed here — nothing to remove.";
+  }
+
+  if (!yes) {
+    const plan = ["beagle uninstall will:"];
+    if (watched.length) plan.push(`  • unwatch ${watched.join(", ")} — restore your PATH, remove the background service`);
+    if (daemonUp) plan.push("  • stop the background daemon");
+    if (hasStore) plan.push("  • securely erase all captured data");
+    plan.push(`  • remove ${stateDir}`);
+    process.stdout.write(plan.join("\n") + "\nProceed? [y/N] ");
+    if (!/^y(es)?$/i.test(readLineSync().trim())) return "cancelled — nothing changed.";
+  }
+
+  const done: string[] = [];
+  // 1. Unwatch each agent FIRST — restores the real PATH entry and config, and
+  //    the last one tears down the shared background service. (Doing this after
+  //    removing the state dir would strand the shims with no manifest to
+  //    revert from.)
+  for (const agent of watched) {
+    await cmdUnwatch(stateDir, agent);
+    done.push(`unwatched ${agent}`);
+  }
+  // 2. Stop a daemon a `beagle run`-only user left running (no watches to have
+  //    stopped it). Force: we are removing everything anyway.
+  if ((await pingDaemon(stateDir)) !== null) {
+    await cmdStop(stateDir, true);
+    done.push("stopped the daemon");
+  }
+  // 3. Secure-wipe the captured data before unlinking — `rm` alone just frees
+  //    the blocks, leaving secret bytes recoverable until overwritten. Only
+  //    when the daemon is truly down (never two writers on the store).
+  if (hasStore && (await pingDaemon(stateDir)) === null) {
+    try {
+      const store = Store.open(stateDir);
+      store.panicPurge();
+      store.close();
+      done.push("securely erased captured data");
+    } catch {
+      /* corrupt/locked: the rm below still removes it */
+    }
+  }
+  // 4. Remove the whole state dir (config, keys, manifest, shims dir, quarantine).
+  rmSync(stateDir, { recursive: true, force: true });
+  done.push(`removed ${stateDir}`);
+
+  return (
+    "beagle uninstalled:\n  " +
+    done.join("\n  ") +
+    "\n\nThe beagle binary is still installed — remove it with:\n" +
+    `  brew uninstall beagle   (or: rm "${process.execPath}")`
+  );
+}
+
 /** One detect line per agent: what login Beagle sees and what capture mode a
  *  plain `beagle run <agent>` would therefore pick. Exported for tests. */
 export function detectLine(agent: string, auth: "api-key" | "subscription" | "unknown"): string {

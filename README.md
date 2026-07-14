@@ -197,18 +197,20 @@ bun install && bun run build     # → dist/beagle
 
 ## Uninstall
 
-Beagle must leave no trace — that's part of the trust contract:
+Beagle must leave no trace — that's part of the trust contract. One command
+does the whole safe teardown, in the right order (unwatch every agent → stop
+the daemon → securely erase captured data → remove the state dir):
 
 ```sh
-beagle unwatch <agent>         # remove the PATH shim; the background service
-                               # goes with the last watched agent
-beagle purge all               # erase all captured data
-rm -rf ~/.local/state/beagle   # remove the store directory
+beagle uninstall               # then remove the binary:
 brew uninstall beagle          # or: rm /usr/local/bin/beagle
 ```
 
-Everything Beagle ever changed on your system is listed by `beagle status`
-while it's installed.
+`beagle uninstall` restores your PATH and config before deleting anything, and
+securely wipes the store (a bare `rm -rf` would leave the freed pages
+recoverable) — which is why `beagle purge` alone doesn't delete the directory:
+it clears the *data* while keeping you set up. Everything Beagle ever changed
+is listed by `beagle status` while it's installed.
 
 ## FAQ
 

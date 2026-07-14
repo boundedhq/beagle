@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, detectLine, interpretAskAnswer, otelCallsArrivedSince, parseRunArgs, readCodexApiKey, resolveRunMode, runCallsArrived } from "../src/cli/commands";
+import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, cmdUninstall, detectLine, interpretAskAnswer, otelCallsArrivedSince, parseRunArgs, readCodexApiKey, resolveRunMode, runCallsArrived } from "../src/cli/commands";
 import { buildRunEnv, AGENTS } from "../src/cli/agents";
 import { Store, type CallRecord } from "../src/core/store/store";
 import { ulid } from "../src/core/store/ulid";
@@ -302,6 +302,35 @@ describe("readCodexApiKey (fail-open: supply codex's key from auth.json)", () =>
     writeFileSync(join(h, "auth.json"), "not json");
     expect(readCodexApiKey(h)).toBeNull();
     expect(readCodexApiKey(mkdtempSync(join(tmpdir(), "beagle-empty-")))).toBeNull(); // no file
+  });
+});
+
+describe("cmdUninstall (safe full teardown)", () => {
+  test("no daemon, watches, or store: reports nothing to remove", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-uninst-empty-"));
+    const out = await cmdUninstall(dir, true);
+    expect(out.toLowerCase()).toContain("nothing to remove");
+  });
+
+  test("--yes: securely erases the store and removes the state dir; names the binary step", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-uninst-"));
+    // a store with a captured secret present
+    const store = Store.open(dir);
+    store.insertCall({
+      id: ulid(), sessionId: "s1", runId: "r1", source: "wire", agent: "claude-code",
+      provider: "anthropic", endpoint: "/v1/messages", tsRequest: Date.now(),
+      scanState: "ok", captureState: "ok", sessionTier: "run",
+      requestBody: new TextEncoder().encode("AKIAZQ3DRSTUVWXY2345"),
+      requestHeaders: null, responseBody: null, responseHeaders: null, sseRaw: null,
+      searchText: "AKIAZQ3DRSTUVWXY2345",
+    });
+    store.close();
+    expect(existsSync(join(dir, "beagle.db"))).toBe(true);
+    const out = await cmdUninstall(dir, true);
+    expect(out).toContain("securely erased captured data");
+    expect(out).toContain(`removed ${dir}`);
+    expect(out).toContain("brew uninstall beagle");
+    expect(existsSync(dir)).toBe(false); // whole state dir gone
   });
 });
 

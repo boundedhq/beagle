@@ -2,7 +2,7 @@
 // leaks, show, purge — the whole product without the viewer.
 import {
   cmdConfig, cmdDetect, cmdHookForward, cmdLeaks, cmdPurge, cmdRun, cmdSearch, cmdShow,
-  cmdStatus, cmdStop, cmdUnwatch, cmdWatch, defaultStateDir, parseWatchArgs, readLineSync,
+  cmdStatus, cmdStop, cmdUninstall, cmdUnwatch, cmdWatch, defaultStateDir, parseWatchArgs, readLineSync,
 } from "./commands";
 import { BEAGLE_VERSION } from "../core/version";
 
@@ -32,6 +32,9 @@ usage:
   beagle leaks                   the leak log
   beagle show <id-prefix>        one call, summarized
   beagle purge [all|panic]       erase captured data
+  beagle uninstall [--yes]       remove everything Beagle installed (unwatch
+                                 all, stop the daemon, erase data, remove the
+                                 state dir) — the binary you remove yourself
   beagle config [...]            view/set redact-on-capture, exclusions,
                                  run-mode <agent> <wire|telemetry|auto>
   beagle ui                      open the dashboard (fresh one-time link)
@@ -112,6 +115,9 @@ export async function run(argv: string[]): Promise<number> {
       console.log(await cmdPurge(stateDir, rest[0] ?? "all"));
       return 0;
     }
+    case "uninstall":
+      console.log(await cmdUninstall(stateDir, rest.includes("--yes") || rest.includes("-y")));
+      return 0;
     case "ui": {
       const { cmdUi } = await import("./commands");
       console.log(await cmdUi(stateDir));
