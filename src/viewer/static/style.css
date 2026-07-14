@@ -46,7 +46,7 @@ main { flex: 1; padding: 8px 16px; }
 .row .agent { color: var(--accent); flex: 0 0 100px; overflow: hidden; text-overflow: ellipsis; }
 .row .model { color: var(--muted); flex: 0 0 130px; overflow: hidden; text-overflow: ellipsis; }
 .row .summary { flex: 1 1 auto; min-width: 120px; overflow: hidden; text-overflow: ellipsis; }
-.row .weight { color: var(--muted); flex: 0 0 130px; text-align: right; white-space: nowrap; margin-left: auto; }
+.row .weight { color: var(--muted); flex: 0 0 auto; min-width: 130px; text-align: right; white-space: nowrap; margin-left: auto; }
 .row .session { flex: 0 0 78px; text-align: right; }
 .row.head {
   cursor: default; color: var(--muted); font-size: 11px; text-transform: uppercase;

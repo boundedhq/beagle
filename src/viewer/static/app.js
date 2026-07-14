@@ -141,7 +141,7 @@ function App() {
         ${" "}<code>beagle run</code> and its traffic appears here live
       </div>`}
       ${visible.length > 0 &&
-      html`<div class="row head" aria-hidden="true">
+      html`<div class="row head">
         <span class="dot spacer"></span>
         <span class="time">time</span>
         <span class="agent">agent</span>
@@ -175,7 +175,11 @@ function Row({ x, onToggle, onSession }) {
     <div class=${x.hasLeak ? "row leak" : "row"} onClick=${onToggle}>
       <span
         class=${x.status && x.status >= 400 ? "dot err" : "dot"}
-        title=${x.status && x.status >= 400 ? `provider returned ${x.status}` : "call succeeded"}
+        title=${x.status == null
+          ? "no response recorded"
+          : x.status >= 400
+            ? `provider returned ${x.status}`
+            : "call succeeded"}
       ></span>
       <span class="time">${t}</span>
       <span class="agent">${x.agent ?? "?"}</span>
