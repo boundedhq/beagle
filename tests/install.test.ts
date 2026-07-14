@@ -306,6 +306,15 @@ describe("piProvider (redirect targets the provider pi is actually signed in wit
     expect(piProvider(piDir("not json", "not json"))).toBeUndefined();
   });
 
+  test("a prototype-chain key never resolves to an inherited value (Object.hasOwn, not `in`)", () => {
+    // A config value that happens to be a JS prototype property must map to
+    // "unknown → undefined", not to Object.prototype.toString/constructor etc.
+    for (const bad of ["constructor", "toString", "valueOf", "hasOwnProperty", "__proto__"]) {
+      expect(piProvider(piDir(`{"defaultProvider":${JSON.stringify(bad)}}`, null))).toBeUndefined();
+      expect(piProvider(piDir(null, `{${JSON.stringify(bad)}:{"type":"oauth"}}`))).toBeUndefined();
+    }
+  });
+
   test("pi spec follows piProvider for both the upstream and the redirected provider", () => {
     const spec = AGENTS.pi!;
     const oauthHome = piDir('{"defaultProvider":"openai-codex"}', '{"openai-codex":{"type":"oauth"}}');

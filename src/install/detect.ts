@@ -65,13 +65,16 @@ export function piProvider(home: string, piAgentDir?: string): PiProvider | unde
     // key in auth.json (a "version"/"$schema" field) can't miscount the logins.
     try {
       const auth = JSON.parse(readFileSync(join(dir, "auth.json"), "utf8")) as Record<string, unknown>;
-      const logins = Object.keys(auth ?? {}).filter((k) => k in PI_UPSTREAMS);
+      const logins = Object.keys(auth ?? {}).filter((k) => Object.hasOwn(PI_UPSTREAMS, k));
       if (logins.length === 1) provider = logins[0]!;
     } catch {
       /* no auth.json / unreadable */
     }
   }
-  const upstream = PI_UPSTREAMS[provider];
+  // Object.hasOwn, not `provider in PI_UPSTREAMS` / a bare index: a config value
+  // that happens to be a prototype key (`constructor`, `toString`, `__proto__`)
+  // must resolve to "unknown → undefined", never to an inherited function.
+  const upstream = Object.hasOwn(PI_UPSTREAMS, provider) ? PI_UPSTREAMS[provider] : undefined;
   return upstream ? { provider, upstream } : undefined;
 }
 
