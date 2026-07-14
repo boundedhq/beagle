@@ -330,7 +330,23 @@ describe("cmdUninstall (safe full teardown)", () => {
     expect(out).toContain("securely erased captured data");
     expect(out).toContain(`removed ${dir}`);
     expect(out).toContain("brew uninstall beagle");
-    expect(existsSync(dir)).toBe(false); // whole state dir gone
+    expect(existsSync(dir)).toBe(false); // exclusive dir → whole dir gone
+  });
+
+  test("removes ONLY Beagle-owned files — never the user's own files in a shared dir", async () => {
+    // A user who pointed BEAGLE_STATE_DIR at a directory holding their own
+    // files must NOT lose them to `rm -rf` (confirmed data loss before the fix).
+    const dir = mkdtempSync(join(tmpdir(), "beagle-shared-"));
+    writeFileSync(join(dir, "notes.txt"), "my precious data");
+    const store = Store.open(dir); // creates beagle.db (+ config on next status)
+    store.close();
+    writeFileSync(join(dir, "config.json"), "{}");
+    const out = await cmdUninstall(dir, true);
+    expect(existsSync(dir)).toBe(true); // dir kept — it wasn't exclusively Beagle's
+    expect(existsSync(join(dir, "notes.txt"))).toBe(true); // user's file survives
+    expect(existsSync(join(dir, "beagle.db"))).toBe(false); // Beagle's files gone
+    expect(existsSync(join(dir, "config.json"))).toBe(false);
+    expect(out).toContain("kept your other files");
   });
 });
 

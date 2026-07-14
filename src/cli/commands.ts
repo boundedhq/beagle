@@ -1,6 +1,6 @@
 // CLI command surface (design §6.9): the whole product headless. Reads open
 // the store read-only (work daemon-down); live actions ride the socket.
-import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, readFileSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve as resolvePath } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -267,7 +267,7 @@ export async function cmdUninstall(stateDir: string, yes = false): Promise<strin
     if (watched.length) plan.push(`  • unwatch ${watched.join(", ")} — restore your PATH, remove the background service`);
     if (daemonUp) plan.push("  • stop the background daemon");
     if (hasStore) plan.push("  • securely erase all captured data");
-    plan.push(`  • remove ${stateDir}`);
+    plan.push(`  • remove Beagle's files from ${stateDir}`);
     process.stdout.write(plan.join("\n") + "\nProceed? [y/N] ");
     if (!/^y(es)?$/i.test(readLineSync().trim())) return "cancelled — nothing changed.";
   }
@@ -300,9 +300,19 @@ export async function cmdUninstall(stateDir: string, yes = false): Promise<strin
       /* corrupt/locked: the rm below still removes it */
     }
   }
-  // 4. Remove the whole state dir (config, keys, manifest, shims dir, quarantine).
-  rmSync(stateDir, { recursive: true, force: true });
-  done.push(`removed ${stateDir}`);
+  // 4. Remove Beagle-OWNED entries only — NEVER `rm -rf` the whole dir, which
+  //    a user may have pointed BEAGLE_STATE_DIR at and shares with their own
+  //    files. Then remove the dir itself only if Beagle's files were all it
+  //    held (rmdir fails on a non-empty dir — that IS the guard).
+  for (const name of BEAGLE_STATE_ENTRIES) rmSync(join(stateDir, name), { recursive: true, force: true });
+  let dirRemoved = false;
+  try {
+    rmdirSync(stateDir);
+    dirRemoved = true;
+  } catch {
+    /* non-empty: the user keeps their own files that shared this dir */
+  }
+  done.push(dirRemoved ? `removed ${stateDir}` : `removed Beagle's files (kept your other files in ${stateDir})`);
 
   return (
     "beagle uninstalled:\n  " +
@@ -311,6 +321,15 @@ export async function cmdUninstall(stateDir: string, yes = false): Promise<strin
     `  brew uninstall beagle   (or: rm "${process.execPath}")`
   );
 }
+
+// Everything Beagle creates inside its state dir — the ONLY things uninstall
+// deletes. Kept exhaustive on purpose: uninstall must never remove a file it
+// didn't create (BEAGLE_STATE_DIR can point at a shared directory).
+const BEAGLE_STATE_ENTRIES = [
+  "beagle.db", "beagle.db-wal", "beagle.db-shm", // SQLite + its WAL sidecars
+  "config.json", "install.key", "changes.json", "daemon.json", "control.sock",
+  "graduation.json", "shims", "agent-config", "quarantine",
+];
 
 /** One detect line per agent: what login Beagle sees and what capture mode a
  *  plain `beagle run <agent>` would therefore pick. Exported for tests. */
