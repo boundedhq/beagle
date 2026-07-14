@@ -107,6 +107,16 @@ describe("shim script", () => {
     const wire = shimScript({ agent: "codex", realBinary: "/o/codex", beagleBinary: "/b" });
     expect(wire).not.toContain("--telemetry");
   });
+
+  test("refuses an unsafe agent name (self-defending, not reliant on the caller's gate)", () => {
+    // The exec line shell-quotes the agent, but it's also interpolated raw into
+    // the comment lines — so the generator itself rejects a name that could
+    // break out (newline/metachar), independent of parseWatchArgs.
+    for (const bad of ['x\nrm -rf "$HOME"', 'a";id;"', "../evil", "Codex", "-x", ""]) {
+      expect(() => shimScript({ agent: bad, realBinary: "/r", beagleBinary: "/b" })).toThrow(/unsafe agent name/);
+    }
+    expect(() => shimScript({ agent: "opencode", realBinary: "/r", beagleBinary: "/b" })).not.toThrow();
+  });
 });
 
 describe("isBeagleShim + shim-aware detection (fork-bomb & double-wrap defense)", () => {
