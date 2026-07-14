@@ -106,7 +106,13 @@ function App() {
 
   return html`
     <header>
-      <h1>🐕 beagle</h1>
+      <div class="brand">
+        <h1>🐕 beagle</h1>
+        <p class="tagline">
+          sees what your AI agents send to model providers — every call is captured
+          locally and scanned for leaked secrets
+        </p>
+      </div>
       <span class=${leaks.length ? "leak-counter" : "leak-counter zero"}>
         ${leaks.length} leak${leaks.length === 1 ? "" : "s"}
       </span>
@@ -134,6 +140,16 @@ function App() {
         no calls${leaksOnly ? " with leaks" : ""} yet — run an agent under
         ${" "}<code>beagle run</code> and its traffic appears here live
       </div>`}
+      ${visible.length > 0 &&
+      html`<div class="row head" aria-hidden="true">
+        <span class="dot spacer"></span>
+        <span class="time">time</span>
+        <span class="agent">agent</span>
+        <span class="model">model</span>
+        <span class="summary">what was sent</span>
+        <span class="weight">size · tokens</span>
+        <span class="session">session</span>
+      </div>`}
       ${visible.map(
         (x) => html`
           <${Row} key=${x.id} x=${x}
@@ -144,8 +160,9 @@ function App() {
       )}
     </main>
     <footer>
-      local only · outbound connections: only your model providers · telemetry: none ·
-      viewer: on while this tab is open (loopback, tokened) · captures shown from your local store
+      🔒 everything on this page stays on your machine — the only outbound traffic is your
+      agents' own calls to their model providers. No telemetry. The viewer serves loopback
+      only, token-protected, while this tab is open.
     </footer>
   `;
 }
@@ -153,10 +170,13 @@ function App() {
 function Row({ x, onToggle, onSession }) {
   const t = new Date(x.tsRequest).toLocaleTimeString();
   const kb = x.bytesReq ? (x.bytesReq / 1024).toFixed(1) + " KB" : "";
-  const tok = x.tokensOut != null ? `${x.tokensIn ?? "?"}→${x.tokensOut}` : "";
+  const tok = x.tokensOut != null ? `${x.tokensIn ?? "?"}→${x.tokensOut} tok` : "";
   return html`
     <div class=${x.hasLeak ? "row leak" : "row"} onClick=${onToggle}>
-      <span class=${x.status && x.status >= 400 ? "dot err" : "dot"}></span>
+      <span
+        class=${x.status && x.status >= 400 ? "dot err" : "dot"}
+        title=${x.status && x.status >= 400 ? `provider returned ${x.status}` : "call succeeded"}
+      ></span>
       <span class="time">${t}</span>
       <span class="agent">${x.agent ?? "?"}</span>
       <span class="model">${x.model ?? ""}</span>
@@ -166,9 +186,12 @@ function Row({ x, onToggle, onSession }) {
         ? html`<span class="chip wire" title="wire-verified — observed on the wire">✓ wire</span>`
         : html`<span class="chip otel" title="agent-reported — the agent's own self-report">agent</span>`}
       ${x.scanState !== "ok" && html`<span class="chip">scan incomplete</span>`}
-      <span class="weight">${kb} ${tok}</span>
-      <span class="chip" onClick=${(e) => { e.stopPropagation(); onSession(); }}>
-        s:${x.sessionId.slice(0, 6)}
+      <span class="weight" title="request size · tokens in→out">${kb}${kb && tok ? " · " : ""}${tok}</span>
+      <span class="session">
+        <span class="chip" title="filter to this session"
+          onClick=${(e) => { e.stopPropagation(); onSession(); }}>
+          ${x.sessionId.slice(0, 6)}
+        </span>
       </span>
     </div>
   `;

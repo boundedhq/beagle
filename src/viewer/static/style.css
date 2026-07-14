@@ -15,7 +15,9 @@ header {
   background: var(--panel); border-bottom: 1px solid var(--border);
   position: sticky; top: 0; z-index: 2;
 }
-header h1 { font-size: 15px; font-weight: 600; }
+header .brand { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+header h1 { font-size: 22px; font-weight: 700; letter-spacing: 0.5px; }
+header .tagline { color: var(--muted); font-size: 12px; max-width: 46ch; line-height: 1.4; }
 header .leak-counter { color: var(--leak); font-weight: 600; }
 header .leak-counter.zero { color: var(--muted); font-weight: 400; }
 .controls { display: flex; gap: 8px; margin-left: auto; align-items: center; }
@@ -40,11 +42,19 @@ main { flex: 1; padding: 8px 16px; }
 }
 .row:hover { background: var(--row-hover); }
 .row.leak { border-left-color: var(--leak); background: #1f151a; }
-.row .time { color: var(--muted); flex: 0 0 60px; }
-.row .agent { color: var(--accent); flex: 0 0 90px; overflow: hidden; text-overflow: ellipsis; }
+.row .time { color: var(--muted); flex: 0 0 85px; white-space: nowrap; }
+.row .agent { color: var(--accent); flex: 0 0 100px; overflow: hidden; text-overflow: ellipsis; }
 .row .model { color: var(--muted); flex: 0 0 130px; overflow: hidden; text-overflow: ellipsis; }
 .row .summary { flex: 1 1 auto; min-width: 120px; overflow: hidden; text-overflow: ellipsis; }
-.row .weight { color: var(--muted); flex: 0 0 auto; text-align: right; white-space: nowrap; }
+.row .weight { color: var(--muted); flex: 0 0 130px; text-align: right; white-space: nowrap; margin-left: auto; }
+.row .session { flex: 0 0 78px; text-align: right; }
+.row.head {
+  cursor: default; color: var(--muted); font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.6px; border-bottom: 1px solid var(--border); padding-top: 10px;
+}
+.row.head:hover { background: transparent; }
+.row.head .agent, .row.head .model, .row.head .summary { color: var(--muted); }
+.row.head .dot.spacer { background: transparent; }
 .dot { flex: 0 0 8px; height: 8px; border-radius: 50%; background: var(--ok); align-self: center; }
 .dot.err { background: var(--leak); }
 .chip {
