@@ -593,6 +593,7 @@ export class Daemon {
             otlpToken: this.otlpToken,
             calls: this.store.countCalls(),
             leaks: this.store.countLeakEvents(),
+            leases: this.leases,
           },
         };
       case "purge": {
@@ -615,7 +616,12 @@ export class Daemon {
         return { ok: true, data: { url: await this.viewer.start() } };
       }
       case "shutdown":
-        setTimeout(() => void this.stop().then(() => process.exit(0)), 10);
+        // Same guard as idle-exit: an in-process (test) daemon must stop
+        // cleanly without taking the host process down with it.
+        setTimeout(
+          () => void this.stop().then(() => { if (this.opts.exitProcessOnIdle !== false) process.exit(0); }),
+          10,
+        );
         return { ok: true };
       default:
         return { ok: false, error: `unknown command: ${req.cmd}` };

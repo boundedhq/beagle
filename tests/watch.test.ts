@@ -223,6 +223,20 @@ describe("unwatchAgent", () => {
     deactivations.length = 0;
   });
 
+  test("last unwatch reports serviceRemoved so the CLI can stop the daemon too", () => {
+    const env = makeEnv();
+    watchAgent("claude", env);
+    const r = unwatchAgent("claude", env);
+    expect(r.applied).toBe(true);
+    expect(r.serviceRemoved).toBe(true); // last agent → service torn down
+    // and a non-last unwatch must NOT claim it
+    const env2 = makeEnv();
+    watchAgent("claude", env2);
+    watchAgent("codex", { ...env2, resolveReal: () => "/opt/homebrew/bin/codex" });
+    const r2 = unwatchAgent("claude", env2);
+    expect(r2.serviceRemoved ?? false).toBe(false);
+  });
+
   test("removes the shim and clears the manifest; last agent also removes the service", () => {
     const env = makeEnv();
     watchAgent("claude", env);
