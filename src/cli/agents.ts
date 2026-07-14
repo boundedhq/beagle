@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { opencodeAuthMode } from "../install/detect";
+import { opencodeAuthMode, piProvider } from "../install/detect";
 
 // The four v1 CLI agents (R2) and their redirect knobs. claude/codex honor a
 // base-URL env var; opencode is config-driven via a Beagle-owned config file;
@@ -17,8 +17,10 @@ export interface ConfigRedirect {
 export interface ExtensionRedirect {
   /** CLI flag that loads an extension file for one run (pi: `-e`). */
   flag: string;
-  /** Provider id whose baseUrl the generated extension re-points. */
-  baseUrlProvider: string;
+  /** Provider id whose baseUrl the generated extension re-points — a resolver
+   *  (given the user's home dir) when it depends on how the agent is signed in:
+   *  pi picks a different provider per login (openai vs openai-codex). */
+  baseUrlProvider: string | ((home: string) => string);
 }
 
 export interface AgentSpec {
@@ -109,17 +111,22 @@ export const AGENTS: Record<string, AgentSpec> = {
   pi: {
     command: "pi",
     provider: "openai",
-    // pi's builtin openai provider uses the Responses API — it appends
-    // /responses to its base (verified in @earendil-works/pi-ai: the openai
-    // provider is openAIResponsesApi with baseUrl "https://api.openai.com/v1").
+    // Default upstream — the `openai` API-key login (Responses API: pi appends
+    // /responses to this base). A ChatGPT Plus/Pro login uses pi's separate
+    // `openai-codex` provider, which speaks to the Codex backend instead;
+    // resolveUpstream and the extension's provider both follow piProvider() so
+    // the redirect targets whichever login pi actually has (verified live: a
+    // subscription user's default is openai-codex, not openai — a fixed
+    // "openai" redirect captured nothing).
     upstream: "https://api.openai.com/v1",
+    resolveUpstream: (home) => piProvider(home)?.upstream,
     authLocation: "authorization",
-    // Verified against pi's docs (badlogic/pi-mono, coding-agent):
-    // `pi -e <file.ts>` loads an extension for one run, and
-    // `pi.registerProvider("openai", { baseUrl })` re-points the builtin
-    // provider while keeping all its models. No config or auth files are
+    // `pi -e <file.ts>` loads an extension for one run;
+    // `pi.registerProvider(<provider>, { baseUrl })` re-points that provider's
+    // models at the proxy while keeping their auth (verified live for both the
+    // `openai` and `openai-codex` OAuth logins). No config or auth files are
     // touched — the least invasive redirect of the four agents.
-    extension: { flag: "-e", baseUrlProvider: "openai" },
+    extension: { flag: "-e", baseUrlProvider: (home) => piProvider(home)?.provider ?? "openai" },
   },
 };
 

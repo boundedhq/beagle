@@ -54,7 +54,7 @@ Beagle detects how the agent is signed in and picks the right capture mode:
 | **Codex** | OpenAI API key | wire capture — full fidelity |
 | **Codex** | "Sign in with ChatGPT" | telemetry capture, auto-detected |
 | **opencode** | API key **or** ChatGPT sign-in | wire capture — full fidelity |
-| **pi** | OpenAI API key | wire capture — full fidelity |
+| **pi** | API key **or** ChatGPT sign-in | wire capture — full fidelity |
 
 If Beagle can't tell how an agent is signed in, it asks once at the terminal
 and remembers your answer (`beagle config run-mode <agent> wire|telemetry|auto`

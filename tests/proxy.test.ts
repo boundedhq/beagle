@@ -205,6 +205,51 @@ describe("proxy", () => {
     expect(upstream.requests.length).toBe(0);
   });
 
+  test("WebSocket upgrade → 426, never forwarded (client falls back to its HTTP transport)", async () => {
+    // pi's ChatGPT/codex transport tries a WebSocket first; relaying the 101
+    // and then failing to parse frames would hang it forever. Refusing the
+    // upgrade drops it to the SSE POST Beagle can capture.
+    register();
+    const resp = await sendRaw(proxy.port,
+      `GET /run/run-abc/codex/responses HTTP/1.1\r\nHost: h\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`);
+    expect(resp.toString()).toContain("426");
+    expect(resp.toString()).not.toContain("101");
+    expect(upstream.requests.length).toBe(0);
+  });
+
+  test("compressed request body is decoded for scan + capture, but relayed byte-exact", async () => {
+    // pi's ChatGPT/codex transport zstd-compresses request bodies; without
+    // decoding, the scanner and `beagle search` only see the opaque blob and a
+    // planted secret goes undetected. gzip stands in here (always available);
+    // zstd rides the same decodeBody path.
+    register();
+    const plain = '{"model":"m","input":"my secret is AKIAIOSFODNN7EXAMPLE"}';
+    const gz = gzipSync(Buffer.from(plain));
+    const raw = Buffer.concat([
+      Buffer.from(
+        `POST /run/run-abc/v1/messages HTTP/1.1\r\nHost: h\r\n` +
+          `Content-Encoding: gzip\r\nContent-Length: ${gz.length}\r\n\r\n`,
+      ),
+      gz,
+    ]);
+    await new Promise<void>((resolve, reject) => {
+      const { connect } = require("node:net") as typeof import("node:net");
+      const sock = connect(proxy.port, "127.0.0.1", () => sock.write(raw));
+      sock.on("data", () => setTimeout(() => sock.end(), 100));
+      sock.on("close", () => resolve());
+      sock.on("error", reject);
+      setTimeout(() => sock.end(), 1500);
+    });
+    // scanner saw decoded plaintext
+    expect(Buffer.from(scanned[0]!).toString()).toBe(plain);
+    // captured request body stored decoded (so R7 search finds the secret)
+    expect(Buffer.from(calls[0]!.request.bodyBytes).toString()).toBe(plain);
+    // but the upstream received the ORIGINAL compressed bytes, byte-for-byte
+    const fwd = upstream.requests[0]!;
+    const he = fwd.indexOf("\r\n\r\n");
+    expect(fwd.subarray(he + 4).equals(gz)).toBe(true);
+  });
+
   test("unknown run id → 502, never forwarded", async () => {
     const resp = await sendRaw(proxy.port,
       `POST /run/nope/v1/messages HTTP/1.1\r\nHost: h\r\nContent-Length: 2\r\n\r\n{}`);

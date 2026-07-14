@@ -101,6 +101,19 @@ export class ProxyServer {
   }
 
   private async handleRequest(client: Socket, req: ParsedRequest): Promise<void> {
+    const header = (name: string) => req.headers.find(([n]) => n.toLowerCase() === name)?.[1];
+    // Beagle is an HTTP/1.1 request/response proxy; it does not bridge
+    // WebSocket tunnels — their frames aren't the request/response pair the
+    // scanner captures. Refuse the upgrade rather than relay the 101 and then
+    // stall forever trying to parse frames as an HTTP body. A client that
+    // speaks both (pi's ChatGPT/codex transport tries a WebSocket first, then
+    // falls back to an SSE POST on connect failure) drops to the HTTP path
+    // Beagle CAN capture; a WebSocket-only client sees a clean error, never a
+    // silent hang.
+    if (header("upgrade")?.toLowerCase().includes("websocket")) {
+      client.end("HTTP/1.1 426 Upgrade Required\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
+      return;
+    }
     const m = req.path.match(/^\/run\/([^/]+)(\/.*)$/);
     const run = m ? this.opts.registry.resolve(m[1]!) : null;
     if (!run || !m) {
@@ -115,27 +128,29 @@ export class ProxyServer {
     const callId = ulid(tsRequest);
 
     // Rewrite authority; preserve everything else byte-for-byte, in order.
-    const headers: HeaderList = req.headers.map(([n, v]) =>
-      n.toLowerCase() === "host" ? [n, run.parsedUpstream.authority] : [n, v],
-    );
+    const headers: HeaderList = req.headers.map(([n, v]) => (n.toLowerCase() === "host" ? [n, run.parsedUpstream.authority] : [n, v]));
     for (const [name, value] of run.extraHeaders ?? []) {
       if (!headers.some(([n]) => n.toLowerCase() === name.toLowerCase())) {
         headers.push([name, value]);
       }
     }
 
+    // The request body can be compressed (pi's ChatGPT/codex transport sends
+    // zstd; others gzip) — decode a capture copy so the scanner and R7's
+    // "was this ever sent?" see plaintext, not an opaque blob that hides the
+    // secret. The RELAY still forwards the original `req.body` byte-for-byte;
+    // this decoded copy is used only for scanning and storage.
+    const reqBody = decodeBody(new Uint8Array(req.body), header("content-encoding"));
+
     // ---- pre-forward seam (§7): dispatch scan, do NOT await (v1 tap) ----
-    const authValue = req.headers.find(
-      ([n]) => n.toLowerCase() === (run.authLocation ?? "").toLowerCase(),
-    )?.[1];
     this.opts
-      .scan(new Uint8Array(req.body), {
+      .scan(reqBody, {
         callId,
         endpoint: upstreamPath,
         runId: run.id,
         provider: run.provider,
         agent: run.agent,
-        authValue,
+        authValue: header((run.authLocation ?? "").toLowerCase()),
       })
       .catch(() => {}); // a scanner failure must never take down the forward path
 
@@ -239,7 +254,7 @@ export class ProxyServer {
       endpoint: upstreamPath,
       request: {
         headers: scrubAuthHeaders(req.headers, run.authLocation, run.provider),
-        bodyBytes: new Uint8Array(req.body),
+        bodyBytes: reqBody,
       },
       response: {
         status: reader.status,

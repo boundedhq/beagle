@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChangeManifest } from "../src/install/manifest";
 import { isBeagleShim, shimScript, parseCoverageVerdict } from "../src/install/shim";
-import { claudeAuthMode, codexAuthMode, detectAgents, opencodeAuthMode } from "../src/install/detect";
+import { claudeAuthMode, codexAuthMode, detectAgents, opencodeAuthMode, piProvider } from "../src/install/detect";
 import { AGENTS } from "../src/cli/agents";
 import { GraduationTracker } from "../src/install/graduation";
 import { detectSubscriptionFor, graduationNudge, parseWatchArgs } from "../src/cli/commands";
@@ -262,6 +262,65 @@ describe("opencodeAuthMode + auth-aware upstream (ChatGPT OAuth routes to the Co
     expect(AGENTS.codex!.upstream).toBe("https://api.openai.com/v1");
     expect(AGENTS.pi!.upstream).toBe("https://api.openai.com/v1");
     expect(AGENTS.claude!.upstream).toBe("https://api.anthropic.com"); // claude appends /v1/messages itself
+  });
+});
+
+describe("piProvider (redirect targets the provider pi is actually signed in with)", () => {
+  // pi stores its config/auth under ~/.pi/agent. settings=defaultProvider,
+  // auth.json=logged-in providers. We drive both by writing that dir directly.
+  const piDir = (settings: string | null, auth: string | null) => {
+    const home = mkdtempSync(join(tmpdir(), "beagle-pi-"));
+    const dir = join(home, ".pi", "agent");
+    mkdirSync(dir, { recursive: true });
+    if (settings !== null) writeFileSync(join(dir, "settings.json"), settings);
+    if (auth !== null) writeFileSync(join(dir, "auth.json"), auth);
+    return home;
+  };
+
+  test("maps the default provider to its upstream (ChatGPT OAuth → the Codex backend)", () => {
+    // The real subscription case: defaultProvider=openai-codex → Codex backend.
+    expect(piProvider(piDir('{"defaultProvider":"openai-codex"}', '{"openai-codex":{"type":"oauth"}}'))).toEqual({
+      provider: "openai-codex",
+      upstream: "https://chatgpt.com/backend-api",
+    });
+    // API-key login → api.openai.com/v1.
+    expect(piProvider(piDir('{"defaultProvider":"openai"}', '{"openai":{"type":"api"}}'))).toEqual({
+      provider: "openai",
+      upstream: "https://api.openai.com/v1",
+    });
+  });
+
+  test("falls back to the sole logged-in provider when no default is set", () => {
+    expect(piProvider(piDir('{"theme":"dark"}', '{"openai-codex":{"type":"oauth"}}'))?.provider).toBe("openai-codex");
+    expect(piProvider(piDir(null, '{"openai":{"type":"api"}}'))?.provider).toBe("openai");
+    // Ambiguous (two supported logins, no default) → don't guess.
+    expect(piProvider(piDir(null, '{"openai":{},"openai-codex":{}}'))).toBeUndefined();
+    // A non-provider metadata key alongside a single login must not miscount it.
+    expect(piProvider(piDir(null, '{"version":2,"openai-codex":{"type":"oauth"}}'))?.provider).toBe("openai-codex");
+  });
+
+  test("returns undefined for providers Beagle can't wire-capture, or when nothing is set up", () => {
+    expect(piProvider(piDir('{"defaultProvider":"google"}', '{"google":{"type":"oauth"}}'))).toBeUndefined();
+    expect(piProvider(piDir('{"defaultProvider":"anthropic"}', null))).toBeUndefined();
+    expect(piProvider(piDir(null, null))).toBeUndefined();
+    expect(piProvider(piDir("not json", "not json"))).toBeUndefined();
+  });
+
+  test("pi spec follows piProvider for both the upstream and the redirected provider", () => {
+    const spec = AGENTS.pi!;
+    const oauthHome = piDir('{"defaultProvider":"openai-codex"}', '{"openai-codex":{"type":"oauth"}}');
+    const apiHome = piDir('{"defaultProvider":"openai"}', '{"openai":{"type":"api"}}');
+    const resolveProvider = spec.extension!.baseUrlProvider as (home: string) => string;
+    // OAuth login: redirect openai-codex, forward to the Codex backend.
+    expect(resolveProvider(oauthHome)).toBe("openai-codex");
+    expect(spec.resolveUpstream!(oauthHome)).toBe("https://chatgpt.com/backend-api");
+    // API-key login: redirect openai, forward to api.openai.com/v1.
+    expect(resolveProvider(apiHome)).toBe("openai");
+    expect(spec.resolveUpstream!(apiHome)).toBe("https://api.openai.com/v1");
+    // Undetectable: fall back to the openai API-key assumption (spec.upstream).
+    const bareHome = mkdtempSync(join(tmpdir(), "beagle-pi-bare-"));
+    expect(resolveProvider(bareHome)).toBe("openai");
+    expect(spec.resolveUpstream!(bareHome)).toBeUndefined();
   });
 });
 

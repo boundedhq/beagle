@@ -875,9 +875,16 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
     } else if (spec.extension) {
       // Extension-driven agent (pi): generate a one-run extension that
       // re-points the provider at the proxy and load it via the agent's own
-      // per-run flag. No config or auth files are touched, ever.
+      // per-run flag. No config or auth files are touched, ever. Which provider
+      // to re-point can depend on how the agent is signed in (pi: openai vs the
+      // openai-codex OAuth login), so it may be a resolver — matched to the
+      // upstream register-run already picked via spec.resolveUpstream.
       const baseUrl = runBaseUrl(daemon.proxyPort, runId);
-      const source = buildExtensionRedirect(spec.extension.baseUrlProvider, baseUrl);
+      const provider =
+        typeof spec.extension.baseUrlProvider === "function"
+          ? spec.extension.baseUrlProvider(homedir())
+          : spec.extension.baseUrlProvider;
+      const source = buildExtensionRedirect(provider, baseUrl);
       cleanupFile = writeRedirectExtension(stateDir, `${agentName}-${runId}`, source);
       finalArgs = [spec.extension.flag, cleanupFile, ...agentArgs];
       modeEnv = {};
