@@ -362,18 +362,24 @@ const BEAGLE_STATE_ENTRIES = [
   "graduation.json", "shims", "agent-config", "quarantine",
 ];
 
-/** One detect line per agent: what login Beagle sees and what capture mode a
- *  plain `beagle run <agent>` would therefore pick. Exported for tests. */
+// One agent's two lines: the COMMAND on its own arrowed line (it must read as
+// "type this", not a description), then `note` on the next, indented to line up
+// under the command. The single place this layout is defined.
+function detectRow(agent: string, note: string): string {
+  return `  ${agent.padEnd(10)}→ beagle run ${agent}\n${" ".repeat(14)}${note}`;
+}
+
+/** The two-line detect entry for an agent whose capture depends on its login
+ *  (claude/codex): a plain-English note on the login Beagle detected and how
+ *  that session gets captured — no bare "wire/telemetry" jargon. For tests. */
 export function detectLine(agent: string, auth: "api-key" | "subscription" | "unknown"): string {
-  const login =
-    auth === "subscription" ? "subscription login" : auth === "api-key" ? "API-key login" : "login not detected";
-  const mode =
+  const how =
     auth === "subscription"
-      ? "telemetry capture"
+      ? "signed in with a subscription — captured via the agent's own usage report"
       : auth === "api-key"
-        ? "wire capture"
-        : "asks on first run";
-  return `  ${agent.padEnd(9)} ${login.padEnd(19)} beagle run ${agent}   (${mode})`;
+        ? "signed in with an API key — captured on the wire, full fidelity"
+        : "couldn't tell how it's signed in — Beagle asks once on your first run";
+  return detectRow(agent, how);
 }
 
 export function cmdDetect(): string {
@@ -389,12 +395,16 @@ export function cmdDetect(): string {
     );
   }
   const lines = found.map((f) => {
-    // opencode wire-captures both logins, pi is API-key only — for those the
-    // login detail doesn't change the command or the mode.
+    // opencode and pi wire-capture BOTH login kinds — the login detail doesn't
+    // change the command or the capture, so no detection caveat is shown.
     if (f.agent === "claude" || f.agent === "codex") return detectLine(f.agent, detectAuthForRun(f.agent));
-    return `  ${f.agent.padEnd(9)} ${"".padEnd(19)} beagle run ${f.agent}   (wire capture)`;
+    return detectRow(f.agent, "captured on the wire, full fidelity");
   });
-  return `Found ${found.length} agent${found.length === 1 ? "" : "s"}:\n${lines.join("\n")}\nAlways-on instead: beagle watch <agent>`;
+  return (
+    `Found ${found.length} agent${found.length === 1 ? "" : "s"} — to capture one session, run the command shown:\n\n` +
+    `${lines.join("\n")}\n\n` +
+    `To capture every session automatically:  beagle watch <agent>`
+  );
 }
 
 function buildWatchEnv(stateDir: string, yes: boolean): WatchEnv {
