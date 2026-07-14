@@ -107,18 +107,21 @@ function App() {
   return html`
     <header>
       <div class="brand">
-        <h1>🐕 beagle</h1>
-        <p class="tagline">
-          sees what your AI agents send to model providers — every call is captured
-          locally and scanned for leaked secrets
-        </p>
+        <span class="logo" aria-hidden="true">🐕</span>
+        <div class="brand-text">
+          <h1>beagle</h1>
+          <p class="tagline">
+            sees what your AI agents send to model providers — and flags leaked secrets
+          </p>
+        </div>
       </div>
-      <span class=${leaks.length ? "leak-counter" : "leak-counter zero"}>
-        ${leaks.length} leak${leaks.length === 1 ? "" : "s"}
-      </span>
       <div class="controls">
+        <span class=${leaks.length ? "leak-counter" : "leak-counter zero"}>
+          ${leaks.length} leak${leaks.length === 1 ? "" : "s"}
+        </span>
         <form onSubmit=${doSearch}>
-          <input ref=${searchBox} type="search" placeholder="was this ever sent? (literal search)" />
+          <input ref=${searchBox} type="search" placeholder="was this ever sent?"
+            title="literal search over everything captured — exact text, not fuzzy" />
         </form>
         <button class=${leaksOnly ? "active" : ""} onClick=${() => setLeaksOnly(!leaksOnly)}>
           leaks only

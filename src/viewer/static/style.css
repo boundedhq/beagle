@@ -11,23 +11,38 @@ body {
 }
 #app { display: flex; flex-direction: column; min-height: 100vh; }
 header {
-  display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 12px 20px;
   background: var(--panel); border-bottom: 1px solid var(--border);
   position: sticky; top: 0; z-index: 2;
 }
-header .brand { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-header h1 { font-size: 22px; font-weight: 700; letter-spacing: 0.5px; }
-header .tagline { color: var(--muted); font-size: 12px; max-width: 46ch; line-height: 1.4; }
-header .leak-counter { color: var(--leak); font-weight: 600; }
-header .leak-counter.zero { color: var(--muted); font-weight: 400; }
-.controls { display: flex; gap: 8px; margin-left: auto; align-items: center; }
+header .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+header .logo { font-size: 30px; line-height: 1; }
+header .brand-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+header h1 { font-size: 19px; font-weight: 700; letter-spacing: 0.5px; line-height: 1.2; }
+header .tagline {
+  color: var(--muted); font-size: 12px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+header .leak-counter {
+  border: 1px solid var(--leak); background: #3b1420; color: #ffb3b3;
+  border-radius: 999px; padding: 4px 12px; font-weight: 600; white-space: nowrap;
+}
+header .leak-counter.zero {
+  border-color: var(--border); background: var(--chip); color: var(--muted); font-weight: 400;
+}
+.controls {
+  display: flex; gap: 8px; margin-left: auto; align-items: center;
+  min-width: 0; justify-content: flex-end;
+}
+.controls form { flex: 0 1 260px; min-width: 150px; }
 input[type="search"] {
   background: var(--row); color: var(--text); border: 1px solid var(--border);
-  border-radius: 6px; padding: 5px 9px; width: 260px; font: inherit;
+  border-radius: 6px; padding: 5px 9px; width: 100%; font: inherit;
 }
 button {
   background: var(--chip); color: var(--text); border: 1px solid var(--border);
   border-radius: 6px; padding: 5px 10px; font: inherit; cursor: pointer;
+  white-space: nowrap;
 }
 button.active { border-color: var(--accent); color: var(--accent); }
 main { flex: 1; padding: 8px 16px; }
