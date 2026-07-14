@@ -82,13 +82,12 @@ traffic proxies normally at full fidelity.)
 
 ## How it works (and what it is *not*)
 
-`beagle run` starts a loopback proxy and points the agent at it for that run
-— via the provider's base-URL environment variable for Claude Code and Codex
-(`ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`), a temporary merged config file
-for opencode, and a one-run `-e` extension for pi. Your real config files are
-never modified, and anything Beagle generates is deleted when the run ends.
-The agent talks to `127.0.0.1`; Beagle streams the bytes to the real provider
-unmodified and keeps a copy locally:
+`beagle run` starts a loopback proxy and points the agent at it for that run —
+for Claude Code via `ANTHROPIC_BASE_URL`, for Codex via a per-run provider
+override, for opencode a temporary merged config file, and for pi a one-run
+`-e` extension. Your real config files are never modified, and anything Beagle
+generates is deleted when the run ends. The agent talks to `127.0.0.1`; Beagle
+streams the bytes to the real provider unmodified and keeps a copy locally:
 
 ```
 agent ──HTTP──▶ beagle (127.0.0.1) ──HTTPS──▶ api.anthropic.com
@@ -113,22 +112,26 @@ What Beagle is **not**:
   *Beagle's own local records* — that changes what Beagle keeps, never what
   goes over the wire.)
 
-## Everyday commands
+## Commands
 
 ```sh
-beagle run <agent>         # watch one agent run; nothing changed on your system
-beagle watch <agent>       # opt in to always-on (asks first; revert any time)
-beagle unwatch <agent>     # stop watching, restore your setup
-beagle status              # trust strip: coverage, store size, retention, what changed
-beagle leaks               # the leak log — every detected secret, deduped, automatic
-beagle search [string]     # was this exact string ever sent? no argument = read stdin
-beagle show <id>           # one call, summarized
+beagle detect              # find your agents and the command for each
+beagle run <agent>         # capture one session; nothing changed on your system
+beagle watch <agent>       # always-on for that agent (a PATH shim; asks first)
+beagle unwatch <agent>     # stop watching; restores your setup
+beagle status              # trust strip: coverage, store size, retention, changes
+beagle leaks               # the leak log — every detected secret, deduped
+beagle search [string]     # was this exact string ever sent? (no arg → reads stdin)
+beagle show <id>           # one captured call, summarized
 beagle ui                  # open the dashboard (loopback, one-time link)
 beagle purge [all|panic]   # erase captured data (panic = secure wipe)
-beagle config redact-on-capture on   # censor detected secrets in Beagle's local store
+beagle stop                # stop the background daemon
+beagle uninstall           # remove everything Beagle installed (see Uninstall)
+beagle config [...]        # redact-on-capture, exclusions, per-agent run-mode
 ```
 
-The whole loop works headless — a skeptic never has to start the viewer.
+`beagle help` lists them all. The whole loop works headless — a skeptic never
+has to start the viewer.
 
 ## What you get
 
@@ -197,18 +200,20 @@ bun install && bun run build     # → dist/beagle
 
 ## Uninstall
 
-Beagle must leave no trace — that's part of the trust contract:
+Beagle must leave no trace — that's part of the trust contract. One command
+does the whole safe teardown, in the right order (unwatch every agent → stop
+the daemon → securely erase captured data → remove the state dir):
 
 ```sh
-beagle unwatch <agent>         # remove the PATH shim; the background service
-                               # goes with the last watched agent
-beagle purge all               # erase all captured data
-rm -rf ~/.local/state/beagle   # remove the store directory
+beagle uninstall               # then remove the binary:
 brew uninstall beagle          # or: rm /usr/local/bin/beagle
 ```
 
-Everything Beagle ever changed on your system is listed by `beagle status`
-while it's installed.
+`beagle uninstall` restores your PATH and config before deleting anything, and
+securely wipes the store (a bare `rm -rf` would leave the freed pages
+recoverable) — which is why `beagle purge` alone doesn't delete the directory:
+it clears the *data* while keeping you set up. Everything Beagle ever changed
+is listed by `beagle status` while it's installed.
 
 ## FAQ
 

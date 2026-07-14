@@ -2,7 +2,7 @@
 // leaks, show, purge — the whole product without the viewer.
 import {
   cmdConfig, cmdDetect, cmdHookForward, cmdLeaks, cmdPurge, cmdRun, cmdSearch, cmdShow,
-  cmdStatus, cmdStop, cmdUnwatch, cmdWatch, defaultStateDir, parseWatchArgs, readLineSync,
+  cmdStatus, cmdStop, cmdUninstall, cmdUnwatch, cmdWatch, defaultStateDir, parseWatchArgs, readLineSync,
 } from "./commands";
 import { BEAGLE_VERSION } from "../core/version";
 
@@ -20,8 +20,10 @@ usage:
   beagle watch <agent> [--yes]   watch an agent automatically (PATH shim);
                                  subscription logins auto-detected (claude,
                                  codex); --telemetry/--wire to force a mode
-  beagle unwatch <agent>         stop watching, restore your setup (stops the
-                                 daemon too when nothing is left watched)
+  beagle unwatch <agent> [--force]
+                                 stop watching, restore your setup (stops the
+                                 daemon too when nothing is left watched;
+                                 refuses mid-capture unless --force)
   beagle stop [--force]          stop the background daemon (refuses while an
                                  agent session is being captured)
   beagle detect                  find supported agents on this machine
@@ -32,6 +34,9 @@ usage:
   beagle leaks                   the leak log
   beagle show <id-prefix>        one call, summarized
   beagle purge [all|panic]       erase captured data
+  beagle uninstall [--yes]       remove everything Beagle installed (unwatch
+                                 all, stop the daemon, erase data, remove the
+                                 state dir) — the binary you remove yourself
   beagle config [...]            view/set redact-on-capture, exclusions,
                                  run-mode <agent> <wire|telemetry|auto>
   beagle ui                      open the dashboard (fresh one-time link)
@@ -65,8 +70,9 @@ export async function run(argv: string[]): Promise<number> {
       return r.ok ? 0 : 1;
     }
     case "unwatch": {
-      if (!rest[0]) { console.error("usage: beagle unwatch <agent>"); return 2; }
-      console.log(await cmdUnwatch(stateDir, rest[0]));
+      const agent = rest.find((a) => !a.startsWith("--"));
+      if (!agent) { console.error("usage: beagle unwatch <agent> [--force]"); return 2; }
+      console.log(await cmdUnwatch(stateDir, agent, rest.includes("--force")));
       return 0;
     }
     case "stop":
@@ -112,6 +118,9 @@ export async function run(argv: string[]): Promise<number> {
       console.log(await cmdPurge(stateDir, rest[0] ?? "all"));
       return 0;
     }
+    case "uninstall":
+      console.log(await cmdUninstall(stateDir, rest.includes("--yes") || rest.includes("-y")));
+      return 0;
     case "ui": {
       const { cmdUi } = await import("./commands");
       console.log(await cmdUi(stateDir));

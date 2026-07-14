@@ -141,6 +141,30 @@ describe("Daemon end-to-end", () => {
     expect(stopping.toLowerCase()).toMatch(/stopped|asked the daemon/);
   });
 
+  test("shutdown refuses while a lease is held, obeys force (daemon re-checks, closing the client race)", async () => {
+    const { openLease } = await import("../src/daemon/control");
+    const lease = await openLease(daemon.socketPath);
+    const refused = await controlRequest(daemon.socketPath, { cmd: "shutdown" });
+    expect(refused.ok).toBe(false);
+    expect(String(refused.error)).toContain("capturing");
+    expect(daemon.isRunning).toBe(true);
+    // force overrides even with the lease still held
+    const forced = await controlRequest(daemon.socketPath, { cmd: "shutdown", args: { force: true } });
+    expect(forced.ok).toBe(true);
+    lease.end();
+  });
+
+  test("cmdUnwatch refuses mid-capture BEFORE tearing anything down (unless forced)", async () => {
+    const { cmdUnwatch } = await import("../src/cli/commands");
+    const { openLease } = await import("../src/daemon/control");
+    const lease = await openLease(daemon.socketPath);
+    const out = await cmdUnwatch(stateDir, "claude");
+    expect(out).toContain("not unwatching claude");
+    expect(out.toLowerCase()).toContain("live session");
+    expect(daemon.isRunning).toBe(true); // nothing torn down
+    lease.end();
+  });
+
   test("ping reports the daemon's version so an upgraded CLI can detect a stale daemon", async () => {
     const { BEAGLE_VERSION } = await import("../src/core/version");
     const r = await controlRequest(daemon.socketPath, { cmd: "ping" });
