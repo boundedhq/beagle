@@ -259,7 +259,13 @@ export async function cmdStop(stateDir: string, force = false): Promise<string> 
  *  shim or leave secret bytes on disk — the trap of a manual `rm -rf`. Does not
  *  remove the beagle binary itself (a running process can't reliably delete its
  *  own executable, and Beagle shouldn't guess how you installed it). */
-export async function cmdUninstall(stateDir: string, yes = false): Promise<string> {
+export async function cmdUninstall(
+  stateDir: string,
+  yes = false,
+  // Injectable (default = the real terminal) so tests exercise the
+  // non-interactive path deterministically — mirrors resolveRunMode(isTTY).
+  isTTY = Boolean(process.stdin.isTTY),
+): Promise<string> {
   const manifest = new ChangeManifest(stateDir);
   const watched = [...new Set(manifest.list().filter((e) => e.kind === "shim" && e.agent).map((e) => e.agent!))];
   const hasStore = existsSync(join(stateDir, "beagle.db"));
@@ -271,7 +277,7 @@ export async function cmdUninstall(stateDir: string, yes = false): Promise<strin
   if (!yes) {
     // No TTY to confirm on (script/CI, or a stdin that never sends): don't
     // block waiting for a keystroke — require the explicit flag instead.
-    if (!process.stdin.isTTY) {
+    if (!isTTY) {
       return "beagle uninstall needs confirmation — re-run with --yes to proceed non-interactively.";
     }
     const plan = ["beagle uninstall will:"];

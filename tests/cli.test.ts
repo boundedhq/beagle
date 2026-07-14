@@ -311,10 +311,12 @@ describe("readCodexApiKey (fail-open: supply codex's key from auth.json)", () =>
 
 describe("cmdUninstall (safe full teardown)", () => {
   test("non-interactive without --yes: refuses to prompt (no hang), asks for --yes", async () => {
-    // stdin is not a TTY under the test runner — the confirm must not block.
+    // Pass isTTY=false explicitly (not the runner's ambient stdin) so this stays
+    // deterministic — under `bun run check` in a real terminal isTTY is true,
+    // which would otherwise make cmdUninstall prompt and block the whole run.
     const dir = mkdtempSync(join(tmpdir(), "beagle-uninst-nt-"));
     const store = Store.open(dir); store.close(); // a store → not the empty-noop path
-    const out = await cmdUninstall(dir, false);
+    const out = await cmdUninstall(dir, false, false);
     expect(out).toContain("--yes");
     expect(existsSync(join(dir, "beagle.db"))).toBe(true); // nothing deleted
   });
