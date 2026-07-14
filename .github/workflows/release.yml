@@ -4,7 +4,8 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: write # create the GitHub release
+  id-token: write # npm provenance (signed build attestation)
 
 jobs:
   release:
@@ -46,6 +47,8 @@ jobs:
             echo "NPM_TOKEN not set — skipping npm publish (GitHub release still shipped)."
             exit 0
           fi
-          # Platform packages first so the launcher's optionalDependencies resolve.
-          for d in dist/npm/beagle-*; do npm publish "$d" --access public; done
-          npm publish dist/npm/beagle --access public
+          # Platform packages first so the launcher's optionalDependencies
+          # resolve. --provenance signs each with a Sigstore attestation tying it
+          # to this workflow + commit (needs id-token: write + repository.url).
+          for d in dist/npm/beagle-*; do npm publish "$d" --access public --provenance; done
+          npm publish dist/npm/beagle --access public --provenance

@@ -18,7 +18,10 @@ const TARGETS = [
   { os: "linux", cpu: "arm64" },
 ];
 
-const repo = "github:boundedhq/beagle";
+// Full git URL (object form), not the "github:" shorthand: `npm publish
+// --provenance` matches the built package against this repository, so it must
+// be the canonical URL.
+const repository = { type: "git", url: "git+https://github.com/boundedhq/beagle.git" };
 const license = "MIT";
 // Dirs are overridable so the packaging test can drive this with stub binaries.
 const releaseDir = process.env.BEAGLE_RELEASE_DIR ?? join(process.cwd(), "dist", "release");
@@ -42,7 +45,7 @@ for (const { os, cpu } of TARGETS) {
         version: VERSION,
         description: `Beagle prebuilt binary for ${os}-${cpu}.`,
         license,
-        repository: repo,
+        repository,
         os: [os],
         cpu: [cpu],
         files: ["beagle"],
@@ -57,6 +60,9 @@ for (const { os, cpu } of TARGETS) {
 const mainDir = join(npmDir, "beagle");
 mkdirSync(join(mainDir, "bin"), { recursive: true });
 cpSync(join(process.cwd(), "packaging", "npm", "launcher.cjs"), join(mainDir, "bin", "beagle.cjs"));
+// Ship the project README so the primary channel's npm page isn't blank
+// (npm always includes README.md regardless of the `files` allowlist).
+copyFileSync(join(process.cwd(), "README.md"), join(mainDir, "README.md"));
 writeFileSync(
   join(mainDir, "package.json"),
   JSON.stringify(
@@ -65,7 +71,7 @@ writeFileSync(
       version: VERSION,
       description: "Local transparency proxy for AI agents — see what they send, catch leaked secrets.",
       license,
-      repository: repo,
+      repository,
       homepage: "https://github.com/boundedhq/beagle",
       bin: { beagle: "bin/beagle.cjs" },
       files: ["bin/beagle.cjs"],

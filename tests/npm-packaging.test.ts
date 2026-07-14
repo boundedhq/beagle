@@ -31,6 +31,10 @@ describe("npm packaging", () => {
     expect(main.name).toBe("@boundedhq/beagle");
     expect(main.version).toBe(BEAGLE_VERSION);
     expect(main.bin).toEqual({ beagle: "bin/beagle.cjs" });
+    // provenance needs a canonical git URL to match the package against
+    expect(main.repository?.url).toContain("github.com/boundedhq/beagle");
+    // README ships so the primary channel's npm page isn't blank
+    expect(existsSync(join(npmOut, "beagle", "README.md"))).toBe(true);
 
     const expected = Object.fromEntries(TARGETS.map((t) => [`@boundedhq/beagle-${t}`, BEAGLE_VERSION]));
     expect(main.optionalDependencies).toEqual(expected);
