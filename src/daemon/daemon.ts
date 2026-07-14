@@ -615,7 +615,14 @@ export class Daemon {
         this.viewer = this.makeViewer();
         return { ok: true, data: { url: await this.viewer.start() } };
       }
-      case "shutdown":
+      case "shutdown": {
+        // Authoritative lease re-check (the CLI's client-side check is a
+        // stale read-then-act — a run could have leased since). Refuse a
+        // graceful stop while capturing; `force` overrides.
+        const forceStop = (req.args as { force?: boolean } | undefined)?.force === true;
+        if (this.leases > 0 && !forceStop) {
+          return { ok: false, error: `capturing ${this.leases} live session${this.leases === 1 ? "" : "s"}` };
+        }
         // Same guard as idle-exit: an in-process (test) daemon must stop
         // cleanly without taking the host process down with it.
         setTimeout(
@@ -623,6 +630,7 @@ export class Daemon {
           10,
         );
         return { ok: true };
+      }
       default:
         return { ok: false, error: `unknown command: ${req.cmd}` };
     }

@@ -20,8 +20,10 @@ usage:
   beagle watch <agent> [--yes]   watch an agent automatically (PATH shim);
                                  subscription logins auto-detected (claude,
                                  codex); --telemetry/--wire to force a mode
-  beagle unwatch <agent>         stop watching, restore your setup (stops the
-                                 daemon too when nothing is left watched)
+  beagle unwatch <agent> [--force]
+                                 stop watching, restore your setup (stops the
+                                 daemon too when nothing is left watched;
+                                 refuses mid-capture unless --force)
   beagle stop [--force]          stop the background daemon (refuses while an
                                  agent session is being captured)
   beagle detect                  find supported agents on this machine
@@ -68,8 +70,9 @@ export async function run(argv: string[]): Promise<number> {
       return r.ok ? 0 : 1;
     }
     case "unwatch": {
-      if (!rest[0]) { console.error("usage: beagle unwatch <agent>"); return 2; }
-      console.log(await cmdUnwatch(stateDir, rest[0]));
+      const agent = rest.find((a) => !a.startsWith("--"));
+      if (!agent) { console.error("usage: beagle unwatch <agent> [--force]"); return 2; }
+      console.log(await cmdUnwatch(stateDir, agent, rest.includes("--force")));
       return 0;
     }
     case "stop":

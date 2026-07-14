@@ -306,6 +306,15 @@ describe("readCodexApiKey (fail-open: supply codex's key from auth.json)", () =>
 });
 
 describe("cmdUninstall (safe full teardown)", () => {
+  test("non-interactive without --yes: refuses to prompt (no hang), asks for --yes", async () => {
+    // stdin is not a TTY under the test runner — the confirm must not block.
+    const dir = mkdtempSync(join(tmpdir(), "beagle-uninst-nt-"));
+    const store = Store.open(dir); store.close(); // a store → not the empty-noop path
+    const out = await cmdUninstall(dir, false);
+    expect(out).toContain("--yes");
+    expect(existsSync(join(dir, "beagle.db"))).toBe(true); // nothing deleted
+  });
+
   test("no daemon, watches, or store: reports nothing to remove", async () => {
     const dir = mkdtempSync(join(tmpdir(), "beagle-uninst-empty-"));
     const out = await cmdUninstall(dir, true);
