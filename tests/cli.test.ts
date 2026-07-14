@@ -189,10 +189,14 @@ describe("run env mapping", () => {
     expect(buildRunEnv("opencode", 1, "x")).toEqual({});
   });
 
-  test("pi is extension-driven: -e flag re-points the openai provider", () => {
+  test("pi is extension-driven: -e flag re-points whichever provider pi is signed in with", () => {
     expect(AGENTS.pi!.baseUrlEnv).toBeUndefined();
     expect(AGENTS.pi!.config).toBeUndefined();
-    expect(AGENTS.pi!.extension).toEqual({ flag: "-e", baseUrlProvider: "openai" });
+    expect(AGENTS.pi!.extension?.flag).toBe("-e");
+    // baseUrlProvider is a resolver now (login-dependent: openai vs openai-codex);
+    // with no pi install it falls back to the openai API-key assumption.
+    const resolveProvider = AGENTS.pi!.extension!.baseUrlProvider as (home: string) => string;
+    expect(resolveProvider(mkdtempSync(join(tmpdir(), "beagle-pi-none-")))).toBe("openai");
   });
 });
 

@@ -28,6 +28,56 @@ export function opencodeAuthMode(home: string, xdgDataHome?: string): "oauth" | 
   }
 }
 
+// Which provider pi is signed in with — and where that provider's traffic
+// goes. Unlike the other agents, pi bakes each provider's base URL into its
+// models and authenticates from its OWN store (~/.pi/agent/auth.json), so the
+// wire redirect must re-point whichever provider pi is ACTUALLY using; a fixed
+// one captures nothing. Reads the default-provider label from settings.json
+// (falling back to the sole logged-in provider when none is set) and maps it to
+// its upstream — labels/PRESENCE only, the OAuth tokens never leave the parse.
+// Beagle wire-captures pi's OpenAI-family logins: `openai` (API key →
+// api.openai.com) and `openai-codex` (ChatGPT Plus/Pro OAuth → the same Codex
+// backend as codex/opencode subscriptions). `piAgentDir` is injectable for tests.
+export interface PiProvider {
+  provider: string;
+  upstream: string;
+}
+const PI_UPSTREAMS: Record<string, string> = {
+  // pi's openai provider appends /responses to this base.
+  openai: "https://api.openai.com/v1",
+  // pi's openai-codex provider appends /codex/responses to this base; its
+  // OAuth login speaks to the ChatGPT backend, never api.openai.com.
+  "openai-codex": "https://chatgpt.com/backend-api",
+};
+export function piProvider(home: string, piAgentDir?: string): PiProvider | undefined {
+  const dir = piAgentDir || join(home, ".pi", "agent");
+  let provider = "";
+  try {
+    const settings = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8")) as { defaultProvider?: unknown };
+    if (typeof settings?.defaultProvider === "string") provider = settings.defaultProvider;
+  } catch {
+    /* no settings.json / unreadable → fall through to the login list */
+  }
+  if (!provider) {
+    // No default recorded: the redirect is unambiguous only if exactly one
+    // Beagle-supported provider is logged in — otherwise we can't know which pi
+    // would pick. Filter to known providers so a future non-provider metadata
+    // key in auth.json (a "version"/"$schema" field) can't miscount the logins.
+    try {
+      const auth = JSON.parse(readFileSync(join(dir, "auth.json"), "utf8")) as Record<string, unknown>;
+      const logins = Object.keys(auth ?? {}).filter((k) => Object.hasOwn(PI_UPSTREAMS, k));
+      if (logins.length === 1) provider = logins[0]!;
+    } catch {
+      /* no auth.json / unreadable */
+    }
+  }
+  // Object.hasOwn, not `provider in PI_UPSTREAMS` / a bare index: a config value
+  // that happens to be a prototype key (`constructor`, `toString`, `__proto__`)
+  // must resolve to "unknown → undefined", never to an inherited function.
+  const upstream = Object.hasOwn(PI_UPSTREAMS, provider) ? PI_UPSTREAMS[provider] : undefined;
+  return upstream ? { provider, upstream } : undefined;
+}
+
 // How Claude Code is signed in. An ANTHROPIC_API_KEY in the environment means
 // API-key traffic (wire-proxyable); a Claude.ai OAuth login leaves an
 // `oauthAccount` record in ~/.claude.json (honoring $CLAUDE_CONFIG_DIR). Only
