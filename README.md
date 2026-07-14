@@ -211,8 +211,8 @@ does the whole safe teardown, in the right order (unwatch every agent → stop
 the daemon → securely erase captured data → remove the state dir):
 
 ```sh
-beagle uninstall               # then remove the binary:
-brew uninstall beagle          # or: rm /usr/local/bin/beagle
+beagle uninstall                     # then remove the binary the way you installed it:
+npm uninstall -g @boundedhq/beagle   # (npm)   or:   rm /usr/local/bin/beagle   (curl / source)
 ```
 
 `beagle uninstall` restores your PATH and config before deleting anything, and
