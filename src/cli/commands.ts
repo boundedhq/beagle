@@ -356,10 +356,16 @@ const BEAGLE_STATE_ENTRIES = [
   "graduation.json", "shims", "agent-config", "quarantine",
 ];
 
-/** Two lines per agent, for a first-time reader: the COMMAND on its own
- *  arrowed line (it must read as "type this", not as a description), then a
- *  plain-English note on the login Beagle detected and how that session gets
- *  captured — no bare "wire/telemetry" jargon. Exported for tests. */
+// One agent's two lines: the COMMAND on its own arrowed line (it must read as
+// "type this", not a description), then `note` on the next, indented to line up
+// under the command. The single place this layout is defined.
+function detectRow(agent: string, note: string): string {
+  return `  ${agent.padEnd(10)}→ beagle run ${agent}\n${" ".repeat(14)}${note}`;
+}
+
+/** The two-line detect entry for an agent whose capture depends on its login
+ *  (claude/codex): a plain-English note on the login Beagle detected and how
+ *  that session gets captured — no bare "wire/telemetry" jargon. For tests. */
 export function detectLine(agent: string, auth: "api-key" | "subscription" | "unknown"): string {
   const how =
     auth === "subscription"
@@ -367,7 +373,7 @@ export function detectLine(agent: string, auth: "api-key" | "subscription" | "un
       : auth === "api-key"
         ? "signed in with an API key — captured on the wire, full fidelity"
         : "couldn't tell how it's signed in — Beagle asks once on your first run";
-  return `  ${agent.padEnd(10)}→ beagle run ${agent}\n${" ".repeat(14)}${how}`;
+  return detectRow(agent, how);
 }
 
 export function cmdDetect(): string {
@@ -386,7 +392,7 @@ export function cmdDetect(): string {
     // opencode and pi wire-capture BOTH login kinds — the login detail doesn't
     // change the command or the capture, so no detection caveat is shown.
     if (f.agent === "claude" || f.agent === "codex") return detectLine(f.agent, detectAuthForRun(f.agent));
-    return `  ${f.agent.padEnd(10)}→ beagle run ${f.agent}\n${" ".repeat(14)}captured on the wire, full fidelity`;
+    return detectRow(f.agent, "captured on the wire, full fidelity");
   });
   return (
     `Found ${found.length} agent${found.length === 1 ? "" : "s"} — to capture one session, run the command shown:\n\n` +
