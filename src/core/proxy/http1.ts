@@ -179,8 +179,11 @@ export class ConnectionPool {
           : netConnect(up.port, up.host, () => resolve(s));
       s.on("error", reject);
       // Slow-loris defense: a stalled upstream (or an idle pooled socket) that
-      // goes silent for 60s is destroyed rather than tying up daemon state.
-      s.setTimeout(60_000, () => s.destroy());
+      // goes fully silent is destroyed rather than tying up daemon state. The
+      // window is generous (5 min) on purpose — it must sit well above a slow
+      // reasoning model's think-before-first-token, or Beagle would abort a
+      // legitimate in-flight request (breaking the agent it's meant to observe).
+      s.setTimeout(300_000, () => s.destroy());
     });
   }
 
