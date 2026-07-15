@@ -202,7 +202,6 @@ function App() {
         <span class="agent">agent</span>
         <span class="model">model</span>
         <span class="summary">what was sent</span>
-        <span class="weight">size · tokens</span>
         <span class="session">session</span>
       </div>`}
       ${visible.map(
@@ -224,8 +223,6 @@ function App() {
 
 function Row({ x, onToggle, onSession }) {
   const t = new Date(x.tsRequest).toLocaleTimeString();
-  const kb = x.bytesReq ? (x.bytesReq / 1024).toFixed(1) + " KB" : "";
-  const tok = x.tokensOut != null ? `${x.tokensIn ?? "?"}→${x.tokensOut} tok` : "";
   return html`
     <div class=${x.hasLeak ? "row leak" : "row"} onClick=${onToggle}>
       <span
@@ -245,7 +242,6 @@ function Row({ x, onToggle, onSession }) {
         ? html`<span class="chip wire" title="wire-verified — observed on the wire">✓ wire</span>`
         : html`<span class="chip otel" title="agent-reported — the agent's own self-report">agent</span>`}
       ${x.scanState !== "ok" && html`<span class="chip">scan incomplete</span>`}
-      <span class="weight" title="request size · tokens in→out">${kb}${kb && tok ? " · " : ""}${tok}</span>
       <span class="session">
         <span class="chip" title="filter to this session"
           onClick=${(e) => { e.stopPropagation(); onSession(); }}>
@@ -287,6 +283,11 @@ function Detail({ id }) {
         <div>
           <span class="k">session</span> ${detail.sessionId.slice(0, 8)} ·${" "}
           <span class="k">grouped by</span> ${groupedBy(detail.sessionTier)}
+        </div>
+        <div>
+          <span class="k">size</span> ${kb(detail.bytesReq)} sent, ${kb(detail.bytesResp)} received
+          ${detail.tokensOut != null &&
+          html` · <span class="k">tokens</span> ${detail.tokensIn ?? "?"} in → ${detail.tokensOut} out`}
         </div>
         ${detail.captureState !== "ok" &&
         html`<div class="warn">⚠ capture truncated — the stored bytes are incomplete</div>`}
@@ -417,6 +418,11 @@ function groupedBy(tier) {
     case "time-gap": return "recent activity — a best guess (low confidence)";
     default: return tier;
   }
+}
+
+function kb(n) {
+  if (n == null) return "?";
+  return n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`;
 }
 
 function pretty(s) {
