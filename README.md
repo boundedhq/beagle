@@ -1,4 +1,4 @@
-# 🐕 Beagle
+# <img src="docs/assets/beagle.svg" alt="" width="38" align="top"> Beagle
 
 [![CI](https://github.com/boundedhq/beagle/actions/workflows/ci.yml/badge.svg)](https://github.com/boundedhq/beagle/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
