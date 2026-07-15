@@ -123,9 +123,74 @@ describe("CLI commands (headless loop, R12)", () => {
 
   test("status: trust-strip text works with no daemon running", () => {
     const out = cmdStatus(stateDir);
-    expect(out.toLowerCase()).toContain("daemon: not running");
-    expect(out).toContain("calls: 1");
+    expect(out.toLowerCase()).toContain("not running");
+    expect(out).toContain("1 call");
+    expect(out).toContain("1 detected");
     expect(out.toLowerCase()).toContain("local only");
+  });
+
+  test("status: daemon line says why the daemon is up and when it winds down", () => {
+    const base = { pid: 42, proxyPort: 6410, socketPath: "sock", persistent: false };
+    let out = cmdStatus(stateDir, { ...base, leases: 2, viewerOpen: true });
+    expect(out).toContain("2 live sessions");
+    expect(out.toLowerCase()).toContain("dashboard");
+    out = cmdStatus(stateDir, { ...base, leases: 1, viewerOpen: false });
+    expect(out).toContain("1 live session");
+    out = cmdStatus(stateDir, { ...base, leases: 0, viewerOpen: false });
+    expect(out.toLowerCase()).toContain("winds down");
+  });
+
+  test("status: a never-idle-exiting daemon says so without claiming a service install", () => {
+    // `persistent` covers BOTH the installed service and a hand-run
+    // `beagle daemon` (main.ts sets it from BEAGLE_EPHEMERAL, not from any
+    // service marker), so the line must not assert an install that may not
+    // exist — the changes row is what discloses a real one.
+    const out = cmdStatus(stateDir, { pid: 42, proxyPort: 6410, socketPath: "s", persistent: true });
+    expect(out.toLowerCase()).toContain("always on");
+    expect(out).toContain("beagle stop");
+    expect(out.toLowerCase()).not.toContain("installed service");
+    expect(out.toLowerCase()).not.toContain("winds down");
+  });
+
+  test("status: says nothing about why when the daemon cannot tell us (older daemon / failed enrich)", () => {
+    // ping proved it is running, but the status enrich call failed or the
+    // daemon predates these fields: claim "running" and stop there rather than
+    // guess "idle" at a daemon that may hold five sessions.
+    const out = cmdStatus(stateDir, { pid: 42, proxyPort: 6410, socketPath: "s" });
+    expect(out).toContain("running — pid 42");
+    expect(out.toLowerCase()).not.toContain("idle");
+    expect(out.toLowerCase()).not.toContain("winds down");
+    expect(out.toLowerCase()).not.toContain("always on");
+  });
+
+  test("status: every value line is label-aligned into two columns", () => {
+    const out = cmdStatus(stateDir);
+    for (const line of out.split("\n")) {
+      if (line === "") continue;
+      // 11-char label gutter: either a label padded to the gutter or a
+      // continuation line of pure indent
+      expect(line.length).toBeGreaterThan(11);
+      expect(line[11]).not.toBe(" ");
+      expect(/^[a-z ]{11}$/.test(line.slice(0, 11))).toBe(true);
+    }
+  });
+
+  test("status: discloses the Mode B content gap whenever agent-reported calls exist (R2)", () => {
+    const store = Store.open(stateDir);
+    const otel: CallRecord = {
+      id: ulid(), sessionId: "s2", runId: "r2", source: "otel",
+      agent: "claude-code", provider: "anthropic", model: "claude-sonnet-5",
+      endpoint: "otlp", tsRequest: Date.now(), tsResponse: Date.now(),
+      status: 200, tokensIn: 1, tokensOut: 1, bytesReq: 10, bytesResp: 10,
+      summary: "otel", scanState: "ok", captureState: "ok", sessionTier: "run",
+      requestBody: new TextEncoder().encode("{}"), requestHeaders: [],
+      responseBody: null, responseHeaders: [], sseRaw: null, searchText: "otel",
+    };
+    store.insertCall(otel);
+    store.close();
+    const out = cmdStatus(stateDir);
+    expect(out).toContain("1 agent-reported (Mode B)");
+    expect(out.toLowerCase()).toContain("lag");
   });
 });
 

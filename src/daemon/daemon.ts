@@ -605,6 +605,8 @@ export class Daemon {
             calls: this.store.countCalls(),
             leaks: this.store.countLeakEvents(),
             leases: this.leases,
+            viewerOpen: this.viewer?.isRunning ?? false,
+            persistent: this.persistent,
           },
         };
       case "purge": {
