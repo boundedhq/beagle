@@ -1,7 +1,10 @@
 :root {
   --bg: #0f1115; --panel: #171a21; --row: #1b1f28; --row-hover: #222735;
   --text: #d6dae3; --muted: #8b93a3; --accent: #6ea8fe; --leak: #ff5d5d;
+  --leak-bg: #3b1420; --leak-fg: #ffb3b3;
+  --bright: #eef2f9; /* top text tier — the wordmark only */
   --ok: #3ecf8e; --chip: #262b37; --border: #2a3040;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
   font-size: 14px;
 }
 * { box-sizing: border-box; margin: 0; }
@@ -10,27 +13,195 @@ body {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
 }
 #app { display: flex; flex-direction: column; min-height: 100vh; }
+/* Header — "bold identity": badge brand, live stat cards, actions. The one
+   part of the page with real visual presence; the feed below stays utilitarian. */
 header {
-  display: flex; align-items: center; gap: 12px; padding: 10px 16px;
-  background: var(--panel); border-bottom: 1px solid var(--border);
-  position: sticky; top: 0; z-index: 2;
+  /* wrap unconditionally: when stats + actions outgrow the row (session filter
+     showing, big counts, 961-1115px windows) the actions drop to a second row
+     instead of crushing the brand to nothing */
+  display: flex; flex-wrap: wrap; align-items: center; gap: 18px; row-gap: 11px;
+  justify-content: flex-end; /* wrapped rows (stats/actions) right-align themselves */
+  min-height: 104px; padding: 14px 24px;
+  background: linear-gradient(180deg, #1a1e29 0%, #151821 100%);
+  border-bottom: 1px solid var(--border);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 12px 32px -20px rgba(0, 0, 0, 0.9);
+  position: sticky; top: 0; z-index: 2; overflow: hidden;
+  font-variant-numeric: tabular-nums; /* live counts don't jitter the layout */
 }
-header h1 { font-size: 15px; font-weight: 600; }
-header .leak-counter { color: var(--leak); font-weight: 600; }
-header .leak-counter.zero { color: var(--muted); font-weight: 400; }
-.controls { display: flex; gap: 8px; margin-left: auto; align-items: center; }
-input[type="search"] {
-  background: var(--row); color: var(--text); border: 1px solid var(--border);
-  border-radius: 6px; padding: 5px 9px; width: 260px; font: inherit;
+header::before { /* accent signature strip */
+  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: linear-gradient(90deg, var(--accent) 0%, rgba(110, 168, 254, 0.28) 34%, rgba(110, 168, 254, 0) 62%);
+}
+header::after { /* soft brand glow, top-left */
+  content: ""; position: absolute; left: -70px; top: -80px;
+  width: 420px; height: 240px; pointer-events: none;
+  background: radial-gradient(closest-side, rgba(110, 168, 254, 0.09), transparent 72%);
+}
+header .brand, header .stats, header .actions { position: relative; z-index: 1; }
+
+header .brand {
+  display: flex; align-items: center; gap: 16px; min-width: 0;
+  flex: 0 1 auto; margin-right: auto; /* the gulf pushes stats + actions right */
+}
+header .badge {
+  position: relative; flex: none; width: 58px; height: 58px; border-radius: 16px;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(150deg, #2b3550 0%, #1c2231 55%, #171c28 100%);
+  border: 1px solid rgba(110, 168, 254, 0.32);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.09),
+              0 10px 22px -10px rgba(110, 168, 254, 0.4);
+}
+header .badge .dog {
+  width: 56px; height: 56px; display: block;
+  filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.45));
+}
+header .badge::after { /* "watching" presence dot */
+  content: ""; position: absolute; right: -3px; bottom: -3px;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--ok); border: 3px solid #161a24;
+  box-shadow: 0 0 8px rgba(62, 207, 142, 0.45);
+}
+header .brand-text { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+header h1 {
+  color: var(--bright); font-size: 26px; font-weight: 800;
+  letter-spacing: -0.5px; line-height: 1; padding-bottom: 1px; white-space: nowrap;
+}
+@supports (-webkit-background-clip: text) {
+  header h1 {
+    background: linear-gradient(100deg, #f4f7fc 0%, #c9d7f2 55%, #8fb7fe 105%);
+    -webkit-background-clip: text; background-clip: text;
+    color: transparent; -webkit-text-fill-color: transparent;
+  }
+}
+header h1 .cursor {
+  color: var(--accent); -webkit-text-fill-color: var(--accent);
+  animation: blink 1.5s steps(1) infinite;
+}
+@keyframes blink { 0%, 60% { opacity: 1; } 61%, 100% { opacity: 0.15; } }
+header .tagline {
+  font-family: var(--sans); color: var(--muted); font-size: 12px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+header .tagline .hl { color: #d295a1; font-weight: 500; }
+
+/* stat cards: leak state first, then the live tally */
+header .stats { display: flex; align-items: stretch; gap: 9px; flex: none; }
+header .stat {
+  display: flex; flex-direction: column; justify-content: center; gap: 4px;
+  min-width: 70px; padding: 9px 12px; border-radius: 12px;
+  background: linear-gradient(180deg, #222735 0%, #1b1f28 100%);
+  border: 1px solid var(--border);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+header .num { font-size: 17px; font-weight: 700; line-height: 1; color: var(--text); }
+header .label {
+  font-family: var(--sans); font-size: 9.5px;
+  text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted);
+}
+header .stat-col { display: flex; flex-direction: column; gap: 4px; }
+header .stat.leak {
+  flex-direction: row; align-items: center; gap: 10px;
+  margin-right: 6px; padding: 9px 14px 9px 13px;
+  background: linear-gradient(180deg, #4a1a28 0%, var(--leak-bg) 100%);
+  border-color: rgba(255, 93, 93, 0.55);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 0 20px -2px rgba(255, 93, 93, 0.35);
+}
+header .stat.leak .num { color: var(--leak-fg); }
+header .stat.leak .label { color: #ff8f8f; }
+header .leak-dot {
+  flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--leak);
+  animation: ping 1.6s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+@keyframes ping {
+  0%   { box-shadow: 0 0 10px rgba(255, 93, 93, 0.9), 0 0 0 0 rgba(255, 93, 93, 0.45); }
+  70%  { box-shadow: 0 0 10px rgba(255, 93, 93, 0.9), 0 0 0 8px rgba(255, 93, 93, 0); }
+  100% { box-shadow: 0 0 10px rgba(255, 93, 93, 0.9), 0 0 0 0 rgba(255, 93, 93, 0); }
+}
+/* zero-leak state: same card, calm — "watching, and clear" */
+header .stat.leak.zero {
+  background: linear-gradient(180deg, #222735 0%, #1b1f28 100%);
+  border-color: var(--border);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+header .stat.leak.zero .num, header .stat.leak.zero .label { color: var(--muted); }
+header .stat.leak.zero .leak-dot {
+  background: var(--ok); animation: none;
+  box-shadow: 0 0 6px rgba(62, 207, 142, 0.5);
+}
+
+/* actions */
+header .actions { display: flex; align-items: center; gap: 12px; flex: none; }
+header .search { position: relative; color: #646d80; }
+header .search .search-icon {
+  position: absolute; left: 13px; top: 50%; transform: translateY(-50%);
+  pointer-events: none; transition: color 0.15s;
+}
+header .search:focus-within { color: var(--accent); }
+header .search input {
+  width: 220px; height: 42px; border-radius: 11px;
+  border: 1px solid var(--border); background: #10131a;
+  color: var(--text); font: inherit; font-size: 12.5px;
+  padding: 0 14px 0 37px;
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.35);
+  transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+}
+header .search input::placeholder { color: var(--muted); }
+header .search input:focus {
+  outline: none; border-color: rgba(110, 168, 254, 0.8); background: #0e1117;
+  box-shadow: 0 0 0 3px rgba(110, 168, 254, 0.16), inset 0 2px 6px rgba(0, 0, 0, 0.3);
+}
+header .toggle {
+  display: flex; align-items: center; gap: 9px;
+  height: 42px; padding: 0 16px; border-radius: 11px;
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, #293040 0%, #232833 100%);
+  color: #a6aebd; font-size: 12px; letter-spacing: 0.02em;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  transition: border-color 0.15s, color 0.15s;
+}
+header .toggle .toggle-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  border: 1.5px solid rgba(255, 93, 93, 0.7); background: transparent;
+  transition: background 0.15s;
+}
+header .toggle:hover { border-color: rgba(255, 93, 93, 0.45); color: var(--text); }
+header .toggle:hover .toggle-dot { background: rgba(255, 93, 93, 0.25); }
+header .toggle:active { transform: translateY(1px); }
+header .toggle.active { border-color: rgba(110, 168, 254, 0.65); color: var(--accent); }
+header .toggle.active .toggle-dot { background: var(--leak); border-color: var(--leak); }
+
+/* narrow: tagline goes first, then the actions drop to their own full row */
+@media (max-width: 960px) {
+  header { min-height: 0; padding: 12px 18px; gap: 14px; }
+  header .tagline { display: none; }
+  header .brand { flex: none; }
+  header .actions { flex: 1 1 100%; }
+  header .search { flex: 1 1 auto; }
+  header .search input { width: 100%; }
+  header .stat { min-width: 64px; padding: 8px 11px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  header h1 .cursor, header .leak-dot { animation: none; }
+}
+/* narrow feed: model is the most expendable column — shed it before the
+   interactive session chip gets clipped */
+@media (max-width: 760px) {
+  .row .model { display: none; }
 }
 button {
   background: var(--chip); color: var(--text); border: 1px solid var(--border);
   border-radius: 6px; padding: 5px 10px; font: inherit; cursor: pointer;
+  white-space: nowrap;
 }
 button.active { border-color: var(--accent); color: var(--accent); }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
 main { flex: 1; padding: 8px 16px; }
 .banner {
-  background: #3b1420; border: 1px solid var(--leak); color: #ffb3b3;
+  background: var(--leak-bg); border: 1px solid var(--leak); color: var(--leak-fg);
   padding: 8px 12px; border-radius: 6px; margin: 8px 0;
 }
 .row {
@@ -40,22 +211,30 @@ main { flex: 1; padding: 8px 16px; }
 }
 .row:hover { background: var(--row-hover); }
 .row.leak { border-left-color: var(--leak); background: #1f151a; }
-.row .time { color: var(--muted); flex: 0 0 60px; }
-.row .agent { color: var(--accent); flex: 0 0 90px; overflow: hidden; text-overflow: ellipsis; }
+.row .time { color: var(--muted); flex: 0 0 96px; white-space: nowrap; }
+.row .agent { color: var(--accent); flex: 0 0 100px; overflow: hidden; text-overflow: ellipsis; }
 .row .model { color: var(--muted); flex: 0 0 130px; overflow: hidden; text-overflow: ellipsis; }
 .row .summary { flex: 1 1 auto; min-width: 120px; overflow: hidden; text-overflow: ellipsis; }
-.row .weight { color: var(--muted); flex: 0 0 auto; text-align: right; white-space: nowrap; }
+.row .session { flex: 0 0 78px; text-align: right; margin-left: auto; }
+.row.head {
+  cursor: default; color: var(--muted); font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.6px; border-bottom: 1px solid var(--border); padding-top: 10px;
+}
+.row.head:hover { background: transparent; }
+.row.head .agent, .row.head .model, .row.head .summary { color: var(--muted); }
+.row.head .dot.spacer { background: transparent; }
 .dot { flex: 0 0 8px; height: 8px; border-radius: 50%; background: var(--ok); align-self: center; }
 .dot.err { background: var(--leak); }
+.dot.pending { background: transparent; border: 1.5px solid var(--muted); }
 .chip {
   background: var(--chip); border: 1px solid var(--border); border-radius: 10px;
   padding: 1px 8px; font-size: 12px; color: var(--muted);
 }
-.chip.leak { background: #3b1420; border-color: var(--leak); color: #ffb3b3; }
+.chip.leak { background: var(--leak-bg); border-color: var(--leak); color: var(--leak-fg); }
 .chip.otel { border-color: #b98c2e; color: #e6c36b; }
 .chip.wire { border-color: #2e6f4e; color: #7fd0a3; }
 .leakbar {
-  background: #3b1420; border: 1px solid var(--leak); color: #ffcaca;
+  background: var(--leak-bg); border: 1px solid var(--leak); color: #ffcaca;
   padding: 8px 10px; border-radius: 6px; margin: 8px 0; font-size: 13px;
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
 }

@@ -46,11 +46,13 @@ function App() {
   const [searchTerm, setSearchTerm] = useState("");
   const [banner, setBanner] = useState(null);
   const [expanded, setExpanded] = useState(null);
+  const [stats, setStats] = useState(null); // whole-store totals — the feed is a 500-row window
   const searchBox = useRef(null);
 
   useEffect(() => {
     api.get("/api/feed").then(setCalls);
     api.get("/api/leaks").then(setLeaks);
+    api.get("/api/stats").then(setStats);
     // fetch-SSE: EventSource can't send the credential header (§6.8)
     let stop = false;
     (async () => {
@@ -83,11 +85,15 @@ function App() {
       const dataLine = lines.find((l) => l.startsWith("data:"))?.slice(5).trim();
       if (!ev || !dataLine) return;
       const data = JSON.parse(dataLine);
-      if (ev === "call") setCalls((xs) => [data, ...xs]);
+      if (ev === "call") {
+        setCalls((xs) => [data, ...xs]);
+        api.get("/api/stats").then(setStats);
+      }
       if (ev === "alert") {
         setBanner(data);
         api.get("/api/leaks").then(setLeaks);
         api.get("/api/feed").then(setCalls);
+        api.get("/api/stats").then(setStats);
       }
     }
     return () => { stop = true; };
@@ -103,22 +109,87 @@ function App() {
   const visible = calls.filter(
     (x) => (!leaksOnly || x.hasLeak) && (!sessionFilter || x.sessionId === sessionFilter),
   );
+  // Server totals count the whole store; the feed state is only its newest
+  // 500-row window. Fall back to the window while /api/stats is in flight.
+  const callCount = stats?.calls ?? calls.length;
+  const sessionCount = stats?.sessions ?? new Set(calls.map((x) => x.sessionId)).size;
+  const agentCount = stats?.agents ?? new Set(calls.map((x) => x.agent).filter(Boolean)).size;
 
   return html`
     <header>
-      <h1>🐕 beagle</h1>
-      <span class=${leaks.length ? "leak-counter" : "leak-counter zero"}>
-        ${leaks.length} leak${leaks.length === 1 ? "" : "s"}
-      </span>
-      <div class="controls">
-        <form onSubmit=${doSearch}>
-          <input ref=${searchBox} type="search" placeholder="was this ever sent? (literal search)" />
+      <div class="brand">
+        <div class="badge" aria-hidden="true">
+          <!-- the beagle mark — keep in sync with docs/assets/beagle.svg (same paths, minus the tile) -->
+          <svg class="dog" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+            <path d="M13 59 C13 50 20.5 44.5 32 44.5 C43.5 44.5 51 50 51 59 Z" fill="#46311f"></path>
+            <path d="M23 59 C23 49.5 27 46 32 46 C37 46 41 49.5 41 59 Z" fill="#e2d2ba"></path>
+            <path d="M24 20 C15 16 8.8 23 8.8 32 C8.8 42 11.5 51 17.5 54 C21.5 55.8 24.6 52.5 24.8 46 C25 38 24.6 27 24 20 Z" fill="#7a4a28"></path>
+            <path d="M40 20 C49 16 55.2 23 55.2 32 C55.2 42 52.5 51 46.5 54 C42.5 55.8 39.4 52.5 39.2 46 C39 38 39.4 27 40 20 Z" fill="#7a4a28"></path>
+            <ellipse cx="32" cy="29.5" rx="16.5" ry="17.5" fill="#c98f4e"></ellipse>
+            <path d="M28.7 12.7 C27.9 17 27.3 26 27.2 35 L36.8 35 C36.7 26 36.1 17 35.3 12.7 C33.1 12 30.9 12 28.7 12.7 Z" fill="#f2e8d8"></path>
+            <ellipse cx="32" cy="41" rx="10.5" ry="8.5" fill="#f2e8d8"></ellipse>
+            <circle cx="24.5" cy="29.5" r="2.8" fill="#26201a"></circle>
+            <circle cx="39.5" cy="29.5" r="2.8" fill="#26201a"></circle>
+            <circle cx="23.6" cy="28.6" r="0.95" fill="#f2e8d8"></circle>
+            <circle cx="38.6" cy="28.6" r="0.95" fill="#f2e8d8"></circle>
+            <path d="M27.9 37.5 C27.9 35.9 29.6 35.2 32 35.2 C34.4 35.2 36.1 35.9 36.1 37.5 C36.1 39.6 34 41.2 32 41.2 C30 41.2 27.9 39.6 27.9 37.5 Z" fill="#26201a"></path>
+            <ellipse cx="30.6" cy="36.7" rx="1.1" ry="0.7" fill="#f2e8d8" fill-opacity="0.35"></ellipse>
+            <path d="M32 41.2 L32 43.4 M32 43.4 C30.8 45.4 28.8 45.4 27.6 44 M32 43.4 C33.2 45.4 35.2 45.4 36.4 44"
+              stroke="#26201a" stroke-width="1.4" stroke-linecap="round" fill="none"></path>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1>beagle<span class="cursor" aria-hidden="true">_</span></h1>
+          <p class="tagline">
+            sees what your AI agents send to model providers — and${" "}
+            <span class="hl">flags leaked secrets</span>
+          </p>
+        </div>
+      </div>
+      <div class="stats">
+        <div role="status"
+          class=${leaks.length ? "stat leak" : "stat leak zero"}
+          title=${leaks.length
+            ? "secrets were sent to a provider — red rows below have details"
+            : "no secrets detected in anything captured so far"}>
+          <span class="leak-dot" aria-hidden="true"></span>
+          <div class="stat-col">
+            <span class="num">${leaks.length}</span>
+            <span class="label">leak${leaks.length === 1 ? "" : "s"}</span>
+          </div>
+        </div>
+        <div class="stat" title="requests captured so far">
+          <span class="num">${callCount}</span>
+          <span class="label">call${callCount === 1 ? "" : "s"}</span>
+        </div>
+        <div class="stat" title="distinct sessions observed">
+          <span class="num">${sessionCount}</span>
+          <span class="label">session${sessionCount === 1 ? "" : "s"}</span>
+        </div>
+        <div class="stat" title="distinct agents seen">
+          <span class="num">${agentCount}</span>
+          <span class="label">agent${agentCount === 1 ? "" : "s"}</span>
+        </div>
+      </div>
+      <div class="actions">
+        <form role="search" class="search" onSubmit=${doSearch}>
+          <svg class="search-icon" aria-hidden="true" width="14" height="14" viewBox="0 0 24 24"
+            fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+            <circle cx="10.5" cy="10.5" r="6.5"></circle>
+            <path d="M20 20l-4.6-4.6"></path>
+          </svg>
+          <input ref=${searchBox} type="search" placeholder="was this ever sent?"
+            aria-label="search everything captured"
+            title="literal search over everything captured — exact text, not fuzzy" />
         </form>
-        <button class=${leaksOnly ? "active" : ""} onClick=${() => setLeaksOnly(!leaksOnly)}>
-          leaks only
+        <button class=${leaksOnly ? "toggle active" : "toggle"}
+          aria-pressed=${leaksOnly ? "true" : "false"}
+          onClick=${() => setLeaksOnly(!leaksOnly)}>
+          <span class="toggle-dot" aria-hidden="true"></span>leaks only
         </button>
         ${sessionFilter &&
-        html`<button class="active" onClick=${() => setSessionFilter(null)}>
+        html`<button class="toggle active" title="showing one session — click to clear"
+          onClick=${() => setSessionFilter(null)}>
           session ${sessionFilter.slice(0, 8)} ✕
         </button>`}
       </div>
@@ -134,6 +205,15 @@ function App() {
         no calls${leaksOnly ? " with leaks" : ""} yet — run an agent under
         ${" "}<code>beagle run</code> and its traffic appears here live
       </div>`}
+      ${visible.length > 0 &&
+      html`<div class="row head" aria-hidden="true">
+        <span class="dot spacer"></span>
+        <span class="time">time</span>
+        <span class="agent">agent</span>
+        <span class="model">model</span>
+        <span class="summary">what was sent</span>
+        <span class="session">session</span>
+      </div>`}
       ${visible.map(
         (x) => html`
           <${Row} key=${x.id} x=${x}
@@ -144,19 +224,27 @@ function App() {
       )}
     </main>
     <footer>
-      local only · outbound connections: only your model providers · telemetry: none ·
-      viewer: on while this tab is open (loopback, tokened) · captures shown from your local store
+      🔒 everything on this page stays on your machine — the only outbound traffic is your
+      agents' own calls to their model providers. No telemetry. The viewer serves loopback
+      only, token-protected, while this tab is open.
     </footer>
   `;
 }
 
 function Row({ x, onToggle, onSession }) {
   const t = new Date(x.tsRequest).toLocaleTimeString();
-  const kb = x.bytesReq ? (x.bytesReq / 1024).toFixed(1) + " KB" : "";
-  const tok = x.tokensOut != null ? `${x.tokensIn ?? "?"}→${x.tokensOut}` : "";
   return html`
     <div class=${x.hasLeak ? "row leak" : "row"} onClick=${onToggle}>
-      <span class=${x.status && x.status >= 400 ? "dot err" : "dot"}></span>
+      <span
+        class=${x.status == null ? "dot pending" : x.status >= 400 ? "dot err" : "dot"}
+        title=${x.status == null
+          ? "no response recorded"
+          : x.status >= 400
+            ? `provider returned ${x.status}`
+            : "call succeeded"}
+      ><span class="sr-only">${x.status == null
+        ? "no response recorded"
+        : x.status >= 400 ? `error ${x.status}` : "ok"}</span></span>
       <span class="time">${t}</span>
       <span class="agent">${x.agent ?? "?"}</span>
       <span class="model">${x.model ?? ""}</span>
@@ -166,9 +254,11 @@ function Row({ x, onToggle, onSession }) {
         ? html`<span class="chip wire" title="wire-verified — observed on the wire">✓ wire</span>`
         : html`<span class="chip otel" title="agent-reported — the agent's own self-report">agent</span>`}
       ${x.scanState !== "ok" && html`<span class="chip">scan incomplete</span>`}
-      <span class="weight">${kb} ${tok}</span>
-      <span class="chip" onClick=${(e) => { e.stopPropagation(); onSession(); }}>
-        s:${x.sessionId.slice(0, 6)}
+      <span class="session">
+        <span class="chip" title="filter to this session"
+          onClick=${(e) => { e.stopPropagation(); onSession(); }}>
+          ${x.sessionId.slice(0, 6)}
+        </span>
       </span>
     </div>
   `;
@@ -205,6 +295,11 @@ function Detail({ id }) {
         <div>
           <span class="k">session</span> ${detail.sessionId.slice(0, 8)} ·${" "}
           <span class="k">grouped by</span> ${groupedBy(detail.sessionTier)}
+        </div>
+        <div>
+          <span class="k">size</span> ${kb(detail.bytesReq)} sent, ${kb(detail.bytesResp)} received
+          ${(detail.tokensIn != null || detail.tokensOut != null) &&
+          html` · <span class="k">tokens</span> ${detail.tokensIn ?? "?"} in → ${detail.tokensOut ?? "?"} out`}
         </div>
         ${detail.captureState !== "ok" &&
         html`<div class="warn">⚠ capture truncated — the stored bytes are incomplete</div>`}
@@ -335,6 +430,11 @@ function groupedBy(tier) {
     case "time-gap": return "recent activity — a best guess (low confidence)";
     default: return tier;
   }
+}
+
+function kb(n) {
+  if (n == null) return "?";
+  return n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`;
 }
 
 function pretty(s) {

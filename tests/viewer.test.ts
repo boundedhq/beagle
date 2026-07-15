@@ -75,6 +75,18 @@ describe("ViewerServer hardening (design §6.8)", () => {
     expect(feed[0]!.id).toBe(callId);
   });
 
+  test("stats endpoint returns whole-store totals with credential", async () => {
+    const noAuth = await fetch(`${origin()}/api/stats`);
+    expect(noAuth.status).toBe(401);
+    const cred = await getCredential();
+    const r = await fetch(`${origin()}/api/stats`, { headers: { "x-beagle-token": cred } });
+    expect(r.status).toBe(200);
+    const stats = (await r.json()) as { calls: number; sessions: number; agents: number };
+    expect(stats.calls).toBe(1);
+    expect(stats.sessions).toBe(1);
+    expect(stats.agents).toBe(1);
+  });
+
   test("non-local Origin is rejected (DNS-rebinding defense)", async () => {
     const cred = await getCredential();
     const r = await fetch(`${origin()}/api/feed`, {

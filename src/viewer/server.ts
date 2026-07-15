@@ -5,7 +5,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { Store } from "../core/store/store";
-import { listCalls, listLeakEvents } from "./feed-query";
+import { feedStats, listCalls, listLeakEvents } from "./feed-query";
 import { buildDetail, leakSpansFor } from "./detail";
 // Statics embedded at build time (ships-what's-in-repo, and the compiled
 // binary has no filesystem view of the repo).
@@ -208,6 +208,9 @@ export class ViewerServer {
     try {
       if (path === "/api/feed" && req.method === "GET") {
         this.json(res, 200, listCalls(store, 500));
+      } else if (path === "/api/stats" && req.method === "GET") {
+        // whole-store totals for the header cards (the feed is a 500-row window)
+        this.json(res, 200, feedStats(store));
       } else if (path.startsWith("/api/call/") && req.method === "GET") {
         const call = store.getCall(path.slice("/api/call/".length));
         if (!call) return this.json(res, 404, { error: "no such call" });

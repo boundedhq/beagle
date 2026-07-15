@@ -49,6 +49,8 @@ export interface CallDetail {
   status?: number;
   tokensIn?: number;
   tokensOut?: number;
+  bytesReq?: number;
+  bytesResp?: number;
   scanState: string;
   captureState: string;
   source: string;
@@ -91,6 +93,8 @@ export function buildDetail(call: CallRecord, spans: LeakSpan[]): CallDetail {
     status: call.status,
     tokensIn: call.tokensIn,
     tokensOut: call.tokensOut,
+    bytesReq: call.bytesReq,
+    bytesResp: call.bytesResp,
     scanState: call.scanState,
     captureState: call.captureState,
     source: call.source,
