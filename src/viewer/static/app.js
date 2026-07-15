@@ -103,6 +103,8 @@ function App() {
   const visible = calls.filter(
     (x) => (!leaksOnly || x.hasLeak) && (!sessionFilter || x.sessionId === sessionFilter),
   );
+  const sessionCount = new Set(calls.map((x) => x.sessionId)).size;
+  const agentCount = new Set(calls.map((x) => x.agent).filter(Boolean)).size;
 
   return html`
     <header>
@@ -115,19 +117,36 @@ function App() {
           </p>
         </div>
       </div>
-      <div class="controls">
-        <span class=${leaks.length ? "leak-counter" : "leak-counter zero"}>
-          ${leaks.length} leak${leaks.length === 1 ? "" : "s"}
+      <div class="status">
+        <span role="status"
+          class=${leaks.length ? "leak-counter" : "leak-counter zero"}
+          title=${leaks.length
+            ? "secrets were sent to a provider — red rows below have details"
+            : "no secrets detected in anything captured so far"}>
+          <span class="pip" aria-hidden="true"></span>
+          <strong>${leaks.length}</strong>${" "}leak${leaks.length === 1 ? "" : "s"}
         </span>
-        <form onSubmit=${doSearch}>
+        ${calls.length > 0 &&
+        html`<span class="tally"
+          title="everything captured so far — calls · distinct sessions · distinct agents">
+          ${calls.length} call${calls.length === 1 ? "" : "s"} ·${" "}
+          ${sessionCount} session${sessionCount === 1 ? "" : "s"} ·${" "}
+          ${agentCount} agent${agentCount === 1 ? "" : "s"}
+        </span>`}
+      </div>
+      <div class="controls">
+        <form role="search" onSubmit=${doSearch}>
           <input ref=${searchBox} type="search" placeholder="was this ever sent?"
+            aria-label="search everything captured"
             title="literal search over everything captured — exact text, not fuzzy" />
         </form>
-        <button class=${leaksOnly ? "active" : ""} onClick=${() => setLeaksOnly(!leaksOnly)}>
+        <button class=${leaksOnly ? "active" : ""} aria-pressed=${leaksOnly ? "true" : "false"}
+          onClick=${() => setLeaksOnly(!leaksOnly)}>
           leaks only
         </button>
         ${sessionFilter &&
-        html`<button class="active" onClick=${() => setSessionFilter(null)}>
+        html`<button class="active" title="showing one session — click to clear"
+          onClick=${() => setSessionFilter(null)}>
           session ${sessionFilter.slice(0, 8)} ✕
         </button>`}
       </div>

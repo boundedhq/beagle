@@ -1,6 +1,8 @@
 :root {
   --bg: #0f1115; --panel: #171a21; --row: #1b1f28; --row-hover: #222735;
   --text: #d6dae3; --muted: #8b93a3; --accent: #6ea8fe; --leak: #ff5d5d;
+  --leak-bg: #3b1420; --leak-fg: #ffb3b3;
+  --bright: #eef2f9; /* top text tier — the wordmark only */
   --ok: #3ecf8e; --chip: #262b37; --border: #2a3040;
   font-size: 14px;
 }
@@ -10,31 +12,54 @@ body {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
 }
 #app { display: flex; flex-direction: column; min-height: 100vh; }
+/* Header: three registers in scan order — brand (only large type on the page),
+   read-only status, then interactive controls at the quietest register.
+   Grouping by whitespace rhythm, not boxes. */
 header {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 12px 20px;
+  display: flex; flex-wrap: wrap; align-items: center;
+  justify-content: flex-end; /* wrapped lines (status/controls) right-align themselves */
+  gap: 8px 14px; padding: 10px 20px;
   background: var(--panel); border-bottom: 1px solid var(--border);
   position: sticky; top: 0; z-index: 2;
 }
-header .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
-header .logo { font-size: 30px; line-height: 1; }
-header .brand-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-header h1 { font-size: 19px; font-weight: 700; letter-spacing: 0.5px; line-height: 1.2; }
+header .brand {
+  display: flex; align-items: center; gap: 12px;
+  margin-right: auto; /* the gulf that pushes status + controls to the right edge */
+  min-width: 280px;
+}
+header .logo { font-size: 28px; line-height: 1; }
+header .brand-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+header h1 { color: var(--bright); font-size: 20px; font-weight: 700; letter-spacing: 0.4px; line-height: 1.1; }
 header .tagline {
-  color: var(--muted); font-size: 12px;
+  color: var(--muted); font-size: 12px; line-height: 1.35;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+header .status {
+  display: flex; align-items: center; gap: 12px; white-space: nowrap;
+  font-variant-numeric: tabular-nums; /* live counts don't jitter the layout */
+}
 header .leak-counter {
-  border: 1px solid var(--leak); background: #3b1420; color: #ffb3b3;
-  border-radius: 999px; padding: 4px 12px; font-weight: 600; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 7px;
+  border: 1px solid var(--leak); background: var(--leak-bg); color: var(--leak-fg);
+  border-radius: 999px; padding: 4px 12px;
 }
+header .leak-counter strong { font-weight: 700; }
 header .leak-counter.zero {
-  border-color: var(--border); background: var(--chip); color: var(--muted); font-weight: 400;
+  border-color: var(--border); background: var(--chip); color: var(--muted);
 }
+header .leak-counter.zero strong { font-weight: 400; }
+header .pip { width: 7px; height: 7px; border-radius: 50%; background: var(--leak); flex: none; }
+header .leak-counter.zero .pip { background: var(--ok); }
+header .tally { color: var(--muted); font-size: 12px; }
 .controls {
-  display: flex; gap: 8px; margin-left: auto; align-items: center;
+  display: flex; gap: 8px; align-items: center;
   min-width: 0; justify-content: flex-end;
 }
-.controls form { flex: 0 1 260px; min-width: 150px; }
+.controls form { flex: 0 1 240px; min-width: 150px; }
+/* the nicety degrades first; the signal (leak pill) always survives */
+@media (max-width: 950px) {
+  header .tally { display: none; }
+}
 input[type="search"] {
   background: var(--row); color: var(--text); border: 1px solid var(--border);
   border-radius: 6px; padding: 5px 9px; width: 100%; font: inherit;
@@ -45,9 +70,11 @@ button {
   white-space: nowrap;
 }
 button.active { border-color: var(--accent); color: var(--accent); }
+input[type="search"]:focus-visible,
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 main { flex: 1; padding: 8px 16px; }
 .banner {
-  background: #3b1420; border: 1px solid var(--leak); color: #ffb3b3;
+  background: var(--leak-bg); border: 1px solid var(--leak); color: var(--leak-fg);
   padding: 8px 12px; border-radius: 6px; margin: 8px 0;
 }
 .row {
@@ -76,11 +103,11 @@ main { flex: 1; padding: 8px 16px; }
   background: var(--chip); border: 1px solid var(--border); border-radius: 10px;
   padding: 1px 8px; font-size: 12px; color: var(--muted);
 }
-.chip.leak { background: #3b1420; border-color: var(--leak); color: #ffb3b3; }
+.chip.leak { background: var(--leak-bg); border-color: var(--leak); color: var(--leak-fg); }
 .chip.otel { border-color: #b98c2e; color: #e6c36b; }
 .chip.wire { border-color: #2e6f4e; color: #7fd0a3; }
 .leakbar {
-  background: #3b1420; border: 1px solid var(--leak); color: #ffcaca;
+  background: var(--leak-bg); border: 1px solid var(--leak); color: #ffcaca;
   padding: 8px 10px; border-radius: 6px; margin: 8px 0; font-size: 13px;
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
 }
