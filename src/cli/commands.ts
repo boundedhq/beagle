@@ -118,12 +118,33 @@ async function ensureDaemon(stateDir: string): Promise<DaemonInfo | null> {
   return daemon;
 }
 
-// Two-column trust strip: a 10-char label gutter, values (and their wrapped
+// Two-column trust strip: an 11-char label gutter, values (and their wrapped
 // continuations) aligned after it, blank lines between the three groups —
-// coverage, what's stored, what beagle touched. Plain text only (no ANSI:
-// captured content must never smuggle escapes to a terminal, so this command
-// never normalizes any).
+// coverage, what's stored, what beagle touched. Emits no ANSI escapes of its
+// own and interpolates no captured traffic, which is why (unlike cmdShow) it
+// needs no clean() pass.
 const STATUS_GUTTER = 11;
+
+// Why the daemon is up, or null when we cannot know — an older daemon answers
+// `status` without these fields, and the enrich call may fail after ping
+// already proved it running. On a strip where every claim must be true,
+// unknown gets no line rather than a guessed one. `persistent` is the
+// discriminator: only a daemon that reports it speaks this protocol.
+function daemonWhy(d: DaemonInfo): string | null {
+  if (d.persistent === undefined) return null;
+  // persistent means "never idle-exits" — that covers the installed service
+  // AND a hand-run `beagle daemon`, and nothing distinguishes them from here,
+  // so say only what is true of both. (An installed service is disclosed by
+  // the changes row.)
+  if (d.persistent) return "always on — it will not wind down by itself; `beagle stop` stops it";
+  const holds: string[] = [];
+  const n = d.leases ?? 0;
+  if (n > 0) holds.push(`${n} live session${n === 1 ? "" : "s"}`);
+  if (d.viewerOpen) holds.push("an open dashboard");
+  return holds.length
+    ? `up for: ${holds.join(" · ")} — winds down after they end`
+    : "idle — winds down within a few minutes";
+}
 
 export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null): string {
   const row = (label: string, text: string) => label.padEnd(STATUS_GUTTER) + text;
@@ -133,17 +154,8 @@ export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null):
   if (daemonUp) {
     lines.push(row("daemon", `running — pid ${daemonUp.pid} · proxy 127.0.0.1:${daemonUp.proxyPort}`));
     // Say WHY it is running, so nobody has to wonder when it will go away.
-    if (daemonUp.persistent) {
-      lines.push(cont("installed service — always on; `beagle unwatch` removes it"));
-    } else {
-      const holds: string[] = [];
-      const n = daemonUp.leases ?? 0;
-      if (n > 0) holds.push(`${n} live session${n === 1 ? "" : "s"}`);
-      if (daemonUp.viewerOpen) holds.push("an open dashboard");
-      lines.push(cont(holds.length
-        ? `up for: ${holds.join(" · ")} — winds down after they end`
-        : "idle — winds down within a few minutes"));
-    }
+    const why = daemonWhy(daemonUp);
+    if (why) lines.push(cont(why));
   } else {
     lines.push(row("daemon", "not running — new agent sessions go DIRECT (unmonitored)"));
   }

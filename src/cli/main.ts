@@ -90,11 +90,20 @@ export async function run(argv: string[]): Promise<number> {
         const raw = JSON.parse(readFileSync(join(stateDir, "daemon.json"), "utf8"));
         const r = await controlRequest(raw.socketPath, { cmd: "ping" }, 800);
         if (r.ok) {
-          // The daemon knows why it is up (live sessions, open dashboard,
-          // service install) — surface that instead of a bare "running".
-          const st = await controlRequest(raw.socketPath, { cmd: "status" }, 800);
-          const d = (st.ok ? st.data : {}) as Record<string, unknown>;
-          info = { ...raw, leases: d.leases, viewerOpen: d.viewerOpen, persistent: d.persistent };
+          // Ping proved the daemon is up — record that first and never retract
+          // it: controlRequest REJECTS on timeout/socket error, so enriching
+          // inside this same try would report "not running" for a daemon that
+          // is running and capturing.
+          info = raw;
+          try {
+            // The daemon knows why it is up (live sessions, open dashboard,
+            // never-idle-exits) — surface that instead of a bare "running".
+            const st = await controlRequest(raw.socketPath, { cmd: "status" }, 800);
+            if (st.ok) {
+              const d = st.data as Record<string, unknown>;
+              info = { ...raw, leases: d.leases, viewerOpen: d.viewerOpen, persistent: d.persistent };
+            }
+          } catch { /* reason unknown; the plain "running" line still holds */ }
         }
       } catch { /* not running */ }
       console.log(cmdStatus(stateDir, info));
