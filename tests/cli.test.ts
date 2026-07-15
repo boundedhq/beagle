@@ -130,6 +130,20 @@ describe("CLI commands (headless loop, R12)", () => {
     expect(out).not.toContain("\x1b"); // trust strip must never emit terminal escapes
   });
 
+  test("status: daemon line says why the daemon is up and when it winds down", () => {
+    const base = { pid: 42, proxyPort: 6410, socketPath: "sock" };
+    let out = cmdStatus(stateDir, { ...base, leases: 2, viewerOpen: true });
+    expect(out).toContain("2 live sessions");
+    expect(out.toLowerCase()).toContain("dashboard");
+    out = cmdStatus(stateDir, { ...base, leases: 1, viewerOpen: false });
+    expect(out).toContain("1 live session");
+    out = cmdStatus(stateDir, { ...base, leases: 0, viewerOpen: false });
+    expect(out.toLowerCase()).toContain("winds down");
+    out = cmdStatus(stateDir, { ...base, persistent: true });
+    expect(out.toLowerCase()).toContain("service");
+    expect(out).toContain("beagle unwatch");
+  });
+
   test("status: every value line is label-aligned into two columns", () => {
     const out = cmdStatus(stateDir);
     for (const line of out.split("\n")) {

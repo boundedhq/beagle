@@ -51,6 +51,10 @@ interface DaemonInfo {
   proxyPort: number;
   socketPath: string;
   runningVersion?: string; // from the ping handshake, not daemon.json
+  // Why the daemon is up, from the control status call (status command only).
+  leases?: number;
+  viewerOpen?: boolean;
+  persistent?: boolean;
 }
 
 function readDaemonInfo(stateDir: string): DaemonInfo | null {
@@ -126,11 +130,23 @@ export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null):
   const cont = (text: string) => " ".repeat(STATUS_GUTTER) + text;
   const lines: string[] = [];
 
-  lines.push(
-    daemonUp
-      ? row("daemon", `running — pid ${daemonUp.pid} · proxy 127.0.0.1:${daemonUp.proxyPort}`)
-      : row("daemon", "not running — new agent sessions go DIRECT (unmonitored)"),
-  );
+  if (daemonUp) {
+    lines.push(row("daemon", `running — pid ${daemonUp.pid} · proxy 127.0.0.1:${daemonUp.proxyPort}`));
+    // Say WHY it is running, so nobody has to wonder when it will go away.
+    if (daemonUp.persistent) {
+      lines.push(cont("installed service — always on; `beagle unwatch` removes it"));
+    } else {
+      const holds: string[] = [];
+      const n = daemonUp.leases ?? 0;
+      if (n > 0) holds.push(`${n} live session${n === 1 ? "" : "s"}`);
+      if (daemonUp.viewerOpen) holds.push("an open dashboard");
+      lines.push(cont(holds.length
+        ? `up for: ${holds.join(" · ")} — winds down after they end`
+        : "idle — winds down within a few minutes"));
+    }
+  } else {
+    lines.push(row("daemon", "not running — new agent sessions go DIRECT (unmonitored)"));
+  }
   lines.push("");
 
   const store = openStore(stateDir);
