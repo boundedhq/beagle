@@ -157,8 +157,10 @@ export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null):
   } else {
     lines.push(row("captured", `${calls} call${calls === 1 ? "" : "s"} · ${sizeMb} MB store`));
     if (otelCalls > 0) {
-      lines.push(cont(`${otelCalls} agent-reported (Mode B): the agent's self-report — prompts and`));
-      lines.push(cont("tool data are scanned too, but alerts can lag a few seconds"));
+      // Wrapped by clause, not by width: each continuation line is a complete
+      // thought, so the indented block reads as two statements, not a broken one.
+      lines.push(cont(`${otelCalls} agent-reported (Mode B): captured from the agent's self-report`));
+      lines.push(cont("prompts and tool data still scanned · alerts can lag a few seconds"));
     }
   }
   lines.push(
@@ -172,8 +174,8 @@ export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null):
       ? "none — beagle has modified nothing on this system"
       : `${manifest.summary()} — \`beagle unwatch <agent>\` reverts them`),
   );
-  lines.push(row("privacy", "local only — outbound traffic is only your agents' own calls to"));
-  lines.push(cont("their model providers · no telemetry · viewer off until requested"));
+  lines.push(row("privacy", "local only — outbound traffic is just your agents' own model calls"));
+  lines.push(cont("no telemetry · viewer off until requested"));
   return lines.join("\n");
 }
 
