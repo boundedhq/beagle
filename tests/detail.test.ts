@@ -34,6 +34,14 @@ describe("buildDetail — response reassembly (UI fix 1)", () => {
     expect(d.responseText).toBe("plain answer");
   });
 
+  test("passes byte sizes and token counts through for the detail meta line", () => {
+    const d = buildDetail(call({ bytesReq: 15872, bytesResp: 2048, tokensIn: 1240, tokensOut: 96 }), []);
+    expect(d.bytesReq).toBe(15872);
+    expect(d.bytesResp).toBe(2048);
+    expect(d.tokensIn).toBe(1240);
+    expect(d.tokensOut).toBe(96);
+  });
+
   test("structures request system + messages", () => {
     const d = buildDetail(call(), []);
     expect(d.system).toBe("be brief");

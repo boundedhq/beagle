@@ -46,11 +46,13 @@ function App() {
   const [searchTerm, setSearchTerm] = useState("");
   const [banner, setBanner] = useState(null);
   const [expanded, setExpanded] = useState(null);
+  const [stats, setStats] = useState(null); // whole-store totals — the feed is a 500-row window
   const searchBox = useRef(null);
 
   useEffect(() => {
     api.get("/api/feed").then(setCalls);
     api.get("/api/leaks").then(setLeaks);
+    api.get("/api/stats").then(setStats);
     // fetch-SSE: EventSource can't send the credential header (§6.8)
     let stop = false;
     (async () => {
@@ -83,11 +85,15 @@ function App() {
       const dataLine = lines.find((l) => l.startsWith("data:"))?.slice(5).trim();
       if (!ev || !dataLine) return;
       const data = JSON.parse(dataLine);
-      if (ev === "call") setCalls((xs) => [data, ...xs]);
+      if (ev === "call") {
+        setCalls((xs) => [data, ...xs]);
+        api.get("/api/stats").then(setStats);
+      }
       if (ev === "alert") {
         setBanner(data);
         api.get("/api/leaks").then(setLeaks);
         api.get("/api/feed").then(setCalls);
+        api.get("/api/stats").then(setStats);
       }
     }
     return () => { stop = true; };
@@ -103,13 +109,17 @@ function App() {
   const visible = calls.filter(
     (x) => (!leaksOnly || x.hasLeak) && (!sessionFilter || x.sessionId === sessionFilter),
   );
-  const sessionCount = new Set(calls.map((x) => x.sessionId)).size;
-  const agentCount = new Set(calls.map((x) => x.agent).filter(Boolean)).size;
+  // Server totals count the whole store; the feed state is only its newest
+  // 500-row window. Fall back to the window while /api/stats is in flight.
+  const callCount = stats?.calls ?? calls.length;
+  const sessionCount = stats?.sessions ?? new Set(calls.map((x) => x.sessionId)).size;
+  const agentCount = stats?.agents ?? new Set(calls.map((x) => x.agent).filter(Boolean)).size;
 
   return html`
     <header>
       <div class="brand">
         <div class="badge" aria-hidden="true">
+          <!-- the beagle mark — keep in sync with docs/assets/beagle.svg (same paths, minus the tile) -->
           <svg class="dog" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
             <path d="M13 59 C13 50 20.5 44.5 32 44.5 C43.5 44.5 51 50 51 59 Z" fill="#46311f"></path>
             <path d="M23 59 C23 49.5 27 46 32 46 C37 46 41 49.5 41 59 Z" fill="#e2d2ba"></path>
@@ -149,8 +159,8 @@ function App() {
           </div>
         </div>
         <div class="stat" title="requests captured so far">
-          <span class="num">${calls.length}</span>
-          <span class="label">call${calls.length === 1 ? "" : "s"}</span>
+          <span class="num">${callCount}</span>
+          <span class="label">call${callCount === 1 ? "" : "s"}</span>
         </div>
         <div class="stat" title="distinct sessions observed">
           <span class="num">${sessionCount}</span>
@@ -196,7 +206,7 @@ function App() {
         ${" "}<code>beagle run</code> and its traffic appears here live
       </div>`}
       ${visible.length > 0 &&
-      html`<div class="row head">
+      html`<div class="row head" aria-hidden="true">
         <span class="dot spacer"></span>
         <span class="time">time</span>
         <span class="agent">agent</span>
@@ -226,13 +236,15 @@ function Row({ x, onToggle, onSession }) {
   return html`
     <div class=${x.hasLeak ? "row leak" : "row"} onClick=${onToggle}>
       <span
-        class=${x.status && x.status >= 400 ? "dot err" : "dot"}
+        class=${x.status == null ? "dot pending" : x.status >= 400 ? "dot err" : "dot"}
         title=${x.status == null
           ? "no response recorded"
           : x.status >= 400
             ? `provider returned ${x.status}`
             : "call succeeded"}
-      ></span>
+      ><span class="sr-only">${x.status == null
+        ? "no response recorded"
+        : x.status >= 400 ? `error ${x.status}` : "ok"}</span></span>
       <span class="time">${t}</span>
       <span class="agent">${x.agent ?? "?"}</span>
       <span class="model">${x.model ?? ""}</span>
@@ -286,8 +298,8 @@ function Detail({ id }) {
         </div>
         <div>
           <span class="k">size</span> ${kb(detail.bytesReq)} sent, ${kb(detail.bytesResp)} received
-          ${detail.tokensOut != null &&
-          html` · <span class="k">tokens</span> ${detail.tokensIn ?? "?"} in → ${detail.tokensOut} out`}
+          ${(detail.tokensIn != null || detail.tokensOut != null) &&
+          html` · <span class="k">tokens</span> ${detail.tokensIn ?? "?"} in → ${detail.tokensOut ?? "?"} out`}
         </div>
         ${detail.captureState !== "ok" &&
         html`<div class="warn">⚠ capture truncated — the stored bytes are incomplete</div>`}

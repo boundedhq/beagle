@@ -16,7 +16,11 @@ body {
 /* Header — "bold identity": badge brand, live stat cards, actions. The one
    part of the page with real visual presence; the feed below stays utilitarian. */
 header {
-  display: flex; align-items: center; gap: 18px;
+  /* wrap unconditionally: when stats + actions outgrow the row (session filter
+     showing, big counts, 961-1115px windows) the actions drop to a second row
+     instead of crushing the brand to nothing */
+  display: flex; flex-wrap: wrap; align-items: center; gap: 18px; row-gap: 11px;
+  justify-content: flex-end; /* wrapped rows (stats/actions) right-align themselves */
   min-height: 104px; padding: 14px 24px;
   background: linear-gradient(180deg, #1a1e29 0%, #151821 100%);
   border-bottom: 1px solid var(--border);
@@ -35,7 +39,10 @@ header::after { /* soft brand glow, top-left */
 }
 header .brand, header .stats, header .actions { position: relative; z-index: 1; }
 
-header .brand { display: flex; align-items: center; gap: 16px; min-width: 0; flex: 1 1 auto; }
+header .brand {
+  display: flex; align-items: center; gap: 16px; min-width: 0;
+  flex: 0 1 auto; margin-right: auto; /* the gulf pushes stats + actions right */
+}
 header .badge {
   position: relative; flex: none; width: 58px; height: 58px; border-radius: 16px;
   display: flex; align-items: center; justify-content: center;
@@ -78,7 +85,7 @@ header .tagline {
 header .tagline .hl { color: #d295a1; font-weight: 500; }
 
 /* stat cards: leak state first, then the live tally */
-header .stats { display: flex; align-items: stretch; gap: 9px; flex: none; margin-left: auto; }
+header .stats { display: flex; align-items: stretch; gap: 9px; flex: none; }
 header .stat {
   display: flex; flex-direction: column; justify-content: center; gap: 4px;
   min-width: 70px; padding: 9px 12px; border-radius: 12px;
@@ -138,7 +145,7 @@ header .search input {
   box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.35);
   transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
 }
-header .search input::placeholder { color: #646d80; }
+header .search input::placeholder { color: var(--muted); }
 header .search input:focus {
   outline: none; border-color: rgba(110, 168, 254, 0.8); background: #0e1117;
   box-shadow: 0 0 0 3px rgba(110, 168, 254, 0.16), inset 0 2px 6px rgba(0, 0, 0, 0.3);
@@ -165,7 +172,7 @@ header .toggle.active .toggle-dot { background: var(--leak); border-color: var(-
 
 /* narrow: tagline goes first, then the actions drop to their own full row */
 @media (max-width: 960px) {
-  header { flex-wrap: wrap; min-height: 0; padding: 12px 18px; gap: 14px; row-gap: 11px; }
+  header { min-height: 0; padding: 12px 18px; gap: 14px; }
   header .tagline { display: none; }
   header .brand { flex: none; }
   header .actions { flex: 1 1 100%; }
@@ -176,14 +183,22 @@ header .toggle.active .toggle-dot { background: var(--leak); border-color: var(-
 @media (prefers-reduced-motion: reduce) {
   header h1 .cursor, header .leak-dot { animation: none; }
 }
+/* narrow feed: model is the most expendable column — shed it before the
+   interactive session chip gets clipped */
+@media (max-width: 760px) {
+  .row .model { display: none; }
+}
 button {
   background: var(--chip); color: var(--text); border: 1px solid var(--border);
   border-radius: 6px; padding: 5px 10px; font: inherit; cursor: pointer;
   white-space: nowrap;
 }
 button.active { border-color: var(--accent); color: var(--accent); }
-input[type="search"]:focus-visible,
 button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
 main { flex: 1; padding: 8px 16px; }
 .banner {
   background: var(--leak-bg); border: 1px solid var(--leak); color: var(--leak-fg);
@@ -196,7 +211,7 @@ main { flex: 1; padding: 8px 16px; }
 }
 .row:hover { background: var(--row-hover); }
 .row.leak { border-left-color: var(--leak); background: #1f151a; }
-.row .time { color: var(--muted); flex: 0 0 85px; white-space: nowrap; }
+.row .time { color: var(--muted); flex: 0 0 96px; white-space: nowrap; }
 .row .agent { color: var(--accent); flex: 0 0 100px; overflow: hidden; text-overflow: ellipsis; }
 .row .model { color: var(--muted); flex: 0 0 130px; overflow: hidden; text-overflow: ellipsis; }
 .row .summary { flex: 1 1 auto; min-width: 120px; overflow: hidden; text-overflow: ellipsis; }
@@ -210,6 +225,7 @@ main { flex: 1; padding: 8px 16px; }
 .row.head .dot.spacer { background: transparent; }
 .dot { flex: 0 0 8px; height: 8px; border-radius: 50%; background: var(--ok); align-self: center; }
 .dot.err { background: var(--leak); }
+.dot.pending { background: transparent; border: 1.5px solid var(--muted); }
 .chip {
   background: var(--chip); border: 1px solid var(--border); border-radius: 10px;
   padding: 1px 8px; font-size: 12px; color: var(--muted);
