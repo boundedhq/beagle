@@ -113,7 +113,7 @@ interface Turn {
   sessionId?: string;
   tsNano?: number;
   prompt?: string;
-  toolInputs: string[];
+  tools: Array<{ name?: string; input: string }>;
   response?: string;
   model?: string;
   tokensIn?: number;
@@ -159,8 +159,16 @@ function buildTurnCall(t: Turn, ctx: OtlpContext): OtelCall {
   // The scanned body is the outbound leak surface: the prompt + every tool
   // input, raw, so a secret in any of them is caught. The response is inbound
   // (not a leak vector) and rides response.text for display only.
-  const scanText = [t.prompt ?? "", ...t.toolInputs].filter(Boolean).join("\n");
+  const scanText = [t.prompt ?? "", ...t.tools.map((c) => c.input)].filter(Boolean).join("\n");
   const promptDisplay = t.prompt ? flattenPromptText(t.prompt) : "";
+  // Surface tool calls as readable messages (role "tool"), not only in the
+  // scanned body — otherwise a tool-call-only turn reads "(no message content)"
+  // in the feed and its input never reaches the search index (searchText is
+  // built from messages). Name-prefixed for display; the leak-surface scanText
+  // stays inputs-only.
+  const messages: Array<{ role: string; content: string }> = [];
+  if (promptDisplay) messages.push({ role: "user", content: promptDisplay });
+  for (const c of t.tools) messages.push({ role: "tool", content: c.name ? `${c.name}: ${c.input}` : c.input });
   return {
     id: ulid(ts),
     runId: "otel",
@@ -171,7 +179,7 @@ function buildTurnCall(t: Turn, ctx: OtlpContext): OtelCall {
     endpoint: "otel:claude_code.turn",
     request: {
       bodyBytes: new TextEncoder().encode(scanText),
-      messages: promptDisplay ? [{ role: "user", content: promptDisplay }] : [],
+      messages,
     },
     response: {
       text: t.response ?? "",
@@ -212,7 +220,7 @@ export function mapOtlpLogsToCalls(payload: unknown, ctx: OtlpContext): OtelCall
         const key = promptId ? `${sessionId ?? ""}::${promptId}` : `${sessionId ?? ""}::orphan-${i}`;
         let turn = turns.get(key);
         if (!turn) {
-          turn = { order: i, sessionId, toolInputs: [] };
+          turn = { order: i, sessionId, tools: [] };
           turns.set(key, turn);
         }
         const ns = recordNano(rec);
@@ -221,7 +229,7 @@ export function mapOtlpLogsToCalls(payload: unknown, ctx: OtlpContext): OtelCall
           turn.prompt = str(a.get("prompt")) ?? turn.prompt;
         } else if (name === "tool_result") {
           const ti = str(a.get("tool_input"));
-          if (ti) turn.toolInputs.push(ti);
+          if (ti) turn.tools.push({ name: str(a.get("tool_name")), input: ti });
         } else if (name === "assistant_response") {
           turn.response = str(a.get("response")) ?? turn.response;
           // The model on assistant_response is authoritative — it's the model
@@ -240,7 +248,7 @@ export function mapOtlpLogsToCalls(payload: unknown, ctx: OtlpContext): OtelCall
       }
     }
     return [...turns.values()]
-      .filter((t) => t.prompt || t.response || t.toolInputs.length > 0)
+      .filter((t) => t.prompt || t.response || t.tools.length > 0)
       .sort((x, y) => x.order - y.order)
       .map((t) => buildTurnCall(t, ctx));
   } catch {
