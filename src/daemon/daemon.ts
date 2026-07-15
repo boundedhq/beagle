@@ -172,7 +172,18 @@ export class Daemon {
     return d;
   }
 
-  async stop(): Promise<void> {
+  // Concurrent callers must await the SAME drain, not race it: `stop()` is
+  // bound to both SIGINT and SIGTERM (cli/main.ts) and is also reached from
+  // idle-exit and the shutdown command, each doing `stop().then(process.exit)`.
+  // A second caller returning early — as it would on the isRunning guard alone
+  // — exits the process out from under the first caller's in-flight write,
+  // which is the loss this drain exists to prevent. A double Ctrl-C is enough.
+  stop(): Promise<void> {
+    return (this.stopping ??= this.doStop());
+  }
+  private stopping: Promise<void> | null = null;
+
+  private async doStop(): Promise<void> {
     if (!this.isRunning) return;
     this.isRunning = false;
     if (this.idleTimer) clearTimeout(this.idleTimer);
@@ -237,12 +248,19 @@ export class Daemon {
     this.pending.set(ctx.callId, entry);
 
     const result = await this.scanHost.scan(bytes, { authValue: ctx.authValue });
-    entry.findings = result.findings;
-    if (result.state === "incomplete") {
-      entry.scanState = "incomplete";
-      this.store.updateCallScanState(ctx.callId, "incomplete"); // no-op if not yet inserted
+    try {
+      entry.findings = result.findings;
+      if (result.state === "incomplete") {
+        entry.scanState = "incomplete";
+        this.store.updateCallScanState(ctx.callId, "incomplete"); // no-op if not yet inserted
+      }
+    } finally {
+      // captureCall awaits scanDone with no timeout, so this must resolve on
+      // every path: a store error above would otherwise wedge that capture
+      // forever — and now that stop() drains in-flight work, wedge shutdown
+      // with it. Resolving early is safe; findings/scanState are already set.
+      resolveScan();
     }
-    resolveScan();
     this.alertEngine.process(
       {
         id: ctx.callId,

@@ -45,7 +45,9 @@ function otlpBody(_token: string, prompt: string | null, sessionId = "otel-conv-
 // the daemon's status call count (insertCall precedes the alert pass with no
 // await between them), or the alert sink (the leak-event row is written
 // before the sink fires — engine.ts).
-async function waitFor(cond: () => boolean | Promise<boolean>, what: string, timeoutMs = 10_000): Promise<void> {
+// Default stays under bun's 5s per-test timeout, so a real regression surfaces
+// as "timed out waiting for <what>" rather than a bare bun timeout.
+async function waitFor(cond: () => boolean | Promise<boolean>, what: string, timeoutMs = 4_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!(await cond())) {
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
