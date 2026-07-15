@@ -100,6 +100,18 @@ describe("OTLP → Call mapping — Claude Code's real event schema (Mode B)", (
     expect(decode(c.request.bodyBytes)).toBe('{"tz":"America/Los_Angeles"}'); // leak surface: input only, no name
   });
 
+  test("a normal turn (prompt + tool) keeps the user message AND appends the tool call, in order", () => {
+    // Regression guard: adding tool messages must not drop or reorder the user
+    // prompt. The scanned body is prompt + tool input; the response still wins
+    // the summary (verified in summary.test.ts), so normal rows are unchanged.
+    const c = mapOtlpLogsToCalls(logs(turnRecords({ prompt: "check the tz", toolInput: '{"cmd":"date"}' })), ctx)[0]!;
+    expect(c.request.messages).toEqual([
+      { role: "user", content: "check the tz" },
+      { role: "tool", content: 'Bash: {"cmd":"date"}' },
+    ]);
+    expect(decode(c.request.bodyBytes)).toBe('check the tz\n{"cmd":"date"}'); // prompt + tool input
+  });
+
   test("operational events (hooks, mcp, plugin, tool_decision) produce no calls", () => {
     const noise = logs([
       event("hook_execution_start", { "session.id": "s", hook_event: "SessionStart" }),
