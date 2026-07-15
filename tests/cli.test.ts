@@ -123,9 +123,41 @@ describe("CLI commands (headless loop, R12)", () => {
 
   test("status: trust-strip text works with no daemon running", () => {
     const out = cmdStatus(stateDir);
-    expect(out.toLowerCase()).toContain("daemon: not running");
-    expect(out).toContain("calls: 1");
+    expect(out.toLowerCase()).toContain("not running");
+    expect(out).toContain("1 call");
+    expect(out).toContain("1 detected");
     expect(out.toLowerCase()).toContain("local only");
+    expect(out).not.toContain("\x1b"); // trust strip must never emit terminal escapes
+  });
+
+  test("status: every value line is label-aligned into two columns", () => {
+    const out = cmdStatus(stateDir);
+    for (const line of out.split("\n")) {
+      if (line === "") continue;
+      // 11-char label gutter: either a label padded to the gutter or a
+      // continuation line of pure indent
+      expect(line.length).toBeGreaterThan(11);
+      expect(line[11]).not.toBe(" ");
+      expect(/^[a-z ]{11}$/.test(line.slice(0, 11))).toBe(true);
+    }
+  });
+
+  test("status: discloses the Mode B content gap whenever agent-reported calls exist (R2)", () => {
+    const store = Store.open(stateDir);
+    const otel: CallRecord = {
+      id: ulid(), sessionId: "s2", runId: "r2", source: "otel",
+      agent: "claude-code", provider: "anthropic", model: "claude-sonnet-5",
+      endpoint: "otlp", tsRequest: Date.now(), tsResponse: Date.now(),
+      status: 200, tokensIn: 1, tokensOut: 1, bytesReq: 10, bytesResp: 10,
+      summary: "otel", scanState: "ok", captureState: "ok", sessionTier: "run",
+      requestBody: new TextEncoder().encode("{}"), requestHeaders: [],
+      responseBody: null, responseHeaders: [], sseRaw: null, searchText: "otel",
+    };
+    store.insertCall(otel);
+    store.close();
+    const out = cmdStatus(stateDir);
+    expect(out).toContain("1 agent-reported (Mode B)");
+    expect(out.toLowerCase()).toContain("lag");
   });
 });
 

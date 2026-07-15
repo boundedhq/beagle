@@ -114,13 +114,25 @@ async function ensureDaemon(stateDir: string): Promise<DaemonInfo | null> {
   return daemon;
 }
 
+// Two-column trust strip: a 10-char label gutter, values (and their wrapped
+// continuations) aligned after it, blank lines between the three groups —
+// coverage, what's stored, what beagle touched. Plain text only (no ANSI:
+// captured content must never smuggle escapes to a terminal, so this command
+// never normalizes any).
+const STATUS_GUTTER = 11;
+
 export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null): string {
+  const row = (label: string, text: string) => label.padEnd(STATUS_GUTTER) + text;
+  const cont = (text: string) => " ".repeat(STATUS_GUTTER) + text;
   const lines: string[] = [];
-  if (daemonUp) {
-    lines.push(`daemon: running (pid ${daemonUp.pid}, proxy 127.0.0.1:${daemonUp.proxyPort})`);
-  } else {
-    lines.push("daemon: not running — agents launched now go DIRECT (unmonitored)");
-  }
+
+  lines.push(
+    daemonUp
+      ? row("daemon", `running — pid ${daemonUp.pid} · proxy 127.0.0.1:${daemonUp.proxyPort}`)
+      : row("daemon", "not running — new agent sessions go DIRECT (unmonitored)"),
+  );
+  lines.push("");
+
   const store = openStore(stateDir);
   if (isStoreError(store)) return lines.concat(store.error).join("\n");
   const calls = store?.countCalls() ?? 0;
@@ -134,21 +146,34 @@ export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null):
   const dbPath = join(stateDir, "beagle.db");
   const sizeMb = existsSync(dbPath) ? (statSync(dbPath).size / (1 << 20)).toFixed(1) : "0.0";
   const cfg = loadConfig(stateDir);
-  lines.push(`calls: ${calls} · leaks: ${leaks} · store: ${sizeMb} MB`);
-  if (otelCalls > 0) {
-    lines.push(
-      `  ${otelCalls} agent-reported (Mode B, --telemetry): self-report — prompts, ` +
-        `tool inputs, and tool outputs are scanned; alerts lag seconds`,
-    );
+
+  lines.push(
+    row("leaks", leaks === 0
+      ? "none detected"
+      : `${leaks} detected — see \`beagle leaks\``),
+  );
+  if (calls === 0) {
+    lines.push(row("captured", "nothing yet — wrap an agent with `beagle run <agent>`"));
+  } else {
+    lines.push(row("captured", `${calls} call${calls === 1 ? "" : "s"} · ${sizeMb} MB store`));
+    if (otelCalls > 0) {
+      lines.push(cont(`${otelCalls} agent-reported (Mode B): the agent's self-report — prompts and`));
+      lines.push(cont("tool data are scanned too, but alerts can lag a few seconds"));
+    }
   }
   lines.push(
-    `retention: ${cfg.payloadWindowDays}d / ${cfg.sizeCapMB} MB payloads · ${cfg.eventWindowDays}d leak events`,
+    row("retention", `payloads ${cfg.payloadWindowDays} days / ${cfg.sizeCapMB} MB · leak events ${cfg.eventWindowDays} days`),
   );
+  lines.push("");
+
   const manifest = new ChangeManifest(stateDir);
-  lines.push(manifest.summary() + (manifest.list().length ? " (beagle unwatch <agent> to revert)" : ""));
   lines.push(
-    "local only · outbound connections: only your model providers · telemetry: none · viewer: off until requested",
+    row("changes", manifest.list().length === 0
+      ? "none — beagle has modified nothing on this system"
+      : `${manifest.summary()} — \`beagle unwatch <agent>\` reverts them`),
   );
+  lines.push(row("privacy", "local only — outbound traffic is only your agents' own calls to"));
+  lines.push(cont("their model providers · no telemetry · viewer off until requested"));
   return lines.join("\n");
 }
 
