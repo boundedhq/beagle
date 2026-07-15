@@ -1039,6 +1039,23 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
       );
     }
   }
+  // Quiet-tier detections (R5) never fire an OS alert, so a session's only
+  // trace of them would otherwise be `beagle leaks`. Surface a per-session
+  // count in the terminal — visible without the notification spam that
+  // motivated keeping the "possible" tier quiet. Skipped when a warning above
+  // already fired (nothing was captured, so there are no leaks to report), and
+  // gated on the same ~instant-run threshold the tripwire uses — a sub-3s run
+  // can't have produced a leak, so don't open the store to count zero.
+  if (!warned && !excluded && Date.now() - t0 >= 3_000) {
+    const possible = countPossibleLeaksSince(stateDir, t0);
+    if (possible > 0) {
+      warned = true; // a security notice outranks the graduation nudge below
+      process.stderr.write(
+        `beagle ▲ ${possible} possible secret${possible === 1 ? "" : "s"} flagged this session ` +
+          `(lower-confidence, not alerted) — review with: beagle leaks\n`,
+      );
+    }
+  }
   // Graduation nudge AFTER the agent exits (R2: full-screen TUIs wipe earlier
   // output) and only when capture actually worked — a warning above already
   // names the right command, and nudging toward watching a failing mode would
@@ -1106,6 +1123,26 @@ export async function runCallsArrived(stateDir: string, runId: string, deadlineM
     if (n !== 0) return true;
     if (Date.now() - t0 >= deadlineMs) return false;
     await Bun.sleep(250);
+  }
+}
+
+// Count quiet-tier ("possible") leak events recorded since `sinceTs` — the
+// per-session surface for detections that never fired an OS alert (R5).
+// Read-only, non-core. Exported for tests.
+export function countPossibleLeaksSince(stateDir: string, sinceTs: number): number {
+  const store = openStore(stateDir);
+  if (store === null || isStoreError(store)) return 0;
+  try {
+    return (
+      store.queryAll<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM leak_events WHERE confidence_tier='possible' AND last_ts >= ?",
+        [sinceTs],
+      )[0]?.n ?? 0
+    );
+  } catch {
+    return 0;
+  } finally {
+    store.close();
   }
 }
 

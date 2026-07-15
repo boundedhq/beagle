@@ -353,12 +353,17 @@ function Detail({ id }) {
 // values and builds text nodes only — never raw-HTML injection (§6.8).
 function Highlighted({ text, leaks }) {
   if (!leaks || leaks.length === 0 || typeof text !== "string") return text ?? "";
+  // value → tier, so each mark is colored by confidence. The louder
+  // "structured" tier wins if the same value was flagged under both.
+  const tierOf = new Map();
+  for (const l of leaks) {
+    if (!l.value) continue;
+    if (l.tier === "structured" || !tierOf.has(l.value)) tierOf.set(l.value, l.tier);
+  }
   // Longest-first so that when two values share a start (one a prefix of the
   // other, e.g. a password nested in a connection string) the longer wins and
   // the highlight isn't fragmented.
-  const values = [...new Set(leaks.map((l) => l.value).filter(Boolean))].sort(
-    (a, b) => b.length - a.length,
-  );
+  const values = [...tierOf.keys()].sort((a, b) => b.length - a.length);
   const out = [];
   let rest = text;
   let guard = 0;
@@ -372,7 +377,13 @@ function Highlighted({ text, leaks }) {
     }
     if (at === -1) { out.push(rest); break; }
     if (at > 0) out.push(rest.slice(0, at));
-    out.push(html`<mark class="leak" title="detected secret">${hit}</mark>`);
+    // Structured = red (loud, alerted); possible = amber (lower confidence,
+    // logged but never alerted) — the distinction the user can't get otherwise.
+    const possible = tierOf.get(hit) === "possible";
+    out.push(html`<mark
+      class=${possible ? "leak possible" : "leak"}
+      title=${possible ? "possible secret — lower confidence, not alerted" : "detected secret"}
+    >${hit}</mark>`);
     rest = rest.slice(at + hit.length);
   }
   return html`${out}`;

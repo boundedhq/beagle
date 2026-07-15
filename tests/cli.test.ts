@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, cmdUninstall, detectLine, interpretAskAnswer, otelCallsArrivedSince, parseRunArgs, readCodexApiKey, resolveRunMode, runCallsArrived } from "../src/cli/commands";
+import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, cmdUninstall, countPossibleLeaksSince, detectLine, interpretAskAnswer, otelCallsArrivedSince, parseRunArgs, readCodexApiKey, resolveRunMode, runCallsArrived } from "../src/cli/commands";
 import { buildRunEnv, AGENTS } from "../src/cli/agents";
 import { Store, type CallRecord } from "../src/core/store/store";
 import { ulid } from "../src/core/store/ulid";
@@ -191,6 +191,27 @@ describe("CLI commands (headless loop, R12)", () => {
     const out = cmdStatus(stateDir);
     expect(out).toContain("1 agent-reported (Mode B)");
     expect(out.toLowerCase()).toContain("lag");
+  });
+});
+
+describe("countPossibleLeaksSince (the run-end quiet-tier surface)", () => {
+  test("counts only possible-tier leaks recorded since the timestamp", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-plk-"));
+    const store = Store.open(dir);
+    const now = Date.now();
+    const ev = (fp: string, tier: string, ts: number) =>
+      store.upsertLeakEvent({
+        fingerprint: fp, sessionId: "s", detector: "generic-api-key", secretType: "generic-api-key",
+        severity: "medium", confidenceTier: tier, destination: "anthropic", callId: "c-" + fp, ts,
+      });
+    ev("f1", "structured", now); // loud tier — excluded
+    ev("f2", "possible", now);   // counts
+    ev("f3", "possible", now);   // counts
+    ev("f4", "possible", now - 10_000); // before the window — excluded
+    store.close();
+    expect(countPossibleLeaksSince(dir, now - 1_000)).toBe(2);
+    // no store / nothing recorded → 0, never throws
+    expect(countPossibleLeaksSince(mkdtempSync(join(tmpdir(), "beagle-plk-empty-")), 0)).toBe(0);
   });
 });
 
