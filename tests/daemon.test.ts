@@ -543,3 +543,49 @@ describe("Daemon end-to-end", () => {
     store.close();
   });
 });
+
+// stop() drains in-flight pipeline writes before closing the store. Both ways
+// that drain can betray its own purpose — returning before it finishes, or
+// never finishing — lose the write it exists to protect, so both are pinned.
+describe("Daemon shutdown", () => {
+  test("concurrent stop() callers await the same drain", async () => {
+    // stop() is bound to SIGINT *and* SIGTERM (cli/main.ts), and idle-exit and
+    // the shutdown command reach it too — each as stop().then(process.exit).
+    // A double Ctrl-C must not exit out from under the first caller's drain.
+    const dir = mkdtempSync(join(tmpdir(), "beagle-stop-race-"));
+    const d = await Daemon.start({ stateDir: dir, persistent: true, exitProcessOnIdle: false });
+    const first = d.stop();
+    const second = d.stop();
+    expect(second).toBe(first); // one drain, not a race
+    await Promise.all([first, second]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("stop() completes when the store throws mid-scan-pipeline", async () => {
+    // captureCall awaits scanDone with no timeout, so a throw between the scan
+    // and resolveScan() would wedge the capture — and the drain with it. The
+    // 5s per-test timeout is the assertion: pre-fix this hung forever.
+    const up = await fakeUpstream();
+    const dir = mkdtempSync(join(tmpdir(), "beagle-stop-wedge-"));
+    const d = await Daemon.start({
+      stateDir: dir, persistent: true, exitProcessOnIdle: false,
+      scanDeadlineMs: 0, // every scan reports incomplete → updateCallScanState runs
+      alertSinkForTest: () => {},
+    });
+    await controlRequest(d.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    await controlRequest(d.socketPath, {
+      cmd: "register-run",
+      args: { id: "run-wedge", agent: "claude-code", provider: "anthropic",
+        upstream: `http://127.0.0.1:${up.port}`, authLocation: "x-api-key" },
+    });
+    (d as unknown as { store: { updateCallScanState: () => void } }).store.updateCallScanState = () => {
+      throw new Error("Database has closed");
+    };
+    await sendThroughProxy(d.proxyPort, "run-wedge", JSON.stringify({
+      model: "claude-sonnet-5", messages: [{ role: "user", content: "hello there" }],
+    }));
+    await d.stop();
+    up.server.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

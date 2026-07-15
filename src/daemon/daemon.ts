@@ -93,6 +93,10 @@ export class Daemon {
   otlpPort = 0;
   private otlpToken = "";
   private pending = new Map<string, PendingCall>();
+  // Detached pipeline work (scan / capture / Mode B ingest) still holding a
+  // store write. stop() drains this before closing the store — closing under
+  // a mid-flight write loses the row and throws "Database has closed".
+  private inflight = new Set<Promise<void>>();
   // Calls whose request was skipped (paused / excluded agent) — the capture
   // must drop these even if the daemon was resumed or the agent un-excluded
   // before the response landed. Swept alongside `pending`.
@@ -134,8 +138,8 @@ export class Daemon {
     d.alertEngine = new AlertEngine(d.store, (a) => d.emitAlert(a));
     d.proxy = new ProxyServer({
       registry: d.registry,
-      scan: (bytes, ctx) => d.scanPipeline(bytes, ctx),
-      onCall: (call) => void d.captureCall(call).catch(() => {}),
+      scan: (bytes, ctx) => d.track(d.scanPipeline(bytes, ctx)),
+      onCall: (call) => void d.track(d.captureCall(call)),
       captureBufferCap: 8 << 20,
     });
     await d.proxy.listen(0);
@@ -145,7 +149,7 @@ export class Daemon {
     d.otlpToken = randomBytes(24).toString("hex");
     d.otlp = new OtlpReceiver({
       token: d.otlpToken,
-      onCalls: (exs) => d.ingestOtel(exs),
+      onCalls: (exs) => void d.track(d.ingestOtel(exs)),
     });
     d.otlpPort = await d.otlp.listen(0);
     d.control = await startControlServer(d.socketPath, (req, sock) => d.handleControl(req, sock));
@@ -168,7 +172,18 @@ export class Daemon {
     return d;
   }
 
-  async stop(): Promise<void> {
+  // Concurrent callers must await the SAME drain, not race it: `stop()` is
+  // bound to both SIGINT and SIGTERM (cli/main.ts) and is also reached from
+  // idle-exit and the shutdown command, each doing `stop().then(process.exit)`.
+  // A second caller returning early — as it would on the isRunning guard alone
+  // — exits the process out from under the first caller's in-flight write,
+  // which is the loss this drain exists to prevent. A double Ctrl-C is enough.
+  stop(): Promise<void> {
+    return (this.stopping ??= this.doStop());
+  }
+  private stopping: Promise<void> | null = null;
+
+  private async doStop(): Promise<void> {
     if (!this.isRunning) return;
     this.isRunning = false;
     if (this.idleTimer) clearTimeout(this.idleTimer);
@@ -177,6 +192,10 @@ export class Daemon {
     this.otlp?.close();
     this.proxy.close();
     this.control.close();
+    // Listeners are closed (no new work starts — the pipeline entry points
+    // also check isRunning); drain what's already in flight before closing
+    // the scanner and store it writes to.
+    while (this.inflight.size > 0) await Promise.all([...this.inflight]);
     this.scanHost.close();
     this.store.close();
     rmSync(join(this.opts.stateDir, "daemon.json"), { force: true });
@@ -185,7 +204,19 @@ export class Daemon {
 
   // ---- pipeline ----
 
+  /** Register detached pipeline work for the stop() drain. Never rejects —
+   *  a pipeline failure must not surface as an unhandled rejection. */
+  private track(work: Promise<unknown>): Promise<void> {
+    const settled = work.then(
+      () => void this.inflight.delete(settled),
+      () => void this.inflight.delete(settled),
+    );
+    this.inflight.add(settled);
+    return settled;
+  }
+
   private async scanPipeline(bytes: Uint8Array, ctx: ScanContext): Promise<void> {
+    if (!this.isRunning) return;
     this.lastActivityTs = Date.now();
     if (this.paused || this.config.excludedAgents.includes(ctx.agent ?? "")) {
       // The skip decision is per-call, made here: these bytes are never
@@ -217,12 +248,19 @@ export class Daemon {
     this.pending.set(ctx.callId, entry);
 
     const result = await this.scanHost.scan(bytes, { authValue: ctx.authValue });
-    entry.findings = result.findings;
-    if (result.state === "incomplete") {
-      entry.scanState = "incomplete";
-      this.store.updateCallScanState(ctx.callId, "incomplete"); // no-op if not yet inserted
+    try {
+      entry.findings = result.findings;
+      if (result.state === "incomplete") {
+        entry.scanState = "incomplete";
+        this.store.updateCallScanState(ctx.callId, "incomplete"); // no-op if not yet inserted
+      }
+    } finally {
+      // captureCall awaits scanDone with no timeout, so this must resolve on
+      // every path: a store error above would otherwise wedge that capture
+      // forever — and now that stop() drains in-flight work, wedge shutdown
+      // with it. Resolving early is safe; findings/scanState are already set.
+      resolveScan();
     }
-    resolveScan();
     this.alertEngine.process(
       {
         id: ctx.callId,
@@ -236,6 +274,7 @@ export class Daemon {
   }
 
   private async captureCall(call: CapturedCall): Promise<void> {
+    if (!this.isRunning) return; // late delivery during shutdown — store may be closing
     if (this.skipped.delete(call.id)) return; // request-time skip is final
     const stash = this.pending.get(call.id);
     // redact-on-capture (R11): await the scan verdict and substitute the raw
@@ -375,6 +414,7 @@ export class Daemon {
   // scanner/session/alert/store path — source='otel' is the only difference,
   // surfaced as the agent-reported badge (R7).
   private async ingestOtel(calls: OtelCall[]): Promise<void> {
+    if (!this.isRunning) return; // late delivery during shutdown — store may be closing
     this.lastActivityTs = Date.now();
     for (const call of calls) {
       if (this.paused || this.config.excludedAgents.includes(call.agent ?? "")) continue;
@@ -605,6 +645,11 @@ export class Daemon {
             calls: this.store.countCalls(),
             leaks: this.store.countLeakEvents(),
             leases: this.leases,
+            // Pipeline work not yet finished. One entry per batch, so 0 means
+            // every call in every delivered batch is scanned, stored, and
+            // alerted — the quiesce signal tests need to assert exact counts
+            // without racing, and a real "is it still working?" diagnostic.
+            inflight: this.inflight.size,
             viewerOpen: this.viewer?.isRunning ?? false,
             persistent: this.persistent,
           },
