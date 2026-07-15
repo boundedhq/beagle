@@ -43,6 +43,8 @@ export interface CallRecord {
   responseBody: Uint8Array | null;
   responseHeaders: Array<[string, string]> | null;
   sseRaw: Uint8Array | null;
+  /** Mode B only: pre-flattened display messages (the self-report's structure). */
+  displayMessages?: Array<{ role: string; content: string }> | null;
   searchText: string;
 }
 
@@ -166,9 +168,10 @@ export class Store {
       );
       this.db.run(
         `INSERT INTO payloads (exchange_id, request_body, request_headers,
-           response_body, response_headers, sse_raw) VALUES (?,?,?,?,?,?)`,
+           response_body, response_headers, sse_raw, display_messages) VALUES (?,?,?,?,?,?,?)`,
         [call.id, call.requestBody, call.requestHeaders ? JSON.stringify(call.requestHeaders) : null,
-         call.responseBody, call.responseHeaders ? JSON.stringify(call.responseHeaders) : null, call.sseRaw],
+         call.responseBody, call.responseHeaders ? JSON.stringify(call.responseHeaders) : null, call.sseRaw,
+         call.displayMessages ? JSON.stringify(call.displayMessages) : null],
       );
       this.db.run(`INSERT INTO exchanges_fts (content, exchange_id) VALUES (?,?)`,
         [call.searchText, call.id]);
@@ -178,7 +181,7 @@ export class Store {
   getCall(idOrPrefix: string): CallRecord | null {
     const rows = this.db.all<Record<string, unknown>>(
       `SELECT e.*, p.request_body, p.request_headers, p.response_body,
-              p.response_headers, p.sse_raw
+              p.response_headers, p.sse_raw, p.display_messages
        FROM exchanges e LEFT JOIN payloads p ON p.exchange_id = e.id
        WHERE e.id LIKE ? ESCAPE '\\' LIMIT 2`,
       [escapeLike(idOrPrefix) + "%"],
@@ -246,12 +249,7 @@ export class Store {
   }
 
   fingerprintKnown(fingerprint: string): boolean {
-    return (
-      this.db.get<{ n: number }>(
-        `SELECT COUNT(*) AS n FROM leak_events WHERE fingerprint = ?`,
-        [fingerprint],
-      )?.n ?? 0
-    ) > 0;
+    return this.db.get(`SELECT 1 FROM leak_events WHERE fingerprint = ? LIMIT 1`, [fingerprint]) !== null;
   }
 
   insertSession(s: {
@@ -266,16 +264,13 @@ export class Store {
     );
   }
 
-  updateSession(
-    id: string,
-    fields: { lastTs?: number; convId?: string; headHash?: string },
-  ): void {
-    if (fields.lastTs !== undefined)
-      this.db.run(`UPDATE sessions SET last_ts=? WHERE id=?`, [fields.lastTs, id]);
-    if (fields.convId !== undefined)
-      this.db.run(`UPDATE sessions SET conv_id=? WHERE id=?`, [fields.convId, id]);
-    if (fields.headHash !== undefined)
-      this.db.run(`UPDATE sessions SET head_hash=? WHERE id=?`, [fields.headHash, id]);
+  // Absent fields keep their stored value (callers only ever set, never null).
+  updateSession(id: string, f: { lastTs?: number; convId?: string; headHash?: string }): void {
+    this.db.run(
+      `UPDATE sessions SET last_ts=COALESCE(?,last_ts), conv_id=COALESCE(?,conv_id),
+         head_hash=COALESCE(?,head_hash) WHERE id=?`,
+      [f.lastTs ?? null, f.convId ?? null, f.headHash ?? null, id],
+    );
   }
 
   // Session lookups are always scoped by agent+provider: sessions are
@@ -442,6 +437,7 @@ function migrate(db: Db, from: number): void {
     add("leak_occurrences", "span_end INTEGER");
     add("exchanges", "redacted INTEGER");
   }
+  if (from < 3) add("payloads", "display_messages TEXT");
 }
 
 function escapeLike(s: string): string {
@@ -475,6 +471,7 @@ function rowToCall(r: Record<string, unknown>): CallRecord {
     responseBody: (r.response_body as Uint8Array) ?? null,
     responseHeaders: r.response_headers ? JSON.parse(r.response_headers as string) : null,
     sseRaw: (r.sse_raw as Uint8Array) ?? null,
+    displayMessages: r.display_messages ? JSON.parse(r.display_messages as string) : null,
     searchText: "",
   };
 }

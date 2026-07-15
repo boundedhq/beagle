@@ -7,6 +7,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { Store } from "../core/store/store";
 import { feedStats, listCalls, listLeakEvents } from "./feed-query";
 import { buildDetail, leakSpansFor } from "./detail";
+import { buildSessionTurns, listSessions } from "./session-view";
 // Statics embedded at build time (ships-what's-in-repo, and the compiled
 // binary has no filesystem view of the repo).
 import indexHtmlRaw from "./static/index.html" with { type: "text" };
@@ -229,6 +230,11 @@ export class ViewerServer {
         });
       } else if (path === "/api/leaks" && req.method === "GET") {
         this.json(res, 200, listLeakEvents(store));
+      } else if (path === "/api/sessions" && req.method === "GET") {
+        this.json(res, 200, listSessions(store, 200));
+      } else if (path.startsWith("/api/session/") && req.method === "GET") {
+        // the whole session as a chronological conversation (session-view.ts)
+        this.json(res, 200, buildSessionTurns(store, path.slice("/api/session/".length)));
       } else {
         this.json(res, 404, { error: "no such endpoint" });
       }

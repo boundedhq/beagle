@@ -1,6 +1,6 @@
 // Schema from design §4. Version stamped in PRAGMA user_version; every
 // reader checks it before querying (two binaries share this file).
-export const SCHEMA_VERSION = 2; // v2: leak_occurrences span columns (R7 highlight)
+export const SCHEMA_VERSION = 3; // v3: payloads.display_messages (Mode B structure)
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS exchanges (
@@ -29,7 +29,11 @@ CREATE TABLE IF NOT EXISTS payloads (
   request_headers  TEXT,
   response_body BLOB,
   response_headers TEXT,
-  sse_raw       BLOB
+  sse_raw       BLOB,
+  -- Mode B only: the self-report's pre-flattened display messages (JSON array
+  -- of {role, content}). Wire rows leave this NULL — their structure re-parses
+  -- from request_body. Redact-on-capture scrubs this like summary/searchText.
+  display_messages TEXT
 );
 
 CREATE TABLE IF NOT EXISTS leak_events (
