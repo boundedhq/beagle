@@ -182,8 +182,6 @@ header .toggle.active .toggle-dot { background: var(--leak); border-color: var(-
 @media (prefers-reduced-motion: reduce) {
   header h1 .cursor, header .leak-dot { animation: none; }
 }
-/* narrow feed: model is the most expendable column — shed it before the
-   interactive session chip gets clipped */
 button {
   background: var(--chip); color: var(--text); border: 1px solid var(--border);
   border-radius: 6px; padding: 5px 10px; font: inherit; cursor: pointer;
