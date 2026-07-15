@@ -182,11 +182,6 @@ header .toggle.active .toggle-dot { background: var(--leak); border-color: var(-
 @media (prefers-reduced-motion: reduce) {
   header h1 .cursor, header .leak-dot { animation: none; }
 }
-/* narrow feed: model is the most expendable column — shed it before the
-   interactive session chip gets clipped */
-@media (max-width: 760px) {
-  .row .model { display: none; }
-}
 button {
   background: var(--chip); color: var(--text); border: 1px solid var(--border);
   border-radius: 6px; padding: 5px 10px; font: inherit; cursor: pointer;
@@ -215,6 +210,14 @@ main { flex: 1; padding: 8px 16px; }
 .row .model { color: var(--muted); flex: 0 0 130px; overflow: hidden; text-overflow: ellipsis; }
 .row .summary { flex: 1 1 auto; min-width: 120px; overflow: hidden; text-overflow: ellipsis; }
 .row .session { flex: 0 0 78px; text-align: right; margin-left: auto; }
+/* Narrow feed. Must stay AFTER the .row rules above: a media query adds no
+   specificity, so an override placed earlier silently loses to the base rule. */
+@media (max-width: 760px) {
+  .row .model { display: none; }
+  /* the summary already ellipsizes — let it yield further rather than push the
+     provenance/leak badges and the interactive session chip out of the row */
+  .row .summary { min-width: 60px; }
+}
 .row.head {
   cursor: default; color: var(--muted); font-size: 11px; text-transform: uppercase;
   letter-spacing: 0.6px; border-bottom: 1px solid var(--border); padding-top: 10px;

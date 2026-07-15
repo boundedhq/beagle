@@ -34,6 +34,11 @@ describe("buildDetail — response reassembly (UI fix 1)", () => {
     expect(d.responseText).toBe("plain answer");
   });
 
+  test("passes capture provenance through so the detail can explain wire vs agent-reported", () => {
+    expect(buildDetail(call({ source: "wire" }), []).source).toBe("wire");
+    expect(buildDetail(call({ source: "otel" }), []).source).toBe("otel");
+  });
+
   test("passes byte sizes and token counts through for the detail meta line", () => {
     const d = buildDetail(call({ bytesReq: 15872, bytesResp: 2048, tokensIn: 1240, tokensOut: 96 }), []);
     expect(d.bytesReq).toBe(15872);

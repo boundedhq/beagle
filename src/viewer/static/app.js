@@ -251,8 +251,11 @@ function Row({ x, onToggle, onSession }) {
       <span class="summary">${x.summary ?? "(no summary)"}</span>
       ${x.hasLeak && html`<span class="chip leak">leak</span>`}
       ${x.source === "wire"
-        ? html`<span class="chip wire" title="wire-verified — observed on the wire">✓ wire</span>`
-        : html`<span class="chip otel" title="agent-reported — the agent's own self-report">agent</span>`}
+        ? html`<span class="chip wire"
+            title="Beagle's proxy saw these exact bytes go to the provider">✓ observed</span>`
+        : html`<span class="chip otel"
+            title=${"the agent's own report of what it sent — Beagle did not see the wire, " +
+              "so this is a self-report and its alerts can lag a few seconds"}>self-reported</span>`}
       ${x.scanState !== "ok" && html`<span class="chip">scan incomplete</span>`}
       <span class="session">
         <span class="chip" title="filter to this session"
@@ -295,6 +298,11 @@ function Detail({ id }) {
         <div>
           <span class="k">session</span> ${detail.sessionId.slice(0, 8)} ·${" "}
           <span class="k">grouped by</span> ${groupedBy(detail.sessionTier)}
+        </div>
+        <div>
+          <span class="k">capture</span> ${detail.source === "wire"
+            ? "observed on the wire — Beagle's proxy saw these exact bytes leave"
+            : "the agent's own self-report (Mode B) — Beagle did not see the wire"}
         </div>
         <div>
           <span class="k">size</span> ${kb(detail.bytesReq)} sent, ${kb(detail.bytesResp)} received
