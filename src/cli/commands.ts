@@ -1043,8 +1043,10 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
   // trace of them would otherwise be `beagle leaks`. Surface a per-session
   // count in the terminal — visible without the notification spam that
   // motivated keeping the "possible" tier quiet. Skipped when a warning above
-  // already fired (nothing was captured, so there are no leaks to report).
-  if (!warned && !excluded) {
+  // already fired (nothing was captured, so there are no leaks to report), and
+  // gated on the same ~instant-run threshold the tripwire uses — a sub-3s run
+  // can't have produced a leak, so don't open the store to count zero.
+  if (!warned && !excluded && Date.now() - t0 >= 3_000) {
     const possible = countPossibleLeaksSince(stateDir, t0);
     if (possible > 0) {
       warned = true; // a security notice outranks the graduation nudge below

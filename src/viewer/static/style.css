@@ -261,9 +261,12 @@ mark.leak {
   padding: 0 3px; border-radius: 3px;
 }
 /* Lower-confidence "possible" tier: amber, not the loud red — logged but never
-   alerted, so it reads as a softer flag while still standing out from body text. */
+   alerted, so it reads as a softer flag while still standing out from body text.
+   The dotted underline is a non-color cue so the tier is distinguishable from
+   the solid-red structured mark without relying on color alone (a11y). */
 mark.leak.possible {
   background: #d98a2b; color: #241200; font-weight: 500;
+  text-decoration: underline dotted currentColor;
 }
 footer {
   padding: 8px 16px; color: var(--muted); font-size: 12px;
