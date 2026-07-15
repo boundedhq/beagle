@@ -711,7 +711,7 @@ async function aliveDaemon(stateDir: string): Promise<{ pid: number } | null> {
 // A plain-English "what the turn did" line (R7). Leads with the assistant's
 // actions (tool calls) or reply — never the raw user message, which for a
 // leak turn would echo the secret into the always-visible feed.
-function buildSummary(
+export function buildSummary(
   parsed: ParsedRequest | null,
   responseText?: string,
   actions?: ToolAction[],
@@ -730,8 +730,12 @@ function buildSummary(
   if (actions && actions.length > 0) return summarizeActions(actions);
   if (responseText) return firstLine(responseText, 100);
   if (!parsed) return "unparsed call (raw view available)";
-  const lastUser = [...parsed.messages].reverse().find((m) => m.role === "user");
-  return lastUser ? firstLine(lastUser.content, 100) : `${parsed.messages.length} messages`;
+  if (parsed.messages.length === 0) return "(no message content)";
+  // Prefer the last user message; else summarize the last message of ANY role.
+  // Mode B records are often tool-output-only (role "tool") or assistant-only —
+  // their content should show ("ToolSearch: …"), not a bare "N messages" count.
+  const pick = [...parsed.messages].reverse().find((m) => m.role === "user") ?? parsed.messages.at(-1)!;
+  return firstLine(pick.content, 100);
 }
 
 // Map coding-agent tools to verbs and group repeats: "read 3 files, ran `npm test`".
