@@ -40,6 +40,24 @@ function otlpBody(_token: string, prompt: string | null, sessionId = "otel-conv-
   };
 }
 
+// The receiver 200s before the ingest pipeline (scan → insert → alert) runs,
+// so a fixed sleep races it under CI load. Poll a completion signal instead:
+// the daemon's status call count (insertCall precedes the alert pass with no
+// await between them), or the alert sink (the leak-event row is written
+// before the sink fires — engine.ts).
+async function waitFor(cond: () => boolean | Promise<boolean>, what: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await cond())) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await Bun.sleep(10);
+  }
+}
+
+async function storedCalls(socketPath: string): Promise<number> {
+  const status = await controlRequest(socketPath, { cmd: "status" });
+  return (status.data as { calls: number }).calls;
+}
+
 describe("Mode B end-to-end through the daemon", () => {
   let stateDir: string;
   let daemon: Daemon;
@@ -72,7 +90,7 @@ describe("Mode B end-to-end through the daemon", () => {
   test("OTel-reported call is captured, labeled otel, and scanned", async () => {
     const r = await post(otlpBody(token, "please read the readme"));
     expect(r.status).toBe(200);
-    await Bun.sleep(100);
+    await waitFor(async () => (await storedCalls(daemon.socketPath)) >= 1, "the call to land in the store");
     const store = Store.openReadOnly(stateDir);
     const hits = store.searchLiteral("please read the readme");
     expect(hits.length).toBe(1);
@@ -85,7 +103,7 @@ describe("Mode B end-to-end through the daemon", () => {
 
   test("a leaked secret in an OTel-reported prompt fires the same alert", async () => {
     await post(otlpBody(token, "the key is AKIAZQ3DRSTUVWXY2345"));
-    await Bun.sleep(100);
+    await waitFor(() => alerts.length >= 1, "the leak alert to fire");
     expect(alerts.length).toBe(1);
     expect(alerts[0]!.title).toContain("aws-access-key-id");
     const store = Store.openReadOnly(stateDir);
@@ -98,7 +116,7 @@ describe("Mode B end-to-end through the daemon", () => {
     // No assistant_response in the batch: the summary falls back to the raw
     // prompt line — exactly where the secret sits.
     await post(otlpBody(token, "my key AKIAZQ3DRSTUVWXY2345 leaked", "otel-conv-r", null));
-    await Bun.sleep(150);
+    await waitFor(() => alerts.length >= 1, "the leak alert to fire");
     const store = Store.openReadOnly(stateDir);
     // the leak event still exists (audit value kept)...
     expect(listLeakEvents(store).length).toBe(1);
@@ -120,7 +138,7 @@ describe("Mode B end-to-end through the daemon", () => {
     // The prompt that leaked the key rode an earlier batch; this batch carries
     // only the assistant's echo — no request-side scan surface at all.
     await post(otlpBody(token, null, "otel-conv-echo", "your key is AKIAZQ3DRSTUVWXY2345"));
-    await Bun.sleep(150);
+    await waitFor(async () => (await storedCalls(daemon.socketPath)) >= 1, "the call to land in the store");
     const store = Store.openReadOnly(stateDir);
     expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
     const hit = store.searchLiteral("your key is")[0]!;
@@ -149,7 +167,7 @@ describe("Mode B end-to-end through the daemon", () => {
         headers: { "content-type": "application/json", "x-beagle-run": data.otlpToken },
         body: JSON.stringify(otlpBody(data.otlpToken, "unverified AKIAZQ3DRSTUVWXY2345")),
       });
-      await Bun.sleep(200);
+      await waitFor(async () => (await storedCalls(d2.socketPath)) >= 1, "the call to land in the store");
       const store = Store.openReadOnly(dir2);
       expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
       expect(store.searchLiteral("unverified")).toEqual([]); // search index withheld too
@@ -171,7 +189,8 @@ describe("Mode B end-to-end through the daemon", () => {
       body: JSON.stringify(otlpBody("wrong", "should not be stored")),
     });
     expect(r.status).toBe(401);
-    await Bun.sleep(50);
+    // No wait: the token gate 401s before the body is even read, so no ingest
+    // was ever dispatched — there is nothing asynchronous to settle.
     const store = Store.openReadOnly(stateDir);
     expect(store.searchLiteral("should not be stored")).toEqual([]);
     store.close();
@@ -212,7 +231,7 @@ describe("Mode B tool-output capture (PostToolUse hook)", () => {
       body: JSON.stringify(hook),
     });
     expect(r.status).toBe(200);
-    await Bun.sleep(150);
+    await waitFor(() => alerts.length >= 1, "the leak alert to fire");
     expect(alerts.length).toBe(1);
     expect(alerts[0]!.title).toContain("aws-access-key-id");
   });
@@ -267,7 +286,7 @@ describe("Codex Mode B end-to-end through the daemon", () => {
   test("a codex prompt is captured, labeled codex/openai, and scanned", async () => {
     const r = await post(codexBody("codex.user_prompt", { prompt: "refactor the parser", model: "gpt-5.6" }));
     expect(r.status).toBe(200);
-    await Bun.sleep(100);
+    await waitFor(async () => (await storedCalls(daemon.socketPath)) >= 1, "the call to land in the store");
     const store = Store.openReadOnly(stateDir);
     const hits = store.searchLiteral("refactor the parser");
     expect(hits.length).toBe(1);
@@ -280,7 +299,7 @@ describe("Codex Mode B end-to-end through the daemon", () => {
 
   test("a secret in a codex PROMPT fires the leak alert", async () => {
     await post(codexBody("codex.user_prompt", { prompt: "ship it with AKIAZQ3DRSTUVWXY2345" }));
-    await Bun.sleep(100);
+    await waitFor(() => alerts.length >= 1, "the leak alert to fire");
     expect(alerts.length).toBe(1);
     expect(alerts[0]!.title).toContain("aws-access-key-id");
   });
@@ -293,7 +312,7 @@ describe("Codex Mode B end-to-end through the daemon", () => {
       arguments: '{"cmd":"cat key.txt"}',
       output: "token = AKIAZQ3DRSTUVWXY2345",
     }));
-    await Bun.sleep(100);
+    await waitFor(() => alerts.length >= 1, "the leak alert to fire");
     expect(alerts.length).toBe(1);
     expect(alerts[0]!.title).toContain("aws-access-key-id");
     const store = Store.openReadOnly(stateDir);
