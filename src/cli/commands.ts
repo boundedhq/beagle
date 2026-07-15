@@ -51,6 +51,10 @@ interface DaemonInfo {
   proxyPort: number;
   socketPath: string;
   runningVersion?: string; // from the ping handshake, not daemon.json
+  // Why the daemon is up, from the control status call (status command only).
+  leases?: number;
+  viewerOpen?: boolean;
+  persistent?: boolean;
 }
 
 function readDaemonInfo(stateDir: string): DaemonInfo | null {
@@ -114,13 +118,49 @@ async function ensureDaemon(stateDir: string): Promise<DaemonInfo | null> {
   return daemon;
 }
 
+// Two-column trust strip: an 11-char label gutter, values (and their wrapped
+// continuations) aligned after it, blank lines between the three groups —
+// coverage, what's stored, what beagle touched. Emits no ANSI escapes of its
+// own and interpolates no captured traffic, which is why (unlike cmdShow) it
+// needs no clean() pass.
+const STATUS_GUTTER = 11;
+
+// Why the daemon is up, or null when we cannot know — an older daemon answers
+// `status` without these fields, and the enrich call may fail after ping
+// already proved it running. On a strip where every claim must be true,
+// unknown gets no line rather than a guessed one. `persistent` is the
+// discriminator: only a daemon that reports it speaks this protocol.
+function daemonWhy(d: DaemonInfo): string | null {
+  if (d.persistent === undefined) return null;
+  // persistent means "never idle-exits" — that covers the installed service
+  // AND a hand-run `beagle daemon`, and nothing distinguishes them from here,
+  // so say only what is true of both. (An installed service is disclosed by
+  // the changes row.)
+  if (d.persistent) return "always on — it will not wind down by itself; `beagle stop` stops it";
+  const holds: string[] = [];
+  const n = d.leases ?? 0;
+  if (n > 0) holds.push(`${n} live session${n === 1 ? "" : "s"}`);
+  if (d.viewerOpen) holds.push("an open dashboard");
+  return holds.length
+    ? `up for: ${holds.join(" · ")} — winds down after they end`
+    : "idle — winds down within a few minutes";
+}
+
 export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null): string {
+  const row = (label: string, text: string) => label.padEnd(STATUS_GUTTER) + text;
+  const cont = (text: string) => " ".repeat(STATUS_GUTTER) + text;
   const lines: string[] = [];
+
   if (daemonUp) {
-    lines.push(`daemon: running (pid ${daemonUp.pid}, proxy 127.0.0.1:${daemonUp.proxyPort})`);
+    lines.push(row("daemon", `running — pid ${daemonUp.pid} · proxy 127.0.0.1:${daemonUp.proxyPort}`));
+    // Say WHY it is running, so nobody has to wonder when it will go away.
+    const why = daemonWhy(daemonUp);
+    if (why) lines.push(cont(why));
   } else {
-    lines.push("daemon: not running — agents launched now go DIRECT (unmonitored)");
+    lines.push(row("daemon", "not running — new agent sessions go DIRECT (unmonitored)"));
   }
+  lines.push("");
+
   const store = openStore(stateDir);
   if (isStoreError(store)) return lines.concat(store.error).join("\n");
   const calls = store?.countCalls() ?? 0;
@@ -134,21 +174,36 @@ export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null):
   const dbPath = join(stateDir, "beagle.db");
   const sizeMb = existsSync(dbPath) ? (statSync(dbPath).size / (1 << 20)).toFixed(1) : "0.0";
   const cfg = loadConfig(stateDir);
-  lines.push(`calls: ${calls} · leaks: ${leaks} · store: ${sizeMb} MB`);
-  if (otelCalls > 0) {
-    lines.push(
-      `  ${otelCalls} agent-reported (Mode B, --telemetry): self-report — prompts, ` +
-        `tool inputs, and tool outputs are scanned; alerts lag seconds`,
-    );
+
+  lines.push(
+    row("leaks", leaks === 0
+      ? "none detected"
+      : `${leaks} detected — see \`beagle leaks\``),
+  );
+  if (calls === 0) {
+    lines.push(row("captured", "nothing yet — wrap an agent with `beagle run <agent>`"));
+  } else {
+    lines.push(row("captured", `${calls} call${calls === 1 ? "" : "s"} · ${sizeMb} MB store`));
+    if (otelCalls > 0) {
+      // Wrapped by clause, not by width: each continuation line is a complete
+      // thought, so the indented block reads as two statements, not a broken one.
+      lines.push(cont(`${otelCalls} agent-reported (Mode B): captured from the agent's self-report`));
+      lines.push(cont("prompts and tool data still scanned · alerts can lag a few seconds"));
+    }
   }
   lines.push(
-    `retention: ${cfg.payloadWindowDays}d / ${cfg.sizeCapMB} MB payloads · ${cfg.eventWindowDays}d leak events`,
+    row("retention", `payloads ${cfg.payloadWindowDays} days / ${cfg.sizeCapMB} MB · leak events ${cfg.eventWindowDays} days`),
   );
+  lines.push("");
+
   const manifest = new ChangeManifest(stateDir);
-  lines.push(manifest.summary() + (manifest.list().length ? " (beagle unwatch <agent> to revert)" : ""));
   lines.push(
-    "local only · outbound connections: only your model providers · telemetry: none · viewer: off until requested",
+    row("changes", manifest.list().length === 0
+      ? "none — beagle has modified nothing on this system"
+      : `${manifest.summary()} — \`beagle unwatch <agent>\` reverts them`),
   );
+  lines.push(row("privacy", "local only — outbound traffic is just your agents' own model calls"));
+  lines.push(cont("no telemetry · viewer off until requested"));
   return lines.join("\n");
 }
 

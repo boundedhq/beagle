@@ -130,15 +130,17 @@ header .stat.leak.zero .leak-dot {
 }
 
 /* actions */
-header .actions { display: flex; align-items: center; gap: 12px; flex: none; }
-header .search { position: relative; color: #646d80; }
+/* actions always take their own full row: brand + stats above, a search bar
+   that fills the remaining width (plus the toggle) below — at every width */
+header .actions { display: flex; align-items: center; gap: 12px; flex: 1 1 100%; }
+header .search { position: relative; color: #646d80; flex: 1 1 auto; }
 header .search .search-icon {
   position: absolute; left: 13px; top: 50%; transform: translateY(-50%);
   pointer-events: none; transition: color 0.15s;
 }
 header .search:focus-within { color: var(--accent); }
 header .search input {
-  width: 220px; height: 42px; border-radius: 11px;
+  width: 100%; height: 42px; border-radius: 11px;
   border: 1px solid var(--border); background: #10131a;
   color: var(--text); font: inherit; font-size: 12.5px;
   padding: 0 14px 0 37px;
@@ -175,18 +177,10 @@ header .toggle.active .toggle-dot { background: var(--leak); border-color: var(-
   header { min-height: 0; padding: 12px 18px; gap: 14px; }
   header .tagline { display: none; }
   header .brand { flex: none; }
-  header .actions { flex: 1 1 100%; }
-  header .search { flex: 1 1 auto; }
-  header .search input { width: 100%; }
   header .stat { min-width: 64px; padding: 8px 11px; }
 }
 @media (prefers-reduced-motion: reduce) {
   header h1 .cursor, header .leak-dot { animation: none; }
-}
-/* narrow feed: model is the most expendable column — shed it before the
-   interactive session chip gets clipped */
-@media (max-width: 760px) {
-  .row .model { display: none; }
 }
 button {
   background: var(--chip); color: var(--text); border: 1px solid var(--border);
@@ -216,6 +210,14 @@ main { flex: 1; padding: 8px 16px; }
 .row .model { color: var(--muted); flex: 0 0 130px; overflow: hidden; text-overflow: ellipsis; }
 .row .summary { flex: 1 1 auto; min-width: 120px; overflow: hidden; text-overflow: ellipsis; }
 .row .session { flex: 0 0 78px; text-align: right; margin-left: auto; }
+/* Narrow feed. Must stay AFTER the .row rules above: a media query adds no
+   specificity, so an override placed earlier silently loses to the base rule. */
+@media (max-width: 760px) {
+  .row .model { display: none; }
+  /* the summary already ellipsizes — let it yield further rather than push the
+     provenance/leak badges and the interactive session chip out of the row */
+  .row .summary { min-width: 60px; }
+}
 .row.head {
   cursor: default; color: var(--muted); font-size: 11px; text-transform: uppercase;
   letter-spacing: 0.6px; border-bottom: 1px solid var(--border); padding-top: 10px;

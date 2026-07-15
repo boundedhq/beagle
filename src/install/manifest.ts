@@ -64,7 +64,7 @@ export class ChangeManifest {
   }
 
   summary(): string {
-    if (this.entries.length === 0) return "configs changed: 0";
+    if (this.entries.length === 0) return "0";
     const labels = [
       ...new Set(
         this.entries
@@ -72,7 +72,7 @@ export class ChangeManifest {
           .map((e) => (e.mode === "telemetry" ? `${e.agent} (telemetry)` : e.agent!)),
       ),
     ];
-    return `configs changed: ${this.entries.length} (${labels.join(", ")})`;
+    return `${this.entries.length} (${labels.join(", ")})`;
   }
 
   private load(): ChangeEntry[] {

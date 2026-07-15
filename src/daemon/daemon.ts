@@ -650,6 +650,8 @@ export class Daemon {
             // alerted — the quiesce signal tests need to assert exact counts
             // without racing, and a real "is it still working?" diagnostic.
             inflight: this.inflight.size,
+            viewerOpen: this.viewer?.isRunning ?? false,
+            persistent: this.persistent,
           },
         };
       case "purge": {
