@@ -88,6 +88,18 @@ describe("OTLP → Call mapping — Claude Code's real event schema (Mode B)", (
     expect(decode(c.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
   });
 
+  test("a tool-call-only turn surfaces the tool as a readable message (name-prefixed), not a blank row", () => {
+    // No user_prompt / assistant_response — just a tool call. Its input must
+    // become a readable message so the feed shows what the turn did instead of
+    // "(no message content)", AND so it reaches the search index (built from
+    // messages). The name is display-only; the scanned body stays inputs-only.
+    // empty prompt/response → the mapper treats them as absent, so it's a
+    // tool-call-only turn (like the real `{"tz":…}` calendar call).
+    const c = mapOtlpLogsToCalls(logs(turnRecords({ prompt: "", response: "", toolInput: '{"tz":"America/Los_Angeles"}' })), ctx)[0]!;
+    expect(c.request.messages).toEqual([{ role: "tool", content: 'Bash: {"tz":"America/Los_Angeles"}' }]);
+    expect(decode(c.request.bodyBytes)).toBe('{"tz":"America/Los_Angeles"}'); // leak surface: input only, no name
+  });
+
   test("operational events (hooks, mcp, plugin, tool_decision) produce no calls", () => {
     const noise = logs([
       event("hook_execution_start", { "session.id": "s", hook_event: "SessionStart" }),
