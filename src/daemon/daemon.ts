@@ -645,6 +645,11 @@ export class Daemon {
             calls: this.store.countCalls(),
             leaks: this.store.countLeakEvents(),
             leases: this.leases,
+            // Pipeline work not yet finished. One entry per batch, so 0 means
+            // every call in every delivered batch is scanned, stored, and
+            // alerted — the quiesce signal tests need to assert exact counts
+            // without racing, and a real "is it still working?" diagnostic.
+            inflight: this.inflight.size,
           },
         };
       case "purge": {

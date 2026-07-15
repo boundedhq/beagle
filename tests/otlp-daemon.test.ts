@@ -41,10 +41,7 @@ function otlpBody(_token: string, prompt: string | null, sessionId = "otel-conv-
 }
 
 // The receiver 200s before the ingest pipeline (scan → insert → alert) runs,
-// so a fixed sleep races it under CI load. Poll a completion signal instead:
-// the daemon's status call count (insertCall precedes the alert pass with no
-// await between them), or the alert sink (the leak-event row is written
-// before the sink fires — engine.ts).
+// so a fixed sleep races it under CI load.
 // Default stays under bun's 5s per-test timeout, so a real regression surfaces
 // as "timed out waiting for <what>" rather than a bare bun timeout.
 async function waitFor(cond: () => boolean | Promise<boolean>, what: string, timeoutMs = 4_000): Promise<void> {
@@ -55,9 +52,18 @@ async function waitFor(cond: () => boolean | Promise<boolean>, what: string, tim
   }
 }
 
-async function storedCalls(socketPath: string): Promise<number> {
-  const status = await controlRequest(socketPath, { cmd: "status" });
-  return (status.data as { calls: number }).calls;
+// Wait until the daemon has fully finished the batch(es) posted so far: the
+// receiver's ingest is one tracked promise per batch, so inflight===0 means
+// every call in it is scanned, stored and alerted — nothing more is coming.
+// Waiting on the alert sink instead would return at the FIRST alert and let a
+// spurious second one land after the assertion, silently passing `toBe(1)`.
+// `minCalls` guards the start of the race, before ingest has been dispatched.
+async function settled(socketPath: string, minCalls = 1): Promise<void> {
+  await waitFor(async () => {
+    const status = await controlRequest(socketPath, { cmd: "status" });
+    const d = status.data as { calls: number; inflight: number };
+    return d.calls >= minCalls && d.inflight === 0;
+  }, `the daemon to finish ingesting ${minCalls} call(s)`);
 }
 
 describe("Mode B end-to-end through the daemon", () => {
@@ -92,7 +98,7 @@ describe("Mode B end-to-end through the daemon", () => {
   test("OTel-reported call is captured, labeled otel, and scanned", async () => {
     const r = await post(otlpBody(token, "please read the readme"));
     expect(r.status).toBe(200);
-    await waitFor(async () => (await storedCalls(daemon.socketPath)) >= 1, "the call to land in the store");
+    await settled(daemon.socketPath);
     const store = Store.openReadOnly(stateDir);
     const hits = store.searchLiteral("please read the readme");
     expect(hits.length).toBe(1);
@@ -105,11 +111,40 @@ describe("Mode B end-to-end through the daemon", () => {
 
   test("a leaked secret in an OTel-reported prompt fires the same alert", async () => {
     await post(otlpBody(token, "the key is AKIAZQ3DRSTUVWXY2345"));
-    await waitFor(() => alerts.length >= 1, "the leak alert to fire");
+    await settled(daemon.socketPath);
     expect(alerts.length).toBe(1);
     expect(alerts[0]!.title).toContain("aws-access-key-id");
     const store = Store.openReadOnly(stateDir);
     expect(listLeakEvents(store).length).toBe(1);
+    store.close();
+  });
+
+  test("one batch carrying two turns fires one alert per turn", async () => {
+    // The agent batches its export, so a single POST can carry several turns —
+    // ingestOtel awaits the scanner per call and yields between them. Nothing
+    // pins the fixtures above to one turn each, so pin the multi-turn shape
+    // here: it is what makes their exact `toBe(1)` counts meaningful.
+    const ev = (sid: string, prompt: string) => ({
+      timeUnixNano: String(Date.now() * 1e6),
+      body: { stringValue: "claude_code.user_prompt" },
+      attributes: [
+        { key: "event.name", value: { stringValue: "user_prompt" } },
+        { key: "session.id", value: { stringValue: sid } },
+        { key: "prompt.id", value: { stringValue: `p-${sid}` } },
+        { key: "prompt", value: { stringValue: prompt } },
+      ],
+    });
+    await post({ resourceLogs: [{ scopeLogs: [{
+      scope: { name: "com.anthropic.claude_code.events" },
+      logRecords: [
+        ev("otel-two-a", "first key AKIAZQ3DRSTUVWXY2345 here"),
+        ev("otel-two-b", "second key AKIAZQ3DRSTUVWXY6789 here"),
+      ],
+    }] }] });
+    await settled(daemon.socketPath, 2);
+    expect(alerts.length).toBe(2);
+    const store = Store.openReadOnly(stateDir);
+    expect(listLeakEvents(store).length).toBe(2); // distinct secrets — neither deduped away
     store.close();
   });
 
@@ -118,7 +153,7 @@ describe("Mode B end-to-end through the daemon", () => {
     // No assistant_response in the batch: the summary falls back to the raw
     // prompt line — exactly where the secret sits.
     await post(otlpBody(token, "my key AKIAZQ3DRSTUVWXY2345 leaked", "otel-conv-r", null));
-    await waitFor(() => alerts.length >= 1, "the leak alert to fire");
+    await settled(daemon.socketPath);
     const store = Store.openReadOnly(stateDir);
     // the leak event still exists (audit value kept)...
     expect(listLeakEvents(store).length).toBe(1);
@@ -140,7 +175,7 @@ describe("Mode B end-to-end through the daemon", () => {
     // The prompt that leaked the key rode an earlier batch; this batch carries
     // only the assistant's echo — no request-side scan surface at all.
     await post(otlpBody(token, null, "otel-conv-echo", "your key is AKIAZQ3DRSTUVWXY2345"));
-    await waitFor(async () => (await storedCalls(daemon.socketPath)) >= 1, "the call to land in the store");
+    await settled(daemon.socketPath);
     const store = Store.openReadOnly(stateDir);
     expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
     const hit = store.searchLiteral("your key is")[0]!;
@@ -169,7 +204,7 @@ describe("Mode B end-to-end through the daemon", () => {
         headers: { "content-type": "application/json", "x-beagle-run": data.otlpToken },
         body: JSON.stringify(otlpBody(data.otlpToken, "unverified AKIAZQ3DRSTUVWXY2345")),
       });
-      await waitFor(async () => (await storedCalls(d2.socketPath)) >= 1, "the call to land in the store");
+      await settled(d2.socketPath);
       const store = Store.openReadOnly(dir2);
       expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
       expect(store.searchLiteral("unverified")).toEqual([]); // search index withheld too
@@ -233,7 +268,7 @@ describe("Mode B tool-output capture (PostToolUse hook)", () => {
       body: JSON.stringify(hook),
     });
     expect(r.status).toBe(200);
-    await waitFor(() => alerts.length >= 1, "the leak alert to fire");
+    await settled(daemon.socketPath);
     expect(alerts.length).toBe(1);
     expect(alerts[0]!.title).toContain("aws-access-key-id");
   });
@@ -288,7 +323,7 @@ describe("Codex Mode B end-to-end through the daemon", () => {
   test("a codex prompt is captured, labeled codex/openai, and scanned", async () => {
     const r = await post(codexBody("codex.user_prompt", { prompt: "refactor the parser", model: "gpt-5.6" }));
     expect(r.status).toBe(200);
-    await waitFor(async () => (await storedCalls(daemon.socketPath)) >= 1, "the call to land in the store");
+    await settled(daemon.socketPath);
     const store = Store.openReadOnly(stateDir);
     const hits = store.searchLiteral("refactor the parser");
     expect(hits.length).toBe(1);
@@ -301,7 +336,7 @@ describe("Codex Mode B end-to-end through the daemon", () => {
 
   test("a secret in a codex PROMPT fires the leak alert", async () => {
     await post(codexBody("codex.user_prompt", { prompt: "ship it with AKIAZQ3DRSTUVWXY2345" }));
-    await waitFor(() => alerts.length >= 1, "the leak alert to fire");
+    await settled(daemon.socketPath);
     expect(alerts.length).toBe(1);
     expect(alerts[0]!.title).toContain("aws-access-key-id");
   });
@@ -314,7 +349,7 @@ describe("Codex Mode B end-to-end through the daemon", () => {
       arguments: '{"cmd":"cat key.txt"}',
       output: "token = AKIAZQ3DRSTUVWXY2345",
     }));
-    await waitFor(() => alerts.length >= 1, "the leak alert to fire");
+    await settled(daemon.socketPath);
     expect(alerts.length).toBe(1);
     expect(alerts[0]!.title).toContain("aws-access-key-id");
     const store = Store.openReadOnly(stateDir);
