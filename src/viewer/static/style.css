@@ -45,7 +45,7 @@ header .badge {
               0 10px 22px -10px rgba(110, 168, 254, 0.4);
 }
 header .badge .dog {
-  font-size: 30px; line-height: 1; transform: translateY(1px);
+  width: 56px; height: 56px; display: block;
   filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.45));
 }
 header .badge::after { /* "watching" presence dot */
