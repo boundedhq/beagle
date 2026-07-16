@@ -215,8 +215,9 @@ describe("buildSessionTurns — the conversation delta", () => {
       requestBody: enc('{"command":"claude mcp list"}'), responseBody: null,
     }));
     const v = buildSessionTurns(store, "sess-1");
+    // labeled by what it IS (the request), not its provenance
     expect(v.turns[0]!.messages).toEqual([
-      { role: "agent-reported", content: '{"command":"claude mcp list"}' },
+      { role: "request", content: '{"command":"claude mcp list"}' },
     ]);
     store.close();
   });

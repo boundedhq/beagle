@@ -91,7 +91,9 @@ export function buildSessionTurns(store: Store, sessionId: string, cap = 200): S
     if (d.source === "otel" && messages.length === 0 && d.requestRaw) {
       // Legacy Mode B rows (captured before display_messages existed) still
       // have their scan text — show it as one block rather than an empty turn.
-      messages = [{ role: "agent-reported", content: d.requestRaw }];
+      // Labeled by what the content IS (the request: prompt + tool inputs);
+      // provenance ("self-reported") is the session/turn chip's job, not this.
+      messages = [{ role: "request", content: d.requestRaw }];
     }
     if (d.source === "wire") {
       // Show only the tail this call added on top of the previous wire call's

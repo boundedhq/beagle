@@ -390,9 +390,6 @@ function SessionTranscript({ sessionId, row, onBack }) {
           const modelChanged = t.model && t.model !== prev?.model;
           const hasLeak = t.leaks.length > 0;
           const open = openCall === t.id;
-          // trailing assistant response gets a speaker label only when the
-          // voice actually changes (same dedupe rule as within messages)
-          const lastRole = t.messages.at(-1)?.role;
           return html`
             <div class=${hasLeak ? "turn has-leak" : "turn"} key=${t.id}>
               ${showDivider && html`<div class="time-divider">${fmtDivider(t.tsRequest, showDate)}</div>`}
@@ -407,12 +404,11 @@ function SessionTranscript({ sessionId, row, onBack }) {
               </div>
               ${open && html`<${Detail} id=${t.id} />`}
               ${t.messages.map(
-                (m, j) => html`<${TMsg} key=${`${t.id}:${j}`} m=${m} leaks=${t.leaks}
-                  showLabel=${j === 0 || t.messages[j - 1].role !== m.role} />`,
+                (m, j) => html`<${TMsg} key=${`${t.id}:${j}`} m=${m} leaks=${t.leaks} />`,
               )}
               ${t.responseText != null && t.responseText !== "" &&
-              html`<${TMsg} key=${`${t.id}:resp`} m=${{ role: "assistant", content: t.responseText }}
-                leaks=${t.leaks} showLabel=${lastRole !== "assistant"} />`}
+              html`<${TMsg} key=${`${t.id}:resp`} leaks=${t.leaks}
+                m=${{ role: "assistant", content: t.responseText }} />`}
               ${t.messages.length === 0 && !t.responseText &&
               html`<div class="turn-empty">(no parsed content — open details for raw bytes)</div>`}
             </div>
@@ -458,39 +454,54 @@ function SystemCard({ text }) {
   `;
 }
 
-// One transcript message, dispatched by role: user → tinted box, tool /
-// agent-reported → collapsible card, everything else (assistant, system,
-// future roles) → flat text. All bodies render through Highlighted.
-function TMsg({ m, leaks, showLabel }) {
+// One transcript message. Uniform cards: every message — user, assistant,
+// tool, request — sits in the same bordered card, differentiated only by the
+// colored role label in its header. Tool/request cards additionally collapse.
+// All bodies render through Highlighted.
+function TMsg({ m, leaks }) {
   const content = typeof m.content === "string" ? m.content : JSON.stringify(m.content, null, 2);
   // The one unacceptable failure is a hidden secret: a leak-bearing message
   // never clamps and never renders collapsed.
   const hasLeak = (leaks ?? []).some((l) => l.value && content.includes(l.value));
-  if (m.role === "tool" || m.role === "agent-reported") {
+  if (m.role === "tool" || m.role === "request") {
     return html`<${ToolCard} role=${m.role} content=${content} leaks=${leaks} hasLeak=${hasLeak} />`;
   }
-  if (m.role === "user") {
-    return html`
-      <div class="tmsg user">
-        ${showLabel && html`<div class="speaker user">user</div>`}
-        <div class="ubox">
-          <${ClampedText} content=${content} leaks=${leaks} threshold=${1500} hasLeak=${hasLeak} />
-        </div>
-      </div>
-    `;
-  }
-  // assistant / system / any future role: flat, full width
+  // user / assistant / system / any future role: same card, labeled header
   return html`
-    <div class=${`tmsg flat ${m.role}`}>
-      ${showLabel && html`<div class=${`speaker ${m.role}`}>${m.role}</div>`}
-      <div class="body">
-        <${ClampedText} content=${content} leaks=${leaks} threshold=${2500} hasLeak=${hasLeak} />
+    <div class=${hasLeak ? "mcard has-leak" : "mcard"}>
+      <div class="mc-head"><span class=${`mc-name ${m.role}`}>${m.role}</span></div>
+      <div class="mc-body">
+        <${ClampedText} content=${content} leaks=${leaks}
+          threshold=${m.role === "user" ? 1500 : 2500} hasLeak=${hasLeak} />
       </div>
     </div>
   `;
 }
 
 const fmtChars = (n) => (n < 1000 ? `${n} chars` : `${(n / 1000).toFixed(1)}k chars`);
+
+// Pretty-print JSON for reading: each line that parses as a JSON object/array
+// re-serializes with 2-space indent (tool inputs and legacy request blobs are
+// one-liner JSON). Guard: if reformatting would lose an inline secret
+// highlight (the value no longer substring-matches), that line stays verbatim
+// — a leak never loses its red mark to cosmetics.
+function prettyContent(text, leaks) {
+  const values = (leaks ?? []).map((l) => l.value).filter(Boolean);
+  return text
+    .split("\n")
+    .map((line) => {
+      const t = line.trim();
+      if (!t.startsWith("{") && !t.startsWith("[")) return line;
+      try {
+        const p = JSON.stringify(JSON.parse(t), null, 2);
+        for (const v of values) if (line.includes(v) && !p.includes(v)) return line;
+        return p;
+      } catch {
+        return line;
+      }
+    })
+    .join("\n");
+}
 
 // Long-content guard: a CSS max-height clamp with a fade + expander. The text
 // itself is never sliced, so Highlighted always sees the full content and a
@@ -509,31 +520,39 @@ function ClampedText({ content, leaks, threshold, hasLeak }) {
   `;
 }
 
-// A tool call / tool output as a compact card: always-visible header (glyph,
-// name, one-line preview, size), body only when opened. Long cards start
-// collapsed — unless they carry a secret, which forces them open.
+// A tool call / tool output (or a legacy "request" blob) in the same card
+// shell as every other message: always-visible header (glyph, name, one-line
+// preview, size), body only when opened, JSON pretty-printed for reading.
+// Long cards start collapsed — unless they carry a secret, which forces them
+// open.
 function ToolCard({ role, content, leaks, hasLeak }) {
   const startOpen = hasLeak || content.length <= 240;
   const [open, setOpen] = useState(startOpen);
-  const agentReported = role === "agent-reported";
+  const isRequest = role === "request";
   // Display-only parse of the "Name: payload" convention the mappers write.
-  // Hostile content can at worst mislabel its own card — never inject markup.
-  const match = agentReported ? null : content.match(/^([A-Za-z_][\w.-]{0,40}):\s/);
-  const name = agentReported ? "agent-reported" : (match?.[1] ?? "tool");
-  const preview = (match ? content.slice(match[0].length) : content).slice(0, 200);
+  // Hostile content can at most mislabel its own card — never inject markup.
+  const match = isRequest ? null : content.match(/^([A-Za-z_][\w.-]{0,40}):\s/);
+  const name = isRequest ? "request" : (match?.[1] ?? "tool");
+  const payload = match ? content.slice(match[0].length) : content;
   const collapsible = !startOpen || hasLeak || content.length > 240;
   return html`
-    <div class=${hasLeak ? "toolcard has-leak" : "toolcard"}
-      title=${agentReported ? "the agent's own report — Beagle did not see the wire" : undefined}>
-      <div class="tc-head" onClick=${() => collapsible && setOpen(!open)}>
-        <span aria-hidden="true">${agentReported ? "⇢" : "⚙"}</span>
-        <span class="tc-name">${name}</span>
-        ${!open && html`<span class="tc-preview">${preview}</span>`}
+    <div class=${hasLeak ? "mcard has-leak" : "mcard"}
+      title=${isRequest
+        ? "what the agent reported sending — prompt and tool inputs as one block"
+        : undefined}>
+      <div class=${collapsible ? "mc-head click" : "mc-head"}
+        onClick=${() => collapsible && setOpen(!open)}>
+        <span aria-hidden="true">${isRequest ? "⇢" : "⚙"}</span>
+        <span class=${`mc-name ${isRequest ? "request" : "tool"}`}>${name}</span>
+        ${!open && html`<span class="mc-preview">${payload.slice(0, 200)}</span>`}
         ${hasLeak && html`<span class="chip leak">secret</span>`}
-        <span class="tc-size">${fmtChars(content.length)}</span>
+        <span class="mc-size">${fmtChars(content.length)}</span>
         ${collapsible && html`<span aria-hidden="true">${open ? "▾" : "▸"}</span>`}
       </div>
-      ${open && html`<div class="tc-body"><${Highlighted} text=${content} leaks=${leaks} /></div>`}
+      ${open &&
+      html`<div class="mc-body scroll">
+        <${Highlighted} text=${prettyContent(payload, leaks)} leaks=${leaks} />
+      </div>`}
     </div>
   `;
 }
