@@ -53,8 +53,8 @@ export function secretName(t: string): string {
  *  lines each carry one job and each fits its own budget:
  *    title     Beagle — secret sent to Anthropic        (short, never clipped)
  *    subtitle  AWS access key                           (the specifics)
- *    body      Already sent by your claude-code agent. Run "beagle ui"
- *              for details.
+ *    body      Already sent by your claude-code agent.
+ *              Run "beagle ui" for details.             (the next step, own line)
  *  The body leads with "Already sent" — the honest, can't-undo part — then
  *  attributes the agent; no dangling "it" (the secret is named on the line
  *  above). No lecture ("Beagle alerts, it can't block") — that's product
@@ -68,6 +68,9 @@ export function buildAlertMessage(a: AlertEvent): AlertMessage {
   const ownKey = a.destinationOwnKey
     ? ` It is ${provider}'s own API key, pasted into the message body.`
     : "";
-  const body = `Already sent by ${sender}.${ownKey} Run "beagle ui" for details.`;
+  // The next step gets its own line — a newline the notifier renders on macOS
+  // (AppleScript \n) and Linux (notify-send), and collapses in the one-line
+  // terminal backstop.
+  const body = `Already sent by ${sender}.${ownKey}\nRun "beagle ui" for details.`;
   return { title, subtitle, body };
 }
