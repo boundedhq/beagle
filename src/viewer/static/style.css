@@ -291,7 +291,8 @@ button.linklike:hover { text-decoration: underline; }
 .scol { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .stitle-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .stitle {
-  flex: 0 1 auto; min-width: 0; font-size: 13.5px; color: var(--text);
+  flex: 0 1 auto; min-width: 0; font-size: 12.5px; font-weight: 600;
+  letter-spacing: -0.1px; color: var(--text);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .stitle.untitled { color: var(--muted); font-style: italic; }

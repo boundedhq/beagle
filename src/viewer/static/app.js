@@ -216,7 +216,8 @@ function App() {
       html`<${SessionTranscript} sessionId=${openSession.id} row=${openSession.row}
         onBack=${() => setOpenSession(null)} />`}
       ${openSession == null && tab === "sessions" &&
-      html`<${Sessions} onOpen=${(s) => setOpenSession({ id: s.sessionId, row: s })} />`}
+      html`<${Sessions} leaksOnly=${leaksOnly}
+        onOpen=${(s) => setOpenSession({ id: s.sessionId, row: s })} />`}
       ${openSession == null && tab === "calls" && html`
         ${visible.length === 0 && html`<div class="empty">
           no calls${leaksOnly ? " with leaks" : ""} yet — run an agent under
@@ -290,8 +291,10 @@ function Row({ x, onToggle, onSession }) {
   `;
 }
 
-// The sessions tab: one row per session, newest activity first.
-function Sessions({ onOpen }) {
+// The sessions tab: one row per session, newest activity first. The header's
+// "leaks only" toggle narrows this the same way it narrows the calls feed —
+// to sessions that leaked at least one secret.
+function Sessions({ onOpen, leaksOnly }) {
   const [sessions, setSessions] = useState(null);
   useEffect(() => { api.get("/api/sessions").then(setSessions); }, []);
   if (sessions === null) return html`<div class="empty">loading…</div>`;
@@ -300,8 +303,14 @@ function Sessions({ onOpen }) {
       no sessions yet — run an agent under <code>beagle run</code> and each
       conversation shows up here. Click one to read it end to end.
     </div>`;
+  const shown = sessions.filter((s) => !leaksOnly || s.leaks > 0);
+  if (shown.length === 0)
+    return html`<div class="empty">
+      no sessions leaked a secret — turn off <span class="hl">leaks only</span>
+      to see all ${sessions.length} session${sessions.length === 1 ? "" : "s"}.
+    </div>`;
   return html`
-    ${sessions.map((s) => {
+    ${shown.map((s) => {
       const span = spanLabel(s.firstTs, s.lastTs);
       const title = sessionTitle(s.title);
       return html`<div class=${s.leaks > 0 ? "srow leak" : "srow"} key=${s.sessionId}
@@ -351,6 +360,32 @@ function sessionTitle(raw) {
     } catch { /* not a JSON title wrapper — use as-is */ }
   }
   return t;
+}
+
+// Plain-English name for a detector tag, so the leak chip reads "API key",
+// not "generic-api-key". Known types get a curated label (the generic
+// high-entropy match is just "API key" — the detector can't say what kind);
+// anything unmapped de-kebabs to a readable phrase. Mirrors secretName() in
+// the notifier so the banner and the detail view speak the same words.
+const SECRET_LABELS = {
+  "aws-access-key-id": "AWS access key",
+  "aws-secret-access-key": "AWS secret key",
+  "github-pat": "GitHub personal access token",
+  "github-oauth": "GitHub OAuth token",
+  "github-app-token": "GitHub app token",
+  "stripe-access-token": "Stripe API key",
+  "slack-bot-token": "Slack bot token",
+  "slack-user-token": "Slack user token",
+  "gcp-api-key": "Google Cloud API key",
+  "openai-api-key": "OpenAI API key",
+  "anthropic-api-key": "Anthropic API key",
+  "private-key": "private key",
+  "jwt": "JWT token",
+  "generic-api-key": "API key",
+};
+function secretLabel(type) {
+  if (typeof type !== "string" || type === "") return "secret";
+  return SECRET_LABELS[type] ?? type.replace(/-/g, " ");
 }
 
 // One session rendered as a chronological conversation thread — each turn
@@ -679,7 +714,7 @@ function Detail({ id, onSession }) {
       html`<div class="leakbar">
         🔴 ${leaks.length} secret${leaks.length === 1 ? "" : "s"} sent in this call —
         highlighted below:
-        ${leaks.map((l) => html`<span class="chip leak">${l.secretType}</span>`)}
+        ${leaks.map((l) => html`<span class="chip leak">${secretLabel(l.secretType)}</span>`)}
       </div>`}
       ${hasStructure &&
       html`<button class=${showRaw ? "active" : ""} onClick=${() => setRaw(!raw)}>
