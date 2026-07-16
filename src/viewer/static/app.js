@@ -385,7 +385,9 @@ const SECRET_LABELS = {
 };
 function secretLabel(type) {
   if (typeof type !== "string" || type === "") return "secret";
-  return SECRET_LABELS[type] ?? type.replace(/-/g, " ");
+  // Object.hasOwn, not a bare index: a prototype key ("toString") would
+  // otherwise return an inherited value instead of de-kebabbing.
+  return Object.hasOwn(SECRET_LABELS, type) ? SECRET_LABELS[type] : type.replace(/-/g, " ");
 }
 
 // One session rendered as a chronological conversation thread — each turn
@@ -719,9 +721,9 @@ function Detail({ id, onSession }) {
       ${hasStructure &&
       html`<div class="viewswitch">
         <div class="viewtoggle" role="group" aria-label="detail view">
-          <button class=${!showRaw ? "active" : ""} aria-pressed=${!showRaw}
+          <button class=${!showRaw ? "active" : ""} aria-pressed=${!showRaw ? "true" : "false"}
             onClick=${() => setRaw(false)}>readable</button>
-          <button class=${showRaw ? "active" : ""} aria-pressed=${showRaw}
+          <button class=${showRaw ? "active" : ""} aria-pressed=${showRaw ? "true" : "false"}
             onClick=${() => setRaw(true)}>raw</button>
         </div>
         ${showRaw &&
