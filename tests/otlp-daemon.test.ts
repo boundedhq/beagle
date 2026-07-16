@@ -136,7 +136,7 @@ describe("Mode B end-to-end through the daemon", () => {
     await post(otlpBody(token, "the key is AKIAZQ3DRSTUVWXY2345"));
     await settled(daemon.socketPath);
     expect(alerts.length).toBe(1);
-    expect(alerts[0]!.title).toContain("aws-access-key-id");
+    expect(alerts[0]!.secretType).toBe("aws-access-key-id");
     const store = Store.openReadOnly(stateDir);
     expect(listLeakEvents(store).length).toBe(1);
     store.close();
@@ -293,7 +293,7 @@ describe("Mode B tool-output capture (PostToolUse hook)", () => {
     expect(r.status).toBe(200);
     await settled(daemon.socketPath);
     expect(alerts.length).toBe(1);
-    expect(alerts[0]!.title).toContain("aws-access-key-id");
+    expect(alerts[0]!.secretType).toBe("aws-access-key-id");
   });
 });
 
@@ -361,7 +361,7 @@ describe("Codex Mode B end-to-end through the daemon", () => {
     await post(codexBody("codex.user_prompt", { prompt: "ship it with AKIAZQ3DRSTUVWXY2345" }));
     await settled(daemon.socketPath);
     expect(alerts.length).toBe(1);
-    expect(alerts[0]!.title).toContain("aws-access-key-id");
+    expect(alerts[0]!.secretType).toBe("aws-access-key-id");
   });
 
   test("a secret in a codex TOOL OUTPUT (cat key.txt) fires the leak alert — no hook needed", async () => {
@@ -374,7 +374,7 @@ describe("Codex Mode B end-to-end through the daemon", () => {
     }));
     await settled(daemon.socketPath);
     expect(alerts.length).toBe(1);
-    expect(alerts[0]!.title).toContain("aws-access-key-id");
+    expect(alerts[0]!.secretType).toBe("aws-access-key-id");
     const store = Store.openReadOnly(stateDir);
     expect(listLeakEvents(store).length).toBe(1);
     store.close();

@@ -207,7 +207,7 @@ function App() {
     <main>
       ${banner &&
       html`<div class="banner" onClick=${() => setBanner(null)}>
-        ▲ ${banner.title} — ${banner.body}
+        ▲ ${banner.title}${banner.subtitle ? ` — ${banner.subtitle}` : ""} — ${banner.body}
       </div>`}
       ${searchHits !== null && html`<${SearchResults} hits=${searchHits} term=${searchTerm}
         onClear=${() => setSearchHits(null)}

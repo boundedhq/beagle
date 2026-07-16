@@ -38,4 +38,16 @@ describe("exec hygiene (design §6.10)", () => {
     expect(args.some((a) => a.includes("$(x)"))).toBe(true); // inert without a shell
     expect(args.every((a) => !a.includes("\x1b"))).toBe(true);
   });
+
+  test("subtitle rides macOS's second banner line, escaped like the rest", () => {
+    const args = osascriptArgs({ title: "Beagle — secret sent", subtitle: 'AWS "key"', body: "b" });
+    expect(args[2]).toContain('subtitle "AWS \\"key\\""');
+    // and stays absent when not provided
+    expect(osascriptArgs({ title: "t", body: "b" })[2]).not.toContain("subtitle");
+  });
+
+  test("notify-send has no subtitle slot — it leads the body instead", () => {
+    const args = notifySendArgs({ title: "t", subtitle: "AWS access key", body: "the rest" });
+    expect(args.at(-1)).toBe("AWS access key\nthe rest");
+  });
 });

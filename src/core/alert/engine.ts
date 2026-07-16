@@ -13,12 +13,17 @@ export interface CallMeta {
   model?: string;
 }
 
+// Structured alert facts. Core decides WHEN to alert and what happened; the
+// human wording lives outside the security path (notifier/alert-copy.ts).
 export interface AlertEvent {
   eventId: string;
   callId: string;
-  title: string;
-  body: string;
   seenBefore: boolean;
+  secretType: string;
+  agent?: string;
+  provider: string;
+  model?: string;
+  destinationOwnKey: boolean;
 }
 
 export type AlertSink = (alert: AlertEvent) => void;
@@ -32,8 +37,7 @@ export class AlertEngine {
   process(call: CallMeta, findings: Finding[]): void {
     // Dedup keys on the destination PROVIDER (R6) — a mid-session model
     // switch is the same destination and must not re-alert. The model only
-    // enriches the human-facing copy.
-    const displayDestination = call.model ? `${call.provider}/${call.model}` : call.provider;
+    // enriches the human-facing copy, built downstream.
     for (const f of findings) {
       const seenBefore = this.store.fingerprintKnown(f.fingerprint);
       const { fresh, eventId } = this.store.upsertLeakEvent({
@@ -53,27 +57,13 @@ export class AlertEngine {
           eventId,
           callId: call.id,
           seenBefore,
-          ...alertCopy(f, call, displayDestination, seenBefore),
+          secretType: f.secretType,
+          agent: call.agent,
+          provider: call.provider,
+          model: call.model,
+          destinationOwnKey: f.destinationOwnKey,
         });
       }
     }
   }
-}
-
-function alertCopy(
-  f: Finding,
-  call: CallMeta,
-  destination: string,
-  seenBefore: boolean,
-): { title: string; body: string } {
-  const title = `${seenBefore ? "Secret sent again" : "Secret detected"}: ${f.secretType}`;
-  const ownKey = f.destinationOwnKey
-    ? " (this destination's own API key appeared in the message body)" : "";
-  const body =
-    `${f.secretType} sent to ${destination} by ${call.agent ?? "unknown agent"}${ownKey}. ` +
-    `The data has already been sent — Beagle observes, it does not block. ` +
-    // 12 chars: same-millisecond ULIDs share their first 8, so an 8-char
-    // prefix can be ambiguous exactly when a burst of calls lands.
-    `Details: beagle show ${call.id.slice(0, 12)}`;
-  return { title, body };
 }

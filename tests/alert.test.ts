@@ -3,6 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AlertEngine, type AlertEvent } from "../src/core/alert/engine";
+import { buildAlertMessage, providerName, secretName } from "../src/notifier/alert-copy";
 import type { Finding } from "../src/core/scanner/engine";
 import { Store } from "../src/core/store/store";
 import { listLeakEvents } from "../src/viewer/feed-query";
@@ -67,21 +68,15 @@ describe("AlertEngine", () => {
     expect(events[0]?.confidenceTier).toBe("possible");
   });
 
-  test("alert copy names type, agent, destination, states data already sent, includes id prefix", () => {
+  test("the event carries the structured facts; wording is built downstream", () => {
     engine.process(callMeta(), [finding()]);
     const a = alerts[0]!;
-    expect(a.title).toContain("aws-access-key-id");
-    expect(a.body).toContain("claude-code");
-    expect(a.body).toContain("anthropic/claude-sonnet-5");
-    expect(a.body.toLowerCase()).toContain("already been sent");
-    // 12-char prefix: same-millisecond ULIDs share their first 8 chars
-    expect(a.body).toContain("beagle show 01JZXKQ8WVXH");
-  });
-
-  test("destination's own key alerts with the annotation", () => {
-    engine.process(callMeta(), [finding({ destinationOwnKey: true })]);
-    expect(alerts.length).toBe(1);
-    expect(alerts[0]!.body.toLowerCase()).toContain("this destination's own");
+    expect(a.secretType).toBe("aws-access-key-id");
+    expect(a.agent).toBe("claude-code");
+    expect(a.provider).toBe("anthropic");
+    expect(a.model).toBe("claude-sonnet-5");
+    expect(a.destinationOwnKey).toBe(false);
+    expect(a.callId).toBe("01JZXKQ8WVXH5N4T2M9R7C3DEF");
   });
 
   test("mid-session model switch does not re-alert (dedup keys on provider)", () => {
@@ -99,5 +94,69 @@ describe("AlertEngine", () => {
       finding({ fingerprint: "fp-other", secretType: "github-pat", detector: "github-pat" }),
     ]);
     expect(alerts.length).toBe(2);
+  });
+});
+
+// The human wording (non-core). Copy rules: lead with "Beagle" (macOS shows
+// osascript notifications under Script Editor's identity — the text must say
+// who is talking), plain words for what leaked and where, honest about the
+// data having left, exactly one next step.
+describe("buildAlertMessage", () => {
+  const event = (over: Partial<AlertEvent> = {}): AlertEvent => ({
+    eventId: "evt-1",
+    callId: "01JZXKQ8WVXH5N4T2M9R7C3DEF",
+    seenBefore: false,
+    secretType: "aws-access-key-id",
+    agent: "claude-code",
+    provider: "anthropic",
+    model: "claude-sonnet-5",
+    destinationOwnKey: false,
+    ...over,
+  });
+
+  test("three lines, each with one job: short branded title, specifics, plain body", () => {
+    const msg = buildAlertMessage(event());
+    // the title must survive macOS's ~35-char banner truncation
+    expect(msg.title).toBe("Beagle — secret sent to Anthropic");
+    expect(msg.title.length).toBeLessThanOrEqual(35);
+    expect(msg.subtitle).toBe("AWS access key");
+    expect(msg.body).toBe('Already sent by your claude-code agent. Run "beagle ui" for details.');
+  });
+
+  test("no lecture, no jargon: the body drops the observes-not-blocks line and the model", () => {
+    const { body } = buildAlertMessage(event());
+    expect(body).not.toContain("block");
+    expect(body).not.toContain("claude-sonnet-5");
+    expect(body).not.toContain("left your machine");
+  });
+
+  test("a repeat leak says 'again' in the title", () => {
+    expect(buildAlertMessage(event({ seenBefore: true })).title)
+      .toBe("Beagle — secret sent to Anthropic again");
+  });
+
+  test("the destination's own key gets the plain-words note", () => {
+    const { body } = buildAlertMessage(event({ destinationOwnKey: true }));
+    expect(body).toContain("Anthropic's own API key");
+  });
+
+  test("unknown provider and secret types degrade to readable fallbacks", () => {
+    const msg = buildAlertMessage(
+      event({ provider: "sol-inc", secretType: "sol-signing-token" }),
+    );
+    expect(msg.title).toBe("Beagle — secret sent to sol-inc");
+    expect(msg.subtitle).toBe("sol signing token");
+  });
+
+  test("missing agent still reads as a sentence", () => {
+    const { body } = buildAlertMessage(event({ agent: undefined }));
+    expect(body).toBe('Already sent by an agent. Run "beagle ui" for details.');
+  });
+
+  test("name helpers: known mappings and fallbacks", () => {
+    expect(providerName("openai")).toBe("OpenAI");
+    expect(providerName("acme")).toBe("acme");
+    expect(secretName("github-pat")).toBe("GitHub personal access token");
+    expect(secretName("weird-new-token")).toBe("weird new token");
   });
 });
