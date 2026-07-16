@@ -120,7 +120,7 @@ describe("buildAlertMessage", () => {
     expect(msg.title).toBe("Beagle — secret sent to Anthropic");
     expect(msg.title.length).toBeLessThanOrEqual(35);
     expect(msg.subtitle).toBe("AWS access key");
-    expect(msg.body).toBe('Your claude-code agent has already sent it. Run "beagle ui" for details.');
+    expect(msg.body).toBe('Already sent by your claude-code agent. Run "beagle ui" for details.');
   });
 
   test("no lecture, no jargon: the body drops the observes-not-blocks line and the model", () => {
@@ -150,7 +150,7 @@ describe("buildAlertMessage", () => {
 
   test("missing agent still reads as a sentence", () => {
     const { body } = buildAlertMessage(event({ agent: undefined }));
-    expect(body).toBe('An agent has already sent it. Run "beagle ui" for details.');
+    expect(body).toBe('Already sent by an agent. Run "beagle ui" for details.');
   });
 
   test("name helpers: known mappings and fallbacks", () => {

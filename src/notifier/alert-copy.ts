@@ -53,19 +53,21 @@ export function secretName(t: string): string {
  *  lines each carry one job and each fits its own budget:
  *    title     Beagle — secret sent to Anthropic        (short, never clipped)
  *    subtitle  AWS access key                           (the specifics)
- *    body      Your claude-code agent has already sent it. Run "beagle ui"
+ *    body      Already sent by your claude-code agent. Run "beagle ui"
  *              for details.
- *  No lecture ("Beagle alerts, it can't block") — that's product philosophy,
- *  not something to repeat on every alert. The model name lives in the
- *  dashboard, not the banner. */
+ *  The body leads with "Already sent" — the honest, can't-undo part — then
+ *  attributes the agent; no dangling "it" (the secret is named on the line
+ *  above). No lecture ("Beagle alerts, it can't block") — that's product
+ *  philosophy, not something to repeat on every alert. The model name lives
+ *  in the dashboard, not the banner. */
 export function buildAlertMessage(a: AlertEvent): AlertMessage {
   const provider = providerName(a.provider);
   const title = `Beagle — secret sent to ${provider}${a.seenBefore ? " again" : ""}`;
   const subtitle = secretName(a.secretType);
-  const sender = a.agent ? `Your ${a.agent} agent` : "An agent";
+  const sender = a.agent ? `your ${a.agent} agent` : "an agent";
   const ownKey = a.destinationOwnKey
     ? ` It is ${provider}'s own API key, pasted into the message body.`
     : "";
-  const body = `${sender} has already sent it.${ownKey} Run "beagle ui" for details.`;
+  const body = `Already sent by ${sender}.${ownKey} Run "beagle ui" for details.`;
   return { title, subtitle, body };
 }
