@@ -24,10 +24,15 @@ export interface ViewerOptions {
   /** Grace before winding down while NO tab has connected yet (the "ran
    *  `beagle ui`, haven't opened the link" window). Default 10 min. */
   idleTimeoutMs?: number;
-  /** Grace after the LAST tab closes before winding down. Default 5s — short
-   *  enough that closing the dashboard stops the viewer (and releases the
-   *  daemon's "open dashboard" hold) promptly, long enough to survive a page
-   *  reload or the client's own ~1.5s SSE auto-reconnect. */
+  /** Grace after the LAST tab closes before winding down. The server can't
+   *  tell a real close from a transient drop — both surface as the SSE close
+   *  event — so this ALSO bounds how long an *open* tab survives a network
+   *  blip / laptop sleep / slow reload before the viewer tears down under it.
+   *  Default 30s: rides out reloads, the client's ~1.5s auto-reconnect, and
+   *  brief drops, while still releasing the daemon's "open dashboard" hold
+   *  promptly. It isn't the shutdown bottleneck anyway — the daemon's own
+   *  idle-exit grace only starts once the viewer stops and dominates the total,
+   *  so a larger linger here costs ~nothing and is much safer. */
   lingerMs?: number;
   /** Mutations ride through the daemon (single writer); absent → 501. */
   onPurge?: (kind: string) => void;
@@ -303,7 +308,7 @@ export class ViewerServer {
   // the viewer and releases the daemon's "open dashboard" hold. A page reload
   // reconnects (a new request re-arms the long timer) before this fires.
   private armLinger(): void {
-    this.armWindDown(this.opts.lingerMs ?? 5_000);
+    this.armWindDown(this.opts.lingerMs ?? 30_000);
   }
 
   private armWindDown(ms: number): void {
