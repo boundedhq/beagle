@@ -206,9 +206,11 @@ describe("ViewerServer hardening (design §6.8)", () => {
     expect(findViewerSafetyViolations(join(import.meta.dir, ".."))).toEqual([]);
   });
 
-  test("idle shutdown: viewer stops after the last SSE client disconnects", async () => {
+  test("idle shutdown: viewer stops promptly (linger) after the last SSE client disconnects", async () => {
     viewer.stop();
-    viewer = new ViewerServer({ stateDir, idleTimeoutMs: 150 });
+    // Long idle window, SHORT linger: closing the tab must wind down on the
+    // linger, not wait out the 10-min-style idle window (the daemon-hold bug).
+    viewer = new ViewerServer({ stateDir, idleTimeoutMs: 60_000, lingerMs: 150 });
     url = await viewer.start();
     const cred = await getCredential();
     const controller = new AbortController();
@@ -218,7 +220,38 @@ describe("ViewerServer hardening (design §6.8)", () => {
     });
     expect(stream.status).toBe(200);
     controller.abort(); // last tab closes
-    await Bun.sleep(400);
+    await Bun.sleep(400); // > lingerMs, << idleTimeoutMs
     expect(viewer.isRunning).toBe(false);
+  });
+
+  test("a reload within the linger keeps the viewer up (doesn't tear down mid-refresh)", async () => {
+    viewer.stop();
+    viewer = new ViewerServer({ stateDir, idleTimeoutMs: 60_000, lingerMs: 300 });
+    url = await viewer.start();
+    const cred = await getCredential();
+    const c1 = new AbortController();
+    await fetch(`${origin()}/api/stream`, { headers: { "x-beagle-token": cred }, signal: c1.signal });
+    c1.abort(); // tab closes → linger armed
+    await Bun.sleep(80); // reload lands before the 300ms linger fires
+    const c2 = new AbortController();
+    const restream = await fetch(`${origin()}/api/stream`, {
+      headers: { "x-beagle-token": cred },
+      signal: c2.signal,
+    });
+    expect(restream.status).toBe(200);
+    await Bun.sleep(400); // past the original linger deadline
+    expect(viewer.isRunning).toBe(true); // the reconnect kept it alive
+    c2.abort();
+  });
+
+  test("fresh viewer with no tab yet uses the long idle window, not the short linger", async () => {
+    viewer.stop();
+    // No client ever connects. A short linger must NOT apply here — only the
+    // (long) idle window governs the pre-connection wait. With a long window it
+    // is still running right after boot.
+    viewer = new ViewerServer({ stateDir, idleTimeoutMs: 60_000, lingerMs: 50 });
+    url = await viewer.start();
+    await Bun.sleep(300); // well past lingerMs
+    expect(viewer.isRunning).toBe(true);
   });
 });

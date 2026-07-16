@@ -22,7 +22,19 @@ import htmJs from "./static/vendor/htm.module.js" with { type: "text" };
 
 export interface ViewerOptions {
   stateDir: string;
+  /** Grace before winding down while NO tab has connected yet (the "ran
+   *  `beagle ui`, haven't opened the link" window). Default 10 min. */
   idleTimeoutMs?: number;
+  /** Grace after the LAST tab closes before winding down. The server can't
+   *  tell a real close from a transient drop — both surface as the SSE close
+   *  event — so this ALSO bounds how long an *open* tab survives a network
+   *  blip / laptop sleep / slow reload before the viewer tears down under it.
+   *  Default 30s: rides out reloads, the client's ~1.5s auto-reconnect, and
+   *  brief drops, while still releasing the daemon's "open dashboard" hold
+   *  promptly. It isn't the shutdown bottleneck anyway — the daemon's own
+   *  idle-exit grace only starts once the viewer stops and dominates the total,
+   *  so a larger linger here costs ~nothing and is much safer. */
+  lingerMs?: number;
   /** Mutations ride through the daemon (single writer); absent → 501. */
   onPurge?: (kind: string) => void;
 }
@@ -185,7 +197,11 @@ export class ViewerServer {
       this.sseClients.add(res);
       req.on("close", () => {
         this.sseClients.delete(res);
-        this.armIdleTimer();
+        // Last tab gone → wind down after a short linger, not the full idle
+        // window: an open tab holds its SSE connection, so size 0 means nobody
+        // is looking. A reload reconnects within the linger and cancels it.
+        if (this.sseClients.size === 0) this.armLinger();
+        else this.armIdleTimer();
       });
       return;
     }
@@ -290,8 +306,19 @@ export class ViewerServer {
   }
 
   private armIdleTimer(): void {
+    this.armWindDown(this.opts.idleTimeoutMs ?? 10 * 60_000);
+  }
+
+  // After the last tab closes, tear down after a brief grace instead of the
+  // long pre-connection idle window — so closing the dashboard promptly stops
+  // the viewer and releases the daemon's "open dashboard" hold. A page reload
+  // reconnects (a new request re-arms the long timer) before this fires.
+  private armLinger(): void {
+    this.armWindDown(this.opts.lingerMs ?? 30_000);
+  }
+
+  private armWindDown(ms: number): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
-    const ms = this.opts.idleTimeoutMs ?? 10 * 60_000;
     this.idleTimer = setTimeout(() => {
       // Listen only while someone is looking (R12).
       if (this.sseClients.size === 0) this.stop();
