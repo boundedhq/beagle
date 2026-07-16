@@ -4,6 +4,7 @@ import {
   escapeAppleScript,
   osascriptArgs,
   notifySendArgs,
+  Notifier,
 } from "../src/notifier/notifier";
 
 describe("exec hygiene (design §6.10)", () => {
@@ -49,5 +50,25 @@ describe("exec hygiene (design §6.10)", () => {
   test("notify-send has no subtitle slot — it leads the body instead", () => {
     const args = notifySendArgs({ title: "t", subtitle: "AWS access key", body: "the rest" });
     expect(args.at(-1)).toBe("AWS access key\nthe rest");
+  });
+
+  test("a body newline becomes an AppleScript \\n escape, never a raw newline", () => {
+    // AppleScript renders "a\\nb" as two lines; a raw newline in the -e source
+    // is the thing we must avoid (it would split the script argument).
+    expect(escapeAppleScript("line one\nline two")).toBe("line one\\nline two");
+    const args = osascriptArgs({ title: "t", body: "did it.\nrun beagle ui" });
+    expect(args[2]).toContain("did it.\\nrun beagle ui");
+    expect(args[2]).not.toContain("did it.\nrun beagle ui"); // no raw newline
+  });
+
+  test("notify-send keeps body newlines so the next step gets its own line", () => {
+    const args = notifySendArgs({ title: "t", body: "did it.\nrun beagle ui" });
+    expect(args.at(-1)).toBe("did it.\nrun beagle ui");
+  });
+
+  test("the terminal backstop stays one line even when the body has a newline", () => {
+    const line = new Notifier().terminalLine({ title: "t", body: "did it.\nrun beagle ui" });
+    expect(line).not.toContain("\n");
+    expect(line).toContain("did it. run beagle ui");
   });
 });

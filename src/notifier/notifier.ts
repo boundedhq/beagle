@@ -21,7 +21,15 @@ export function stripControlChars(s: string): string {
 }
 
 export function escapeAppleScript(s: string): string {
-  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  // Escape backslashes and quotes, then turn real newlines into the AppleScript
+  // \n escape (verified: `display notification "a\nb"` renders two lines) so a
+  // multi-line body stays a single, safe `-e` argument rather than a raw
+  // newline embedded in the script source.
+  return s
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\r/g, "\\r")
+    .replace(/\n/g, "\\n");
 }
 
 // macOS silently truncates long notification bodies; trim from the middle so
@@ -88,6 +96,6 @@ export class Notifier {
    *  when the alert prints. Deliberate since PR 5; easy to miss in an editor. */
   terminalLine(msg: AlertMessage): string {
     const mid = msg.subtitle ? `${stripControlChars(msg.subtitle)} — ` : "";
-    return `beagle ▲ ${stripControlChars(msg.title)} — ${mid}${stripControlChars(msg.body)}`;
+    return `beagle ▲ ${stripControlChars(msg.title)} — ${mid}${stripControlChars(msg.body).replace(/\s*\n\s*/g, " ")}`;
   }
 }
