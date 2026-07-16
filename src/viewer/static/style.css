@@ -282,7 +282,9 @@ button.linklike:hover { text-decoration: underline; }
 .detail .meta .warn { color: var(--leak); }
 .detail .msg { margin: 6px 0; padding: 6px 10px; border-left: 2px solid var(--border); }
 .detail .msg .role { color: var(--accent); font-size: 12px; }
-.detail .msg.assistant .role { color: var(--ok); }
+.detail .msg.assistant .role, .detail .msg.response .role { color: var(--ok); }
+/* bodies keep their newlines — pretty-printed JSON must not re-collapse */
+.detail .msg > div:last-child { white-space: pre-wrap; overflow-wrap: anywhere; }
 .detail pre {
   background: var(--bg); padding: 10px; border-radius: 6px; overflow-x: auto;
   white-space: pre-wrap; word-break: break-all; max-height: 420px; overflow-y: auto;
@@ -353,7 +355,7 @@ button.linklike:hover { text-decoration: underline; }
   text-transform: uppercase; letter-spacing: 0.07em; flex: none; color: var(--muted);
 }
 .mc-name.user, .mc-name.request { color: var(--accent); }
-.mc-name.assistant { color: var(--ok); }
+.mc-name.assistant, .mc-name.response { color: var(--ok); }
 .mc-name.tool { color: #e6c36b; }
 .mc-preview {
   flex: 1 1 auto; min-width: 0; color: var(--muted); font-size: 12px;

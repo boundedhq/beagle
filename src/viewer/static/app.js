@@ -408,7 +408,7 @@ function SessionTranscript({ sessionId, row, onBack }) {
               )}
               ${t.responseText != null && t.responseText !== "" &&
               html`<${TMsg} key=${`${t.id}:resp`} leaks=${t.leaks}
-                m=${{ role: "assistant", content: t.responseText }} />`}
+                m=${{ role: "response", content: t.responseText }} />`}
               ${t.messages.length === 0 && !t.responseText &&
               html`<div class="turn-empty">(no parsed content — open details for raw bytes)</div>`}
             </div>
@@ -466,12 +466,13 @@ function TMsg({ m, leaks }) {
   if (m.role === "tool" || m.role === "request") {
     return html`<${ToolCard} role=${m.role} content=${content} leaks=${leaks} hasLeak=${hasLeak} />`;
   }
-  // user / assistant / system / any future role: same card, labeled header
+  // user / response / assistant-history / any future role: same card, labeled
+  // header; bodies get the same JSON pretty-printing as tool cards.
   return html`
     <div class=${hasLeak ? "mcard has-leak" : "mcard"}>
       <div class="mc-head"><span class=${`mc-name ${m.role}`}>${m.role}</span></div>
       <div class="mc-body">
-        <${ClampedText} content=${content} leaks=${leaks}
+        <${ClampedText} content=${prettyContent(content, leaks)} leaks=${leaks}
           threshold=${m.role === "user" ? 1500 : 2500} hasLeak=${hasLeak} />
       </div>
     </div>
@@ -480,22 +481,25 @@ function TMsg({ m, leaks }) {
 
 const fmtChars = (n) => (n < 1000 ? `${n} chars` : `${(n / 1000).toFixed(1)}k chars`);
 
-// Pretty-print JSON for reading: each line that parses as a JSON object/array
-// re-serializes with 2-space indent (tool inputs and legacy request blobs are
-// one-liner JSON). Guard: if reformatting would lose an inline secret
-// highlight (the value no longer substring-matches), that line stays verbatim
-// — a leak never loses its red mark to cosmetics.
+// Pretty-print JSON for reading, applied to EVERY displayed body: each line
+// that parses as a JSON object/array (bare, or behind a "Name: " prefix like
+// the Mode B "Bash: {...}" convention) re-serializes with 2-space indent.
+// Guard: if reformatting would lose an inline secret highlight (the value no
+// longer substring-matches), that line stays verbatim — a leak never loses
+// its red mark to cosmetics.
 function prettyContent(text, leaks) {
   const values = (leaks ?? []).map((l) => l.value).filter(Boolean);
   return text
     .split("\n")
     .map((line) => {
       const t = line.trim();
-      if (!t.startsWith("{") && !t.startsWith("[")) return line;
+      const named = t.match(/^([A-Za-z_][\w.-]{0,40}):\s*([{[].*)$/);
+      const raw = named ? named[2] : t;
+      if (!raw.startsWith("{") && !raw.startsWith("[")) return line;
       try {
-        const p = JSON.stringify(JSON.parse(t), null, 2);
+        const p = JSON.stringify(JSON.parse(raw), null, 2);
         for (const v of values) if (line.includes(v) && !p.includes(v)) return line;
-        return p;
+        return named ? `${named[1]}:\n${p}` : p;
       } catch {
         return line;
       }
@@ -644,7 +648,7 @@ function Detail({ id, onSession }) {
             ${historyOpen && older.map((m) => html`<${Msg} m=${m} leaks=${leaks} />`)}
             ${newest.map((m) => html`<${Msg} m=${m} leaks=${leaks} />`)}
             ${detail.responseText != null &&
-            html`<${Msg} m=${{ role: "assistant", content: detail.responseText }} leaks=${leaks} />`}
+            html`<${Msg} m=${{ role: "response", content: detail.responseText }} leaks=${leaks} />`}
           `}
     </div>
   `;
@@ -706,7 +710,7 @@ function Msg({ m, leaks }) {
   return html`
     <div class=${"msg " + m.role}>
       <div class="role">${m.role}</div>
-      <div><${Highlighted} text=${content} leaks=${leaks} /></div>
+      <div><${Highlighted} text=${prettyContent(content, leaks)} leaks=${leaks} /></div>
     </div>
   `;
 }
