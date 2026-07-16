@@ -3,11 +3,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect } from "node:net";
-import { Daemon } from "../src/daemon/daemon";
+import { Daemon, type EmittedAlert } from "../src/daemon/daemon";
 import { controlRequest } from "../src/daemon/control";
 import { Store } from "../src/core/store/store";
 import { listCalls, listLeakEvents } from "../src/viewer/feed-query";
-import type { AlertEvent } from "../src/core/alert/engine";
 import { createServer, type Server } from "node:net";
 
 // fake upstream that replies with a fixed Anthropic-ish JSON body
@@ -96,7 +95,7 @@ describe("Daemon end-to-end", () => {
   let stateDir: string;
   let daemon: Daemon;
   let upstream: Awaited<ReturnType<typeof fakeUpstream>>;
-  let alerts: AlertEvent[];
+  let alerts: EmittedAlert[];
 
   beforeEach(async () => {
     stateDir = mkdtempSync(join(tmpdir(), "beagle-daemon-"));
@@ -278,6 +277,12 @@ describe("Daemon end-to-end", () => {
     await Bun.sleep(150);
     expect(alerts.length).toBe(1);
     expect(alerts[0]!.secretType).toBe("aws-access-key-id");
+    // the daemon enriches the event with rendered copy before it reaches any
+    // surface (this is what the dashboard banner + OS notification consume) —
+    // guard the facts→copy wiring, not just the facts.
+    expect(alerts[0]!.title).toContain("Beagle");
+    expect(alerts[0]!.subtitle).toBe("AWS access key");
+    expect(alerts[0]!.body).toContain("beagle ui");
 
     const store = Store.openReadOnly(stateDir);
     const events = listLeakEvents(store);

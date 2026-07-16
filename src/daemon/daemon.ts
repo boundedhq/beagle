@@ -16,7 +16,7 @@ import { ScanHost } from "../adapters/scan-host";
 import type { Finding } from "../core/scanner/engine";
 import { applyCaptureRedaction, redactValues, redactValuesInText } from "../transform/redact";
 import { scrubAuthHeaders } from "../core/normalize/normalize";
-import { Notifier } from "../notifier/notifier";
+import { Notifier, type AlertMessage } from "../notifier/notifier";
 import { buildAlertMessage } from "../notifier/alert-copy";
 import { detectFormat, extractActions, parseRequest, parseResponse, type Format, type ParsedRequest, type ToolAction } from "../parsers/parsers";
 import { startControlServer, type ControlRequest, type ControlResponse } from "./control";
@@ -31,12 +31,16 @@ import embeddedRulesRaw from "../../rules/beagle-rules.json" with { type: "text"
 import embeddedRulesPin from "../../rules/beagle-rules.sha256" with { type: "text" };
 const embeddedRules = embeddedRulesRaw as unknown as string;
 
+// What every alert surface (dashboard banner, OS notification, terminal, test
+// sink) receives: the core's structured facts plus the rendered human copy.
+export type EmittedAlert = AlertEvent & AlertMessage;
+
 export interface DaemonOptions {
   stateDir: string;
   rulesJson?: string; // override for tests; defaults to the embedded corpus
   rulesPin?: string;
   scanDeadlineMs?: number;
-  alertSinkForTest?: (a: AlertEvent) => void;
+  alertSinkForTest?: (a: EmittedAlert) => void;
   /** Never idle-exit — set for the service-installed daemon (§6.7), inferred
    *  from BEAGLE_SERVICE=1 when unset. */
   persistent?: boolean;
@@ -549,7 +553,7 @@ export class Daemon {
     // surface (dashboard banner, OS notification, terminal, test sink) gets
     // the same enriched event — facts plus copy.
     const msg = buildAlertMessage(a);
-    const alert = { ...a, ...msg };
+    const alert: EmittedAlert = { ...a, ...msg };
     this.viewer?.broadcast("alert", alert);
     if (this.opts.alertSinkForTest) {
       this.opts.alertSinkForTest(alert);
