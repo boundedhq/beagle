@@ -149,10 +149,10 @@ function App() {
         </div>
       </div>
       <div class="stats">
-        <button
+        <button aria-live="polite"
           class=${(leaks.length ? "stat leak" : "stat leak zero") + " clickable"}
           title=${leaks.length
-            ? "show the calls that leaked a secret"
+            ? "filter the feed to calls that leaked a secret"
             : "no secrets detected in anything captured so far"}
           onClick=${() => { setOpenSession(null); setTab("calls"); setLeaksOnly(true); }}>
           <span class="leak-dot" aria-hidden="true"></span>
@@ -345,7 +345,9 @@ function sessionTitle(raw) {
   if (t.startsWith("{")) {
     try {
       const o = JSON.parse(t);
-      if (o && typeof o.title === "string" && o.title.trim()) return o.title.trim();
+      // A {title: "..."} wrapper always yields its title — even when empty,
+      // so it collapses to "untitled" rather than showing the raw JSON.
+      if (o && typeof o.title === "string") return o.title.trim();
     } catch { /* not a JSON title wrapper — use as-is */ }
   }
   return t;
@@ -442,13 +444,16 @@ function SessionTranscript({ sessionId, row, onBack }) {
   `;
 }
 
-// "3:42 PM" between turns; "Jul 15, 3:42 PM" on the first turn and day changes.
+// "3:42 PM" between turns; "Jul 15, 3:42 PM" with the date (first turn / day
+// change / session meta). The year is added only for a non-current-year date,
+// so a session from last year isn't ambiguous while recent ones stay clean.
 function fmtDivider(ts, withDate) {
   const d = new Date(ts);
   const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  return withDate
-    ? `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`
-    : time;
+  if (!withDate) return time;
+  const opts = { month: "short", day: "numeric" };
+  if (d.getFullYear() !== new Date().getFullYear()) opts.year = "numeric";
+  return `${d.toLocaleDateString([], opts)}, ${time}`;
 }
 
 // The session id as a copyable chip: title carries the full id, click copies.
@@ -793,12 +798,10 @@ function SearchResults({ hits, term, onClear, onOpen }) {
   `;
 }
 
-// Plain-language read of HOW this call was grouped into its session (the
-// resolver's tier), with the confidence that grouping carries — so the label
-// says what it means, not an internal tag like "conv-id".
-// Plain-language read of HOW a call was grouped into its session. The
-// confidence qualifier shows only when it ISN'T high — a high-confidence
-// grouping needs no caveat; a weaker one earns the disclosure.
+// Plain-language read of HOW a call was grouped into its session (the
+// resolver's tier), not an internal tag like "conv-id". The confidence
+// qualifier shows only when it ISN'T high — a high-confidence grouping needs
+// no caveat; a weaker one earns the disclosure.
 function groupedBy(tier) {
   switch (tier) {
     case "conv-id": return "the provider's conversation id";
