@@ -9,10 +9,16 @@ const html = htm.bind(h);
 
 // ---- session bootstrap: exchange the one-time URL token for a header credential ----
 let credential = null;
+// `beagle ui --session <id>` deep link: land directly on that session's
+// transcript. Rides the #fragment so the id never reaches the server.
+let deepLinkSession = null;
 
 async function bootstrap() {
   const params = new URLSearchParams(location.search);
   const boot = params.get("boot");
+  // Read the fragment BEFORE the history scrub below drops it.
+  const frag = /^#s=(.+)$/.exec(location.hash);
+  if (frag) deepLinkSession = decodeURIComponent(frag[1]);
   if (boot) history.replaceState(null, "", "/"); // token out of the URL/history
   if (!boot) return false;
   const r = await fetch("/api/session", {
@@ -41,11 +47,14 @@ function App() {
   const [calls, setCalls] = useState([]);
   const [leaks, setLeaks] = useState([]);
   const [leaksOnly, setLeaksOnly] = useState(false);
-  const [tab, setTab] = useState("calls"); // "calls" | "sessions"
+  // A deep link starts on the transcript, with "← sessions" landing on the list.
+  const [tab, setTab] = useState(deepLinkSession ? "sessions" : "calls"); // "calls" | "sessions"
   // { id, row } → transcript view. row is the SessionRow when opened from the
   // sessions tab, a { agent, model } sliver from a feed row, or null (from a
-  // call detail) — the transcript header falls back to turn-derived meta.
-  const [openSession, setOpenSession] = useState(null);
+  // call detail or deep link) — the transcript header falls back to turn-derived meta.
+  const [openSession, setOpenSession] = useState(
+    deepLinkSession ? { id: deepLinkSession, row: null } : null,
+  );
   const [searchHits, setSearchHits] = useState(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [banner, setBanner] = useState(null);

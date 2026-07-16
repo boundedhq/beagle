@@ -64,6 +64,24 @@ export function listSessions(store: Store, limit: number): SessionRow[] {
     }));
 }
 
+// Title + agent for ONE session — the leaks CLI groups its log by session and
+// needs a headline per group. Same sentinel-skipping title pick as above.
+export function sessionHeadline(store: Store, sessionId: string): { title?: string; agent?: string } {
+  const r = store.queryAll<Record<string, unknown>>(
+    `SELECT
+       (SELECT t.summary FROM exchanges t
+          WHERE t.session_id = ?
+            AND t.summary IS NOT NULL AND t.summary != ''
+            AND t.summary NOT IN ('(no message content)', 'unparsed call (raw view available)')
+          ORDER BY t.ts_request ASC, t.id ASC LIMIT 1) AS title,
+       (SELECT agent FROM exchanges
+          WHERE session_id = ? AND agent IS NOT NULL
+          ORDER BY ts_request ASC LIMIT 1) AS agent`,
+    [sessionId, sessionId],
+  )[0];
+  return { title: (r?.title as string) ?? undefined, agent: (r?.agent as string) ?? undefined };
+}
+
 export interface SessionTurn {
   id: string; // call id — the transcript links each turn back to its call
   tsRequest: number;
