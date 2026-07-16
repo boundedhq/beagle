@@ -21,7 +21,14 @@ import htmJs from "./static/vendor/htm.module.js" with { type: "text" };
 
 export interface ViewerOptions {
   stateDir: string;
+  /** Grace before winding down while NO tab has connected yet (the "ran
+   *  `beagle ui`, haven't opened the link" window). Default 10 min. */
   idleTimeoutMs?: number;
+  /** Grace after the LAST tab closes before winding down. Default 5s — short
+   *  enough that closing the dashboard stops the viewer (and releases the
+   *  daemon's "open dashboard" hold) promptly, long enough to survive a page
+   *  reload or the client's own ~1.5s SSE auto-reconnect. */
+  lingerMs?: number;
   /** Mutations ride through the daemon (single writer); absent → 501. */
   onPurge?: (kind: string) => void;
 }
@@ -184,7 +191,11 @@ export class ViewerServer {
       this.sseClients.add(res);
       req.on("close", () => {
         this.sseClients.delete(res);
-        this.armIdleTimer();
+        // Last tab gone → wind down after a short linger, not the full idle
+        // window: an open tab holds its SSE connection, so size 0 means nobody
+        // is looking. A reload reconnects within the linger and cancels it.
+        if (this.sseClients.size === 0) this.armLinger();
+        else this.armIdleTimer();
       });
       return;
     }
@@ -284,8 +295,19 @@ export class ViewerServer {
   }
 
   private armIdleTimer(): void {
+    this.armWindDown(this.opts.idleTimeoutMs ?? 10 * 60_000);
+  }
+
+  // After the last tab closes, tear down after a brief grace instead of the
+  // long pre-connection idle window — so closing the dashboard promptly stops
+  // the viewer and releases the daemon's "open dashboard" hold. A page reload
+  // reconnects (a new request re-arms the long timer) before this fires.
+  private armLinger(): void {
+    this.armWindDown(this.opts.lingerMs ?? 5_000);
+  }
+
+  private armWindDown(ms: number): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
-    const ms = this.opts.idleTimeoutMs ?? 10 * 60_000;
     this.idleTimer = setTimeout(() => {
       // Listen only while someone is looking (R12).
       if (this.sseClients.size === 0) this.stop();
