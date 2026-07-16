@@ -207,6 +207,10 @@ main { flex: 1; padding: 8px 16px; }
 }
 .tabs .tab.active { background: var(--bg); color: var(--accent); border-color: var(--border); }
 .tabs .tab:hover { color: var(--text); }
+.tab-count {
+  background: var(--chip); border: 1px solid var(--border);
+  border-radius: 8px; padding: 0 6px; font-size: 10.5px; color: var(--muted);
+}
 .banner {
   background: var(--leak-bg); border: 1px solid var(--leak); color: var(--leak-fg);
   padding: 8px 12px; border-radius: 6px; margin: 8px 0;
@@ -222,7 +226,23 @@ main { flex: 1; padding: 8px 16px; }
 .row .agent { color: var(--accent); flex: 0 0 100px; overflow: hidden; text-overflow: ellipsis; }
 .row .model { color: var(--muted); flex: 0 0 130px; overflow: hidden; text-overflow: ellipsis; }
 .row .summary { flex: 1 1 auto; min-width: 120px; overflow: hidden; text-overflow: ellipsis; }
-.row .session { flex: 0 0 78px; text-align: right; margin-left: auto; }
+.row .session { flex: 0 0 88px; text-align: right; margin-left: auto; }
+/* the thread column is a LINK, not a label — accent text, arrow, underline */
+.session-link {
+  background: transparent; border: none; color: var(--accent);
+  padding: 0; font: inherit; font-size: 12px; cursor: pointer;
+}
+.session-link:hover { text-decoration: underline; }
+.session-link .go { color: var(--muted); }
+.session-link:hover .go { color: var(--accent); }
+.open-link { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.row:hover .open-link { color: var(--accent); text-decoration: underline; }
+button.linklike {
+  background: none; border: none; padding: 0; color: var(--accent);
+  cursor: pointer; font: inherit; font-size: inherit;
+}
+button.linklike:hover { text-decoration: underline; }
+.empty .hint { font-size: 12px; }
 /* Narrow feed. Must stay AFTER the .row rules above: a media query adds no
    specificity, so an override placed earlier silently loses to the base rule. */
 @media (max-width: 760px) {
@@ -268,28 +288,109 @@ main { flex: 1; padding: 8px 16px; }
   white-space: pre-wrap; word-break: break-all; max-height: 420px; overflow-y: auto;
 }
 .folded { color: var(--muted); cursor: pointer; padding: 4px 0; }
-/* session transcript: the whole session as a conversation */
-.transcript { padding: 4px 0 16px; max-width: 980px; }
+/* ---- session transcript: the whole session as a conversation thread ---- */
+/* Centered reading column — the feed stays full-width, the transcript earns
+   a measure. Everything left-aligned: tint + radius says "human said this";
+   mirrored chat bubbles would waste width in a dense dev tool. */
+.transcript { max-width: 860px; margin: 0 auto; padding: 8px 16px 40px; }
 .transcript-head {
-  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  padding: 10px 0; color: var(--text);
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 12px 0 4px;
 }
-.transcript-head .k { color: var(--muted); }
-.transcript-head .warn { color: #e6c36b; }
-.turn { border-left: 2px solid var(--border); margin: 14px 0; padding-left: 12px; }
-.turn-head {
-  color: var(--muted); font-size: 12px; cursor: pointer; padding: 2px 0;
-  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+.transcript-head .agent-name { font-size: 15px; font-weight: 600; color: var(--text); }
+.copy-chip { cursor: pointer; }
+.copy-chip:hover { border-color: var(--accent); color: var(--accent); }
+.transcript-meta {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  color: var(--muted); font-size: 12px; padding-bottom: 10px;
+  border-bottom: 1px solid var(--border); margin-bottom: 6px;
 }
-.turn-head:hover { color: var(--text); }
-.turn-head .warn { color: var(--leak-fg); }
-.turn-head .turn-toggle { margin-left: auto; }
-/* transcript messages mirror the detail view's bubbles */
-.turn .msg { margin: 6px 0; padding: 6px 10px; border-left: 2px solid var(--border); }
-.turn .msg .role { color: var(--accent); font-size: 12px; }
-.turn .msg.assistant .role { color: var(--ok); }
-.turn .msg.tool .role { color: #e6c36b; }
-.turn .msg > div:last-child { white-space: pre-wrap; word-break: break-word; }
+.transcript-meta .warn { color: #e6c36b; }
+.syscard {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; margin: 8px 0;
+}
+.syscard .sys-head { padding: 6px 12px; color: var(--muted); cursor: pointer; font-size: 12px; }
+.syscard pre { max-height: 300px; overflow-y: auto; margin: 0; border-top: 1px solid var(--border); }
+
+/* thread flow: no per-turn boxes — dividers and rails carry the structure */
+.thread { display: flex; flex-direction: column; }
+.time-divider {
+  display: flex; align-items: center; gap: 10px;
+  color: var(--muted); font-size: 11px; margin: 18px 0 2px; user-select: none;
+}
+.time-divider::before, .time-divider::after {
+  content: ""; flex: 1; border-top: 1px solid var(--border);
+}
+.turn { display: flex; flex-direction: column; }
+/* a red gutter rail makes leak turns scannable while scrolling */
+.turn.has-leak { border-left: 2px solid var(--leak); padding-left: 10px; margin-left: -12px; }
+.turn-rail {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  color: var(--muted); font-size: 11px; padding: 14px 0 0;
+  cursor: pointer; opacity: 0.75;
+}
+.turn-rail:hover { opacity: 1; color: var(--text); }
+.turn-rail .err { color: var(--leak-fg); }
+.turn-rail .turn-toggle { margin-left: auto; }
+.turn-empty { color: var(--muted); font-style: italic; font-size: 12px; padding: 6px 0; }
+
+/* messages */
+.tmsg { margin: 8px 0; display: flex; flex-direction: column; min-width: 0; }
+.speaker {
+  font-family: var(--sans); font-size: 10px; text-transform: uppercase;
+  letter-spacing: 0.08em; margin-bottom: 3px; color: var(--muted);
+}
+.speaker.user { color: var(--accent); }
+.speaker.assistant { color: var(--ok); }
+.tmsg.user .ubox {
+  max-width: min(85%, 640px); background: #202b40;
+  border: 1px solid #2e3a55; border-radius: 10px; padding: 8px 12px;
+}
+.tmsg.flat .body { max-width: 100%; line-height: 1.55; }
+.tmsg .body, .ubox, .tc-body { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* long-content clamp: CSS max-height only — the text is never sliced, so the
+   leak highlighter always sees full content and a secret can't be bisected */
+.clamp.clamped { max-height: 320px; overflow: hidden; position: relative; }
+.clamp.clamped::after {
+  content: ""; position: absolute; inset: auto 0 0 0; height: 48px;
+  background: linear-gradient(transparent, var(--bg)); pointer-events: none;
+}
+.tmsg.user .clamp.clamped { max-height: 260px; }
+.tmsg.user .clamp.clamped::after { background: linear-gradient(transparent, #202b40); }
+.expander {
+  background: none; border: none; color: var(--accent);
+  font-size: 11px; padding: 2px 0; cursor: pointer; align-self: flex-start;
+}
+
+/* tool calls / outputs as compact cards — sub-steps of the conversation */
+.toolcard {
+  max-width: 92%; margin: 8px 0 8px 16px; background: #14181f;
+  border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+}
+.toolcard.has-leak { border-left: 2px solid var(--leak); }
+.tc-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; cursor: pointer; min-width: 0; }
+.tc-head:hover { background: var(--row-hover); }
+.tc-name {
+  color: #e6c36b; font-weight: 600; font-size: 12px; flex: none;
+  font-family: var(--sans); text-transform: uppercase; letter-spacing: 0.06em;
+}
+.tc-preview {
+  flex: 1 1 auto; min-width: 0; color: var(--muted); font-size: 12px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tc-size { flex: none; color: var(--muted); font-size: 11px; }
+.tc-body {
+  max-height: 360px; overflow-y: auto; padding: 8px 12px;
+  border-top: 1px solid var(--border); font-size: 12.5px;
+}
+
+@media (max-width: 700px) {
+  .tmsg.user .ubox { max-width: 100%; }
+  .toolcard { max-width: 100%; margin-left: 8px; }
+  .transcript { padding: 8px 6px 24px; }
+}
 mark { background: #5b4a12; color: #ffe28a; border-radius: 2px; }
 mark.leak {
   background: var(--leak); color: #1a0000; font-weight: 600;
