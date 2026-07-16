@@ -277,7 +277,7 @@ describe("Daemon end-to-end", () => {
     );
     await Bun.sleep(150);
     expect(alerts.length).toBe(1);
-    expect(alerts[0]!.title).toContain("aws-access-key-id");
+    expect(alerts[0]!.secretType).toBe("aws-access-key-id");
 
     const store = Store.openReadOnly(stateDir);
     const events = listLeakEvents(store);

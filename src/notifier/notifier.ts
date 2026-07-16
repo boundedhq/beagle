@@ -32,7 +32,12 @@ export function trimBody(s: string, max = 200): string {
 export function osascriptArgs(msg: AlertMessage): string[] {
   const title = escapeAppleScript(stripControlChars(msg.title));
   const body = escapeAppleScript(trimBody(stripControlChars(msg.body)));
-  return ["osascript", "-e", `display notification "${body}" with title "${title}"`];
+  // A leak alert should be heard, not just seen — "Ping" is a stock macOS
+  // sound, so this stays dependency-free. (Known limitation of osascript
+  // notifications: the icon is Script Editor's and a click activates Script
+  // Editor — Apple offers no hook there without shipping a signed .app, so
+  // the TITLE carries the Beagle branding instead.)
+  return ["osascript", "-e", `display notification "${body}" with title "${title}" sound name "Ping"`];
 }
 
 export function notifySendArgs(msg: AlertMessage): string[] {

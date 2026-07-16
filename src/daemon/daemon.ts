@@ -17,6 +17,7 @@ import type { Finding } from "../core/scanner/engine";
 import { applyCaptureRedaction, redactValues, redactValuesInText } from "../transform/redact";
 import { scrubAuthHeaders } from "../core/normalize/normalize";
 import { Notifier } from "../notifier/notifier";
+import { buildAlertMessage } from "../notifier/alert-copy";
 import { detectFormat, extractActions, parseRequest, parseResponse, type Format, type ParsedRequest, type ToolAction } from "../parsers/parsers";
 import { startControlServer, type ControlRequest, type ControlResponse } from "./control";
 import { ViewerServer } from "../viewer/server";
@@ -544,13 +545,18 @@ export class Daemon {
   }
 
   private emitAlert(a: AlertEvent): void {
-    this.viewer?.broadcast("alert", a);
+    // Core emits the facts; the human wording is built HERE, once, and every
+    // surface (dashboard banner, OS notification, terminal, test sink) gets
+    // the same enriched event — facts plus copy.
+    const msg = buildAlertMessage(a);
+    const alert = { ...a, ...msg };
+    this.viewer?.broadcast("alert", alert);
     if (this.opts.alertSinkForTest) {
-      this.opts.alertSinkForTest(a);
+      this.opts.alertSinkForTest(alert);
       return;
     }
-    this.notifier.notify({ title: a.title, body: a.body });
-    process.stderr.write(this.notifier.terminalLine({ title: a.title, body: a.body }) + "\n");
+    this.notifier.notify(msg);
+    process.stderr.write(this.notifier.terminalLine(msg) + "\n");
   }
 
   private sweep(): void {
