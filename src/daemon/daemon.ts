@@ -474,6 +474,15 @@ export class Daemon {
             redaction?.values ?? [],
           );
       const scanState = redaction?.heldOut ? "incomplete" : scanResult.state;
+      // Persist the self-report's structure: Mode B bodies are scan text, not
+      // provider JSON, so the viewer can't re-parse them the way it does wire
+      // bodies. Scrubbed by value like summary/searchText (same rationale).
+      const displayMessages = redaction?.heldOut
+        ? null
+        : (call.request.messages ?? []).map((m) => ({
+            role: m.role,
+            content: redaction ? redactValuesInText(String(m.content), redaction.values) : String(m.content),
+          }));
       this.store.insertCall({
         id: call.id,
         sessionId: resolution.sessionId,
@@ -500,6 +509,7 @@ export class Daemon {
         responseBody: redaction ? redaction.responseBody : (call.response.bodyBytes ?? null),
         responseHeaders: null,
         sseRaw: null,
+        displayMessages: displayMessages?.length ? displayMessages : null,
         searchText,
       });
       this.alertEngine.process(

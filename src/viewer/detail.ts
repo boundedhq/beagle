@@ -99,8 +99,12 @@ export function buildDetail(call: CallRecord, spans: LeakSpan[]): CallDetail {
     captureState: call.captureState,
     source: call.source,
     system: parsedReq?.system ?? null,
-    messages: parsedReq?.messages ?? [],
-    responseText: parsedResp?.text ?? null,
+    // Mode B bodies are scan text, not provider JSON — their structure rides
+    // the persisted display_messages instead, and the stored response body IS
+    // the response text (the mapper wrote it that way).
+    messages: parsedReq?.messages ?? call.displayMessages ?? [],
+    responseText:
+      parsedResp?.text ?? (call.source === "otel" && responseRaw ? responseRaw : null),
     requestRaw,
     responseRaw,
     sseRaw,

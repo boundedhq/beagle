@@ -109,6 +109,29 @@ describe("Mode B end-to-end through the daemon", () => {
     store.close();
   });
 
+  test("Mode B call persists its display messages for the session transcript", async () => {
+    await post(otlpBody(token, "please read the readme"));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    const call = store.getCall(store.searchLiteral("please read the readme")[0]!.callId)!;
+    // the self-report's structure survives persistence (schema v3) — this is
+    // what the viewer's transcript and detail views render for Mode B rows
+    expect(call.displayMessages).toEqual([{ role: "user", content: "please read the readme" }]);
+    store.close();
+  });
+
+  test("redact-on-capture scrubs display messages too", async () => {
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    await post(otlpBody(token, "my key AKIAZQ3DRSTUVWXY2345 leaked", "otel-conv-dm", null));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    const call = store.getCall(store.searchLiteral("my key")[0]!.callId)!;
+    const dm = JSON.stringify(call.displayMessages);
+    expect(dm).not.toContain("AKIAZQ3DRSTUVWXY2345");
+    expect(dm).toContain("[REDACTED:aws-access-key-id:");
+    store.close();
+  });
+
   test("a leaked secret in an OTel-reported prompt fires the same alert", async () => {
     await post(otlpBody(token, "the key is AKIAZQ3DRSTUVWXY2345"));
     await settled(daemon.socketPath);

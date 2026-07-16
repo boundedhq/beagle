@@ -53,6 +53,27 @@ describe("buildDetail — response reassembly (UI fix 1)", () => {
     expect(d.messages).toEqual([{ role: "user", content: "hi" }]);
   });
 
+  test("Mode B call: structure comes from persisted display messages, response from raw text", () => {
+    // otel bodies are scan text, not provider JSON — before display_messages
+    // the structured view was empty and the row fell back to raw bytes.
+    const d = buildDetail(
+      call({
+        source: "otel", endpoint: "otel:claude_code.turn",
+        requestBody: enc("run the tests"),
+        responseBody: enc("Running them now."),
+        displayMessages: [{ role: "user", content: "run the tests" }],
+      }),
+      [],
+    );
+    expect(d.messages).toEqual([{ role: "user", content: "run the tests" }]);
+    expect(d.responseText).toBe("Running them now.");
+  });
+
+  test("wire call ignores displayMessages: its body parses on its own", () => {
+    const d = buildDetail(call({ displayMessages: [{ role: "user", content: "stale" }] }), []);
+    expect(d.messages).toEqual([{ role: "user", content: "hi" }]);
+  });
+
   test("unparseable response falls back to raw, never throws", () => {
     const d = buildDetail(call({ responseBody: enc("\x00\x01 not json or sse") }), []);
     expect(d.responseText).toBeNull();

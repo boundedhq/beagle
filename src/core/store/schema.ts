@@ -1,6 +1,6 @@
 // Schema from design §4. Version stamped in PRAGMA user_version; every
 // reader checks it before querying (two binaries share this file).
-export const SCHEMA_VERSION = 2; // v2: leak_occurrences span columns (R7 highlight)
+export const SCHEMA_VERSION = 3; // v3: payloads.display_messages (Mode B structure)
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS exchanges (
@@ -29,6 +29,10 @@ CREATE TABLE IF NOT EXISTS payloads (
   request_headers  TEXT,
   response_body BLOB,
   response_headers TEXT,
+  -- Mode B only: the self-report's pre-flattened display messages (JSON of
+  -- [{role,content}]); wire rows leave it NULL, redact-on-capture scrubs it.
+  -- Before sse_raw on purpose: a line comment before the LAST column breaks DROP.
+  display_messages TEXT,
   sse_raw       BLOB
 );
 

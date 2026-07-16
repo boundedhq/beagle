@@ -41,7 +41,8 @@ function App() {
   const [calls, setCalls] = useState([]);
   const [leaks, setLeaks] = useState([]);
   const [leaksOnly, setLeaksOnly] = useState(false);
-  const [sessionFilter, setSessionFilter] = useState(null);
+  const [tab, setTab] = useState("calls"); // "calls" | "sessions"
+  const [openSession, setOpenSession] = useState(null); // session id → transcript view
   const [searchHits, setSearchHits] = useState(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [banner, setBanner] = useState(null);
@@ -106,9 +107,7 @@ function App() {
     setSearchHits(term ? await api.post("/api/search", { term }) : null);
   }
 
-  const visible = calls.filter(
-    (x) => (!leaksOnly || x.hasLeak) && (!sessionFilter || x.sessionId === sessionFilter),
-  );
+  const visible = calls.filter((x) => !leaksOnly || x.hasLeak);
   // Server totals count the whole store; the feed state is only its newest
   // 500-row window. Fall back to the window while /api/stats is in flight.
   const callCount = stats?.calls ?? calls.length;
@@ -187,41 +186,51 @@ function App() {
           onClick=${() => setLeaksOnly(!leaksOnly)}>
           <span class="toggle-dot" aria-hidden="true"></span>leaks only
         </button>
-        ${sessionFilter &&
-        html`<button class="toggle active" title="showing one session — click to clear"
-          onClick=${() => setSessionFilter(null)}>
-          session ${sessionFilter.slice(0, 8)} ✕
-        </button>`}
       </div>
     </header>
+    <nav class="tabs" role="tablist">
+      <button role="tab" aria-selected=${tab === "calls" && !openSession ? "true" : "false"}
+        class=${tab === "calls" && !openSession ? "tab active" : "tab"}
+        onClick=${() => { setTab("calls"); setOpenSession(null); }}>calls</button>
+      <button role="tab" aria-selected=${tab === "sessions" || openSession ? "true" : "false"}
+        class=${tab === "sessions" || openSession ? "tab active" : "tab"}
+        onClick=${() => { setTab("sessions"); setOpenSession(null); }}>sessions</button>
+    </nav>
     <main>
       ${banner &&
       html`<div class="banner" onClick=${() => setBanner(null)}>
         ▲ ${banner.title} — ${banner.body}
       </div>`}
       ${searchHits !== null && html`<${SearchResults} hits=${searchHits} term=${searchTerm}
-        onClear=${() => setSearchHits(null)} onOpen=${(id) => setExpanded(id)} />`}
-      ${visible.length === 0 && html`<div class="empty">
-        no calls${leaksOnly ? " with leaks" : ""} yet — run an agent under
-        ${" "}<code>beagle run</code> and its traffic appears here live
-      </div>`}
-      ${visible.length > 0 &&
-      html`<div class="row head" aria-hidden="true">
-        <span class="dot spacer"></span>
-        <span class="time">time</span>
-        <span class="agent">agent</span>
-        <span class="model">model</span>
-        <span class="summary">what was sent</span>
-        <span class="session">session</span>
-      </div>`}
-      ${visible.map(
-        (x) => html`
-          <${Row} key=${x.id} x=${x}
-            onToggle=${() => setExpanded(expanded === x.id ? null : x.id)}
-            onSession=${() => setSessionFilter(x.sessionId)} />
-          ${expanded === x.id && html`<${Detail} id=${x.id} />`}
-        `,
-      )}
+        onClear=${() => setSearchHits(null)}
+        onOpen=${(id) => { setTab("calls"); setOpenSession(null); setExpanded(id); }} />`}
+      ${openSession != null &&
+      html`<${SessionTranscript} sessionId=${openSession} onBack=${() => setOpenSession(null)} />`}
+      ${openSession == null && tab === "sessions" &&
+      html`<${Sessions} onOpen=${(id) => setOpenSession(id)} />`}
+      ${openSession == null && tab === "calls" && html`
+        ${visible.length === 0 && html`<div class="empty">
+          no calls${leaksOnly ? " with leaks" : ""} yet — run an agent under
+          ${" "}<code>beagle run</code> and its traffic appears here live
+        </div>`}
+        ${visible.length > 0 &&
+        html`<div class="row head" aria-hidden="true">
+          <span class="dot spacer"></span>
+          <span class="time">time</span>
+          <span class="agent">agent</span>
+          <span class="model">model</span>
+          <span class="summary">what was sent</span>
+          <span class="session">session</span>
+        </div>`}
+        ${visible.map(
+          (x) => html`
+            <${Row} key=${x.id} x=${x}
+              onToggle=${() => setExpanded(expanded === x.id ? null : x.id)}
+              onSession=${() => setOpenSession(x.sessionId)} />
+            ${expanded === x.id && html`<${Detail} id=${x.id} />`}
+          `,
+        )}
+      `}
     </main>
     <footer>
       🔒 everything on this page stays on your machine — the only outbound traffic is your
@@ -258,13 +267,102 @@ function Row({ x, onToggle, onSession }) {
               "so this is a self-report and its alerts can lag a few seconds"}>self-reported</span>`}
       ${x.scanState !== "ok" && html`<span class="chip">scan incomplete</span>`}
       <span class="session">
-        <span class="chip" title="filter to this session"
+        <span class="chip" title="open this session as a conversation"
           onClick=${(e) => { e.stopPropagation(); onSession(); }}>
           ${x.sessionId.slice(0, 6)}
         </span>
       </span>
     </div>
   `;
+}
+
+// The sessions tab: one row per session, newest activity first.
+function Sessions({ onOpen }) {
+  const [sessions, setSessions] = useState(null);
+  useEffect(() => { api.get("/api/sessions").then(setSessions); }, []);
+  if (sessions === null) return html`<div class="empty">loading…</div>`;
+  if (sessions.length === 0)
+    return html`<div class="empty">
+      no sessions yet — run an agent under <code>beagle run</code> and each
+      conversation shows up here
+    </div>`;
+  return html`
+    <div class="row head" aria-hidden="true">
+      <span class="dot spacer"></span>
+      <span class="time">last active</span>
+      <span class="agent">agent</span>
+      <span class="model">model</span>
+      <span class="summary">activity</span>
+      <span class="session">session</span>
+    </div>
+    ${sessions.map((s) => {
+      const span = spanLabel(s.firstTs, s.lastTs);
+      return html`<div class=${s.leaks > 0 ? "row leak" : "row"} key=${s.sessionId}
+        onClick=${() => onOpen(s.sessionId)} title="open this session as a conversation">
+        <span class=${s.leaks > 0 ? "dot err" : "dot"}></span>
+        <span class="time">${new Date(s.lastTs).toLocaleString()}</span>
+        <span class="agent">${s.agent ?? "?"}</span>
+        <span class="model">${s.model ?? ""}</span>
+        <span class="summary">
+          ${s.calls} call${s.calls === 1 ? "" : "s"}${span ? ` over ${span}` : ""}
+        </span>
+        ${s.leaks > 0 && html`<span class="chip leak">${s.leaks} leak${s.leaks === 1 ? "" : "s"}</span>`}
+        ${s.source !== "wire" && html`<span class="chip otel">
+          ${s.source === "mixed" ? "partly self-reported" : "self-reported"}</span>`}
+        <span class="session"><span class="chip">${s.sessionId.slice(0, 6)}</span></span>
+      </div>`;
+    })}
+  `;
+}
+
+// One session rendered as a chronological conversation — each turn shows only
+// what it ADDED (the server diffs wire histories), so it reads like the
+// agent's own UI: prompt → response → tool call → tool output.
+function SessionTranscript({ sessionId, onBack }) {
+  const [view, setView] = useState(null);
+  const [openCall, setOpenCall] = useState(null);
+  useEffect(() => { api.get(`/api/session/${sessionId}`).then(setView); }, [sessionId]);
+  if (!view) return html`<div class="empty">loading…</div>`;
+  const turns = view.turns ?? [];
+  return html`
+    <div class="transcript">
+      <div class="transcript-head">
+        <button onClick=${onBack}>← all sessions</button>
+        <span class="k">session</span> ${sessionId.slice(0, 8)} ·
+        ${turns.length} turn${turns.length === 1 ? "" : "s"}
+        ${view.truncated && html` · <span class="warn">showing the first 200 calls only</span>`}
+      </div>
+      ${view.system != null && html`<${Chip} label=${`system · ${view.system.length} chars`} body=${view.system} />`}
+      ${turns.length === 0 && html`<div class="empty">nothing captured in this session yet</div>`}
+      ${turns.map(
+        (t) => html`
+          <div class="turn" key=${t.id}>
+            <div class="turn-head" onClick=${() => setOpenCall(openCall === t.id ? null : t.id)}
+              title="click for this call's full detail (raw bytes, sizes, tokens)">
+              ${new Date(t.tsRequest).toLocaleTimeString()}
+              ${t.model ? ` · ${t.model}` : ""}
+              ${t.source !== "wire" ? " · self-reported" : ""}
+              ${t.status != null && t.status >= 400 ? html` · <span class="warn">error ${t.status}</span>` : ""}
+              ${t.leaks.length > 0 && html` · <span class="chip leak">leak</span>`}
+              <span class="turn-toggle">${openCall === t.id ? "▾ details" : "▸ details"}</span>
+            </div>
+            ${openCall === t.id && html`<${Detail} id=${t.id} />`}
+            ${t.messages.map((m) => html`<${Msg} m=${m} leaks=${t.leaks} />`)}
+            ${t.responseText != null && t.responseText !== "" &&
+            html`<${Msg} m=${{ role: "assistant", content: t.responseText }} leaks=${t.leaks} />`}
+          </div>
+        `,
+      )}
+    </div>
+  `;
+}
+
+// "3 min", "2 h" — how long a session's activity spans, for the sessions list.
+function spanLabel(first, last) {
+  const s = Math.round((last - first) / 1000);
+  if (s < 60) return s > 1 ? `${s} s` : "";
+  if (s < 3600) return `${Math.round(s / 60)} min`;
+  return `${(s / 3600).toFixed(1)} h`;
 }
 
 function Detail({ id }) {
