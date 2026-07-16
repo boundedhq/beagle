@@ -5,12 +5,21 @@
   --bright: #eef2f9; /* top text tier — the wordmark only */
   --ok: #3ecf8e; --chip: #262b37; --border: #2a3040;
   --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* One monospace stack, used everywhere content is shown (feed summaries,
+     message bodies, raw view). ui-monospace picks the OS's best mono (SF Mono
+     on macOS, Segoe UI Mono on Windows); the named fallbacks are widely-loved
+     dev fonts for anyone who has them. No web font is loaded — the viewer is
+     offline / CSP-locked, and these render crisply on every platform. */
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  /* Single content size so request, response, tool bodies and feed summaries
+     all match — the inconsistency was 12.5 vs 14px, not the font family. */
+  --content: 12.5px;
   font-size: 14px;
 }
 * { box-sizing: border-box; margin: 0; }
 body {
   background: var(--bg); color: var(--text);
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: var(--mono);
 }
 #app { display: flex; flex-direction: column; min-height: 100vh; }
 /* Header — "bold identity": badge brand, live stat cards, actions. The one
@@ -207,6 +216,10 @@ main { flex: 1; padding: 8px 16px; }
 }
 .tabs .tab.active { background: var(--bg); color: var(--accent); border-color: var(--border); }
 .tabs .tab:hover { color: var(--text); }
+.tab-count {
+  background: var(--chip); border: 1px solid var(--border);
+  border-radius: 8px; padding: 0 6px; font-size: 10.5px; color: var(--muted);
+}
 .banner {
   background: var(--leak-bg); border: 1px solid var(--leak); color: var(--leak-fg);
   padding: 8px 12px; border-radius: 6px; margin: 8px 0;
@@ -215,6 +228,9 @@ main { flex: 1; padding: 8px 16px; }
   display: flex; gap: 10px; align-items: baseline; padding: 6px 10px;
   border-left: 3px solid transparent; border-bottom: 1px solid var(--border);
   cursor: pointer; white-space: nowrap; overflow: hidden;
+  /* content size, matching the transcript bodies — "what was sent" reads the
+     same as the request/response it links to (.row.head sets its own 11px) */
+  font-size: var(--content);
 }
 .row:hover { background: var(--row-hover); }
 .row.leak { border-left-color: var(--leak); background: #1f151a; }
@@ -222,7 +238,23 @@ main { flex: 1; padding: 8px 16px; }
 .row .agent { color: var(--accent); flex: 0 0 100px; overflow: hidden; text-overflow: ellipsis; }
 .row .model { color: var(--muted); flex: 0 0 130px; overflow: hidden; text-overflow: ellipsis; }
 .row .summary { flex: 1 1 auto; min-width: 120px; overflow: hidden; text-overflow: ellipsis; }
-.row .session { flex: 0 0 78px; text-align: right; margin-left: auto; }
+.row .session { flex: 0 0 88px; text-align: right; margin-left: auto; }
+/* the thread column is a LINK, not a label — accent text, arrow, underline */
+.session-link {
+  background: transparent; border: none; color: var(--accent);
+  padding: 0; font: inherit; font-size: 12px; cursor: pointer;
+}
+.session-link:hover { text-decoration: underline; }
+.session-link .go { color: var(--muted); }
+.session-link:hover .go { color: var(--accent); }
+.open-link { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.row:hover .open-link { color: var(--accent); text-decoration: underline; }
+button.linklike {
+  background: none; border: none; padding: 0; color: var(--accent);
+  cursor: pointer; font: inherit; font-size: inherit;
+}
+button.linklike:hover { text-decoration: underline; }
+.empty .hint { font-size: 12px; }
 /* Narrow feed. Must stay AFTER the .row rules above: a media query adds no
    specificity, so an override placed earlier silently loses to the base rule. */
 @media (max-width: 760px) {
@@ -262,34 +294,116 @@ main { flex: 1; padding: 8px 16px; }
 .detail .meta .warn { color: var(--leak); }
 .detail .msg { margin: 6px 0; padding: 6px 10px; border-left: 2px solid var(--border); }
 .detail .msg .role { color: var(--accent); font-size: 12px; }
-.detail .msg.assistant .role { color: var(--ok); }
+.detail .msg.assistant .role, .detail .msg.response .role { color: var(--ok); }
+/* bodies keep their newlines — pretty-printed JSON must not re-collapse —
+   and match the transcript/feed content size */
+.detail .msg > div:last-child {
+  white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--content);
+}
 .detail pre {
   background: var(--bg); padding: 10px; border-radius: 6px; overflow-x: auto;
   white-space: pre-wrap; word-break: break-all; max-height: 420px; overflow-y: auto;
+  font-size: var(--content);
 }
 .folded { color: var(--muted); cursor: pointer; padding: 4px 0; }
-/* session transcript: the whole session as a conversation */
-.transcript { padding: 4px 0 16px; max-width: 980px; }
+/* ---- session transcript: the whole session as a conversation thread ---- */
+/* Centered reading column — the feed stays full-width, the transcript earns
+   a measure. Everything left-aligned: tint + radius says "human said this";
+   mirrored chat bubbles would waste width in a dense dev tool. */
+.transcript { max-width: 860px; margin: 0 auto; padding: 8px 16px 40px; }
 .transcript-head {
-  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  padding: 10px 0; color: var(--text);
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 12px 0 4px;
 }
-.transcript-head .k { color: var(--muted); }
-.transcript-head .warn { color: #e6c36b; }
-.turn { border-left: 2px solid var(--border); margin: 14px 0; padding-left: 12px; }
-.turn-head {
-  color: var(--muted); font-size: 12px; cursor: pointer; padding: 2px 0;
-  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+.transcript-head .agent-name { font-size: 15px; font-weight: 600; color: var(--text); }
+.copy-chip { cursor: pointer; }
+.copy-chip:hover { border-color: var(--accent); color: var(--accent); }
+.transcript-meta {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  color: var(--muted); font-size: 12px; padding-bottom: 10px;
+  border-bottom: 1px solid var(--border); margin-bottom: 6px;
 }
-.turn-head:hover { color: var(--text); }
-.turn-head .warn { color: var(--leak-fg); }
-.turn-head .turn-toggle { margin-left: auto; }
-/* transcript messages mirror the detail view's bubbles */
-.turn .msg { margin: 6px 0; padding: 6px 10px; border-left: 2px solid var(--border); }
-.turn .msg .role { color: var(--accent); font-size: 12px; }
-.turn .msg.assistant .role { color: var(--ok); }
-.turn .msg.tool .role { color: #e6c36b; }
-.turn .msg > div:last-child { white-space: pre-wrap; word-break: break-word; }
+.transcript-meta .warn { color: #e6c36b; }
+.syscard {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; margin: 8px 0;
+}
+.syscard .sys-head { padding: 6px 12px; color: var(--muted); cursor: pointer; font-size: 12px; }
+.syscard pre { max-height: 300px; overflow-y: auto; margin: 0; border-top: 1px solid var(--border); }
+
+/* thread flow: no per-turn boxes — dividers and rails carry the structure */
+.thread { display: flex; flex-direction: column; }
+.time-divider {
+  display: flex; align-items: center; gap: 10px;
+  color: var(--muted); font-size: 11px; margin: 18px 0 2px; user-select: none;
+}
+.time-divider::before, .time-divider::after {
+  content: ""; flex: 1; border-top: 1px solid var(--border);
+}
+.turn { display: flex; flex-direction: column; }
+/* a red gutter rail makes leak turns scannable while scrolling */
+.turn.has-leak { border-left: 2px solid var(--leak); padding-left: 10px; margin-left: -12px; }
+.turn-rail {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  color: var(--muted); font-size: 11px; padding: 14px 0 0;
+  cursor: pointer; opacity: 0.75;
+}
+.turn-rail:hover { opacity: 1; color: var(--text); }
+.turn-rail .err { color: var(--leak-fg); }
+.turn-rail .turn-toggle { margin-left: auto; }
+.turn-empty { color: var(--muted); font-style: italic; font-size: 12px; padding: 6px 0; }
+
+/* uniform message cards: every message — user, assistant, tool, request —
+   sits in the same shell; only the colored role label in the header differs */
+.mcard {
+  margin: 8px 0; background: #14181f; border: 1px solid var(--border);
+  border-radius: 8px; overflow: hidden;
+}
+.mcard.has-leak { border-left: 2px solid var(--leak); }
+.mc-head {
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px 0;
+  min-width: 0; color: var(--muted); font-size: 11px;
+}
+.mc-head.click { cursor: pointer; padding-bottom: 6px; }
+.mc-head.click:hover { background: var(--row-hover); }
+.mc-name {
+  font-family: var(--sans); font-size: 10.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.07em; flex: none; color: var(--muted);
+}
+.mc-name.user, .mc-name.request { color: var(--accent); }
+.mc-name.assistant, .mc-name.response { color: var(--ok); }
+.mc-name.tool { color: #e6c36b; }
+.mc-preview {
+  flex: 1 1 auto; min-width: 0; color: var(--muted); font-size: 12px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.mc-size { flex: none; color: var(--muted); font-size: 11px; margin-left: auto; }
+.mc-body {
+  padding: 4px 12px 9px; line-height: 1.55; font-size: var(--content);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+/* tool/request bodies open below a clickable header: separate + cap them
+   (same font-size as every other body — inherited from .mc-body) */
+.mc-body.scroll {
+  border-top: 1px solid var(--border); padding-top: 8px;
+  max-height: 360px; overflow-y: auto;
+}
+
+/* long-content clamp: CSS max-height only — the text is never sliced, so the
+   leak highlighter always sees full content and a secret can't be bisected */
+.clamp.clamped { max-height: 300px; overflow: hidden; position: relative; }
+.clamp.clamped::after {
+  content: ""; position: absolute; inset: auto 0 0 0; height: 48px;
+  background: linear-gradient(transparent, #14181f); pointer-events: none;
+}
+.expander {
+  background: none; border: none; color: var(--accent);
+  font-size: 11px; padding: 2px 0; cursor: pointer; align-self: flex-start;
+}
+
+@media (max-width: 700px) {
+  .transcript { padding: 8px 6px 24px; }
+}
 mark { background: #5b4a12; color: #ffe28a; border-radius: 2px; }
 mark.leak {
   background: var(--leak); color: #1a0000; font-weight: 600;

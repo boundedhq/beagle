@@ -42,7 +42,10 @@ function App() {
   const [leaks, setLeaks] = useState([]);
   const [leaksOnly, setLeaksOnly] = useState(false);
   const [tab, setTab] = useState("calls"); // "calls" | "sessions"
-  const [openSession, setOpenSession] = useState(null); // session id → transcript view
+  // { id, row } → transcript view. row is the SessionRow when opened from the
+  // sessions tab, a { agent, model } sliver from a feed row, or null (from a
+  // call detail) — the transcript header falls back to turn-derived meta.
+  const [openSession, setOpenSession] = useState(null);
   const [searchHits, setSearchHits] = useState(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [banner, setBanner] = useState(null);
@@ -194,7 +197,9 @@ function App() {
         onClick=${() => { setTab("calls"); setOpenSession(null); }}>calls</button>
       <button role="tab" aria-selected=${tab === "sessions" || openSession ? "true" : "false"}
         class=${tab === "sessions" || openSession ? "tab active" : "tab"}
-        onClick=${() => { setTab("sessions"); setOpenSession(null); }}>sessions</button>
+        onClick=${() => { setTab("sessions"); setOpenSession(null); }}>sessions${
+          sessionCount > 0 ? html` <span class="tab-count">${sessionCount}</span>` : ""
+        }</button>
     </nav>
     <main>
       ${banner &&
@@ -205,13 +210,16 @@ function App() {
         onClear=${() => setSearchHits(null)}
         onOpen=${(id) => { setTab("calls"); setOpenSession(null); setExpanded(id); }} />`}
       ${openSession != null &&
-      html`<${SessionTranscript} sessionId=${openSession} onBack=${() => setOpenSession(null)} />`}
+      html`<${SessionTranscript} sessionId=${openSession.id} row=${openSession.row}
+        onBack=${() => setOpenSession(null)} />`}
       ${openSession == null && tab === "sessions" &&
-      html`<${Sessions} onOpen=${(id) => setOpenSession(id)} />`}
+      html`<${Sessions} onOpen=${(s) => setOpenSession({ id: s.sessionId, row: s })} />`}
       ${openSession == null && tab === "calls" && html`
         ${visible.length === 0 && html`<div class="empty">
           no calls${leaksOnly ? " with leaks" : ""} yet — run an agent under
-          ${" "}<code>beagle run</code> and its traffic appears here live
+          ${" "}<code>beagle run</code> and its traffic appears here live<br />
+          <span class="hint">each call links to its session's full conversation —
+          click the › in the thread column</span>
         </div>`}
         ${visible.length > 0 &&
         html`<div class="row head" aria-hidden="true">
@@ -220,14 +228,17 @@ function App() {
           <span class="agent">agent</span>
           <span class="model">model</span>
           <span class="summary">what was sent</span>
-          <span class="session">session</span>
+          <span class="session">thread</span>
         </div>`}
         ${visible.map(
           (x) => html`
             <${Row} key=${x.id} x=${x}
               onToggle=${() => setExpanded(expanded === x.id ? null : x.id)}
-              onSession=${() => setOpenSession(x.sessionId)} />
-            ${expanded === x.id && html`<${Detail} id=${x.id} />`}
+              onSession=${() =>
+                setOpenSession({ id: x.sessionId, row: { agent: x.agent, model: x.model } })} />
+            ${expanded === x.id &&
+            html`<${Detail} id=${x.id}
+              onSession=${(sid) => setOpenSession({ id: sid, row: null })} />`}
           `,
         )}
       `}
@@ -267,10 +278,10 @@ function Row({ x, onToggle, onSession }) {
               "so this is a self-report and its alerts can lag a few seconds"}>self-reported</span>`}
       ${x.scanState !== "ok" && html`<span class="chip">scan incomplete</span>`}
       <span class="session">
-        <span class="chip" title="open this session as a conversation"
+        <button class="session-link" title="open this session as a conversation"
           onClick=${(e) => { e.stopPropagation(); onSession(); }}>
-          ${x.sessionId.slice(0, 6)}
-        </span>
+          ${x.sessionId.slice(0, 6)}<span class="go" aria-hidden="true"> ›</span>
+        </button>
       </span>
     </div>
   `;
@@ -284,7 +295,7 @@ function Sessions({ onOpen }) {
   if (sessions.length === 0)
     return html`<div class="empty">
       no sessions yet — run an agent under <code>beagle run</code> and each
-      conversation shows up here
+      conversation shows up here. Click one to read it end to end.
     </div>`;
   return html`
     <div class="row head" aria-hidden="true">
@@ -293,12 +304,12 @@ function Sessions({ onOpen }) {
       <span class="agent">agent</span>
       <span class="model">model</span>
       <span class="summary">activity</span>
-      <span class="session">session</span>
+      <span class="session">thread</span>
     </div>
     ${sessions.map((s) => {
       const span = spanLabel(s.firstTs, s.lastTs);
       return html`<div class=${s.leaks > 0 ? "row leak" : "row"} key=${s.sessionId}
-        onClick=${() => onOpen(s.sessionId)} title="open this session as a conversation">
+        onClick=${() => onOpen(s)} title="open this session as a conversation">
         <span class=${s.leaks > 0 ? "dot err" : "dot"}></span>
         <span class="time">${new Date(s.lastTs).toLocaleString()}</span>
         <span class="agent">${s.agent ?? "?"}</span>
@@ -309,50 +320,252 @@ function Sessions({ onOpen }) {
         ${s.leaks > 0 && html`<span class="chip leak">${s.leaks} leak${s.leaks === 1 ? "" : "s"}</span>`}
         ${s.source !== "wire" && html`<span class="chip otel">
           ${s.source === "mixed" ? "partly self-reported" : "self-reported"}</span>`}
-        <span class="session"><span class="chip">${s.sessionId.slice(0, 6)}</span></span>
+        <span class="session"><span class="open-link">view thread ›</span></span>
       </div>`;
     })}
+    ${sessions.length >= 200 &&
+    html`<div class="empty">showing the 200 most recently active sessions</div>`}
   `;
 }
 
-// One session rendered as a chronological conversation — each turn shows only
-// what it ADDED (the server diffs wire histories), so it reads like the
-// agent's own UI: prompt → response → tool call → tool output.
-function SessionTranscript({ sessionId, onBack }) {
+// One session rendered as a chronological conversation thread — each turn
+// shows only what it ADDED (the server diffs wire histories), flowing as one
+// continuous document: time dividers on gaps, a metadata rail per turn, then
+// the messages (tinted user box, flat assistant text, collapsible tool cards).
+function SessionTranscript({ sessionId, row, onBack }) {
   const [view, setView] = useState(null);
   const [openCall, setOpenCall] = useState(null);
   useEffect(() => { api.get(`/api/session/${sessionId}`).then(setView); }, [sessionId]);
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onBack(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey); // else it fires on the list view
+  }, [onBack]);
   if (!view) return html`<div class="empty">loading…</div>`;
   const turns = view.turns ?? [];
+
+  // Header meta: prefer the SessionRow the user clicked; fall back to what the
+  // turns themselves say (opened from a call detail, where there is no row).
+  const agent = row?.agent ?? "session";
+  const model = row?.model ?? [...turns].reverse().find((t) => t.model)?.model;
+  const firstTs = row?.firstTs ?? turns[0]?.tsRequest;
+  const lastTs = row?.lastTs ?? turns.at(-1)?.tsRequest;
+  const source =
+    row?.source ?? (new Set(turns.map((t) => t.source)).size > 1 ? "mixed" : turns[0]?.source);
+  const mixed = source === "mixed";
+  const secretCount = new Set(turns.flatMap((t) => t.leaks.map((l) => l.value))).size;
+  const span = firstTs != null && lastTs != null ? spanLabel(firstTs, lastTs) : "";
+
   return html`
     <div class="transcript">
       <div class="transcript-head">
-        <button onClick=${onBack}>← all sessions</button>
-        <span class="k">session</span> ${sessionId.slice(0, 8)} ·
-        ${turns.length} turn${turns.length === 1 ? "" : "s"}
-        ${view.truncated && html` · <span class="warn">showing the first 200 calls only</span>`}
+        <button onClick=${onBack} title="back to the list (Esc)">← sessions</button>
+        <span class="agent-name">${agent}</span>
+        <${CopyChip} value=${sessionId} />
       </div>
-      ${view.system != null && html`<${Chip} label=${`system · ${view.system.length} chars`} body=${view.system} />`}
+      <div class="transcript-meta">
+        ${model ? html`<span>${model}</span><span aria-hidden="true">·</span>` : ""}
+        <span>${turns.length} turn${turns.length === 1 ? "" : "s"}</span>
+        ${span && html`<span aria-hidden="true">·</span><span>over ${span}</span>`}
+        ${firstTs != null &&
+        html`<span aria-hidden="true">·</span><span>started ${new Date(firstTs).toLocaleString()}</span>`}
+        ${source === "wire" &&
+        html`<span class="chip wire" title="Beagle's proxy saw these exact bytes">✓ observed</span>`}
+        ${source === "otel" &&
+        html`<span class="chip otel" title="the agent's own report — Beagle did not see the wire">self-reported</span>`}
+        ${mixed && html`<span class="chip otel">partly self-reported</span>`}
+        ${secretCount > 0 &&
+        html`<span class="chip leak">${secretCount} secret${secretCount === 1 ? "" : "s"}</span>`}
+        ${view.truncated && html`<span class="warn">showing the first 200 calls only</span>`}
+      </div>
+      ${view.system != null && html`<${SystemCard} text=${view.system} />`}
       ${turns.length === 0 && html`<div class="empty">nothing captured in this session yet</div>`}
-      ${turns.map(
-        (t) => html`
-          <div class="turn" key=${t.id}>
-            <div class="turn-head" onClick=${() => setOpenCall(openCall === t.id ? null : t.id)}
-              title="click for this call's full detail (raw bytes, sizes, tokens)">
-              ${new Date(t.tsRequest).toLocaleTimeString()}
-              ${t.model ? ` · ${t.model}` : ""}
-              ${t.source !== "wire" ? " · self-reported" : ""}
-              ${t.status != null && t.status >= 400 ? html` · <span class="warn">error ${t.status}</span>` : ""}
-              ${t.leaks.length > 0 && html` · <span class="chip leak">leak</span>`}
-              <span class="turn-toggle">${openCall === t.id ? "▾ details" : "▸ details"}</span>
+      <div class="thread">
+        ${turns.map((t, i) => {
+          const prev = turns[i - 1];
+          const dayChanged =
+            prev && new Date(prev.tsRequest).toDateString() !== new Date(t.tsRequest).toDateString();
+          const showDivider = !prev || dayChanged || t.tsRequest - prev.tsRequest > 120_000;
+          const showDate = !prev || dayChanged;
+          const modelChanged = t.model && t.model !== prev?.model;
+          const hasLeak = t.leaks.length > 0;
+          const open = openCall === t.id;
+          return html`
+            <div class=${hasLeak ? "turn has-leak" : "turn"} key=${t.id}>
+              ${showDivider && html`<div class="time-divider">${fmtDivider(t.tsRequest, showDate)}</div>`}
+              <div class="turn-rail" onClick=${() => setOpenCall(open ? null : t.id)}
+                title="click for this call's full detail (raw bytes, sizes, tokens)">
+                <span>${new Date(t.tsRequest).toLocaleTimeString()}</span>
+                ${modelChanged && html`<span aria-hidden="true">·</span><span>${t.model}</span>`}
+                ${mixed && t.source !== "wire" && html`<span class="chip otel">self-reported</span>`}
+                ${t.status != null && t.status >= 400 && html`<span class="err">error ${t.status}</span>`}
+                ${hasLeak && html`<span class="chip leak">secret sent</span>`}
+                <span class="turn-toggle">${open ? "▾ details" : "▸ details"}</span>
+              </div>
+              ${open && html`<${Detail} id=${t.id} />`}
+              ${t.messages.map(
+                (m, j) => html`<${TMsg} key=${`${t.id}:${j}`} m=${m} leaks=${t.leaks} />`,
+              )}
+              ${t.responseText != null && t.responseText !== "" &&
+              html`<${TMsg} key=${`${t.id}:resp`} leaks=${t.leaks}
+                m=${{ role: "response", content: t.responseText }} />`}
+              ${t.messages.length === 0 && !t.responseText &&
+              html`<div class="turn-empty">(no parsed content — open details for raw bytes)</div>`}
             </div>
-            ${openCall === t.id && html`<${Detail} id=${t.id} />`}
-            ${t.messages.map((m) => html`<${Msg} m=${m} leaks=${t.leaks} />`)}
-            ${t.responseText != null && t.responseText !== "" &&
-            html`<${Msg} m=${{ role: "assistant", content: t.responseText }} leaks=${t.leaks} />`}
-          </div>
-        `,
-      )}
+          `;
+        })}
+      </div>
+    </div>
+  `;
+}
+
+// "3:42 PM" between turns; "Jul 15, 3:42 PM" on the first turn and day changes.
+function fmtDivider(ts, withDate) {
+  const d = new Date(ts);
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return withDate
+    ? `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`
+    : time;
+}
+
+// The session id as a copyable chip: title carries the full id, click copies.
+function CopyChip({ value }) {
+  const [copied, setCopied] = useState(false);
+  return html`<button class="chip copy-chip" title=${value}
+    onClick=${async () => {
+      try {
+        await navigator.clipboard.writeText(value);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1200);
+      } catch { /* title still exposes the full id */ }
+    }}>${copied ? "copied" : value.slice(0, 8)}</button>`;
+}
+
+// The session's system prompt, collapsed to one line until asked for.
+function SystemCard({ text }) {
+  const [open, setOpen] = useState(false);
+  return html`
+    <div class="syscard">
+      <div class="sys-head" onClick=${() => setOpen(!open)}>
+        ${open ? "▾" : "▸"} system prompt · ${text.length.toLocaleString()} chars
+      </div>
+      ${open && html`<pre>${text}</pre>`}
+    </div>
+  `;
+}
+
+// One transcript message. Uniform cards: every message — user, assistant,
+// tool, request — sits in the same bordered card, differentiated only by the
+// colored role label in its header. Tool/request cards additionally collapse.
+// All bodies render through Highlighted.
+function TMsg({ m, leaks }) {
+  const content = typeof m.content === "string" ? m.content : JSON.stringify(m.content, null, 2);
+  // The one unacceptable failure is a hidden secret: a leak-bearing message
+  // never clamps and never renders collapsed.
+  const hasLeak = (leaks ?? []).some((l) => l.value && content.includes(l.value));
+  if (m.role === "tool" || m.role === "request") {
+    return html`<${ToolCard} role=${m.role} content=${content} leaks=${leaks} hasLeak=${hasLeak} />`;
+  }
+  // user / response / assistant-history / any future role: same card, labeled
+  // header; bodies get the same JSON pretty-printing as tool cards.
+  return html`
+    <div class=${hasLeak ? "mcard has-leak" : "mcard"}>
+      <div class="mc-head"><span class=${`mc-name ${m.role}`}>${m.role}</span></div>
+      <div class="mc-body">
+        <${ClampedText} content=${prettyContent(content, leaks)} leaks=${leaks}
+          threshold=${m.role === "user" ? 1500 : 2500} hasLeak=${hasLeak} />
+      </div>
+    </div>
+  `;
+}
+
+const fmtChars = (n) => (n < 1000 ? `${n} chars` : `${(n / 1000).toFixed(1)}k chars`);
+
+// Pretty-print JSON for reading, applied to EVERY displayed body: each line
+// that parses as a JSON object/array (bare, or behind a "Name: " prefix like
+// the Mode B "Bash: {...}" convention) re-serializes with 2-space indent.
+// Guard: if reformatting would lose an inline secret highlight (the value no
+// longer substring-matches), that line stays verbatim — a leak never loses
+// its red mark to cosmetics.
+function prettyContent(text, leaks) {
+  const values = (leaks ?? []).map((l) => l.value).filter(Boolean);
+  const out = text
+    .split("\n")
+    .map((line) => {
+      const t = line.trim();
+      const named = t.match(/^([A-Za-z_][\w.-]{0,40}):\s*([{[].*)$/);
+      const raw = named ? named[2] : t;
+      if (!raw.startsWith("{") && !raw.startsWith("[")) return line;
+      try {
+        const p = JSON.stringify(JSON.parse(raw), null, 2);
+        for (const v of values) if (line.includes(v) && !p.includes(v)) return line;
+        return named ? `${named[1]}:\n${p}` : p;
+      } catch {
+        return line;
+      }
+    })
+    .join("\n");
+  // Whole-string backstop over the per-line guard: a secret that STRADDLES a
+  // line boundary can be broken by reformatting even though each line's own
+  // guard passed (per-line `includes` never saw the whole value). If any
+  // detected value the input carried is no longer contiguous in the result,
+  // return the text verbatim — a highlight is never worth losing to cosmetics.
+  // This also ties hasLeak (computed on `text`) to the rendered output: the
+  // result now contains a value iff `text` did.
+  for (const v of values) if (text.includes(v) && !out.includes(v)) return text;
+  return out;
+}
+
+// Long-content guard: a CSS max-height clamp with a fade + expander. The text
+// itself is never sliced, so Highlighted always sees the full content and a
+// secret can never be bisected by a truncation point.
+function ClampedText({ content, leaks, threshold, hasLeak }) {
+  const [expanded, setExpanded] = useState(false);
+  const clampable = content.length > threshold && !hasLeak;
+  if (!clampable) return html`<${Highlighted} text=${content} leaks=${leaks} />`;
+  return html`
+    <div class=${expanded ? "clamp" : "clamp clamped"}>
+      <${Highlighted} text=${content} leaks=${leaks} />
+    </div>
+    <button class="expander" onClick=${() => setExpanded(!expanded)}>
+      ${expanded ? "▴ collapse" : `▾ show all · ${fmtChars(content.length)}`}
+    </button>
+  `;
+}
+
+// A tool call / tool output (or a legacy "request" blob) in the same card
+// shell as every other message: always-visible header (glyph, name, one-line
+// preview, size), body only when opened, JSON pretty-printed for reading.
+// Long cards start collapsed — unless they carry a secret, which forces them
+// open.
+function ToolCard({ role, content, leaks, hasLeak }) {
+  const startOpen = hasLeak || content.length <= 240;
+  const [open, setOpen] = useState(startOpen);
+  const isRequest = role === "request";
+  // Display-only parse of the "Name: payload" convention the mappers write.
+  // Hostile content can at most mislabel its own card — never inject markup.
+  const match = isRequest ? null : content.match(/^([A-Za-z_][\w.-]{0,40}):\s/);
+  const name = isRequest ? "request" : (match?.[1] ?? "tool");
+  const payload = match ? content.slice(match[0].length) : content;
+  const collapsible = !startOpen || hasLeak || content.length > 240;
+  return html`
+    <div class=${hasLeak ? "mcard has-leak" : "mcard"}
+      title=${isRequest
+        ? "what the agent reported sending — prompt and tool inputs as one block"
+        : undefined}>
+      <div class=${collapsible ? "mc-head click" : "mc-head"}
+        onClick=${() => collapsible && setOpen(!open)}>
+        <span aria-hidden="true">${isRequest ? "⇢" : "⚙"}</span>
+        <span class=${`mc-name ${isRequest ? "request" : "tool"}`}>${name}</span>
+        ${!open && html`<span class="mc-preview">${payload.slice(0, 200)}</span>`}
+        ${hasLeak && html`<span class="chip leak">secret</span>`}
+        <span class="mc-size">${fmtChars(content.length)}</span>
+        ${collapsible && html`<span aria-hidden="true">${open ? "▾" : "▸"}</span>`}
+      </div>
+      ${open &&
+      html`<div class="mc-body scroll">
+        <${Highlighted} text=${prettyContent(payload, leaks)} leaks=${leaks} />
+      </div>`}
     </div>
   `;
 }
@@ -365,7 +578,7 @@ function spanLabel(first, last) {
   return `${(s / 3600).toFixed(1)} h`;
 }
 
-function Detail({ id }) {
+function Detail({ id, onSession }) {
   const [detail, setDetail] = useState(null);
   const [raw, setRaw] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -374,8 +587,16 @@ function Detail({ id }) {
   if (detail.error) return html`<div class="detail">${detail.error}</div>`;
 
   // The server assembles the readable structure (detail.ts): parsed messages,
-  // reassembled response text, and the secret strings to highlight.
-  const messages = detail.messages ?? [];
+  // reassembled response text, and the secret strings to highlight. Legacy
+  // Mode B rows (captured before display_messages existed) parse to no
+  // structured messages — show their captured request as a "request" card
+  // rather than dumping the user into the raw <pre> view (mirrors the
+  // transcript's legacy fallback). The raw-bytes toggle still shows true bytes.
+  const messages = detail.messages?.length
+    ? detail.messages
+    : detail.source === "otel" && detail.requestRaw
+      ? [{ role: "request", content: detail.requestRaw }]
+      : [];
   const system = detail.system;
   const leaks = detail.leaks ?? [];
   const older = messages.slice(0, -1);
@@ -396,6 +617,9 @@ function Detail({ id }) {
         <div>
           <span class="k">session</span> ${detail.sessionId.slice(0, 8)} ·${" "}
           <span class="k">grouped by</span> ${groupedBy(detail.sessionTier)}
+          ${onSession &&
+          html` · <button class="linklike"
+            onClick=${() => onSession(detail.sessionId)}>view whole conversation →</button>`}
         </div>
         <div>
           <span class="k">capture</span> ${detail.source === "wire"
@@ -425,7 +649,7 @@ function Detail({ id }) {
       ${showRaw
         ? html`
             <h4>request</h4>
-            <pre><${Highlighted} text=${pretty(detail.requestRaw)} leaks=${leaks} /></pre>
+            <pre><${Highlighted} text=${pretty(detail.requestRaw, leaks)} leaks=${leaks} /></pre>
             <h4>response</h4>
             <pre>${pretty(detail.responseRaw)}</pre>
             ${detail.sseRaw &&
@@ -441,7 +665,7 @@ function Detail({ id }) {
             ${historyOpen && older.map((m) => html`<${Msg} m=${m} leaks=${leaks} />`)}
             ${newest.map((m) => html`<${Msg} m=${m} leaks=${leaks} />`)}
             ${detail.responseText != null &&
-            html`<${Msg} m=${{ role: "assistant", content: detail.responseText }} leaks=${leaks} />`}
+            html`<${Msg} m=${{ role: "response", content: detail.responseText }} leaks=${leaks} />`}
           `}
     </div>
   `;
@@ -503,7 +727,7 @@ function Msg({ m, leaks }) {
   return html`
     <div class=${"msg " + m.role}>
       <div class="role">${m.role}</div>
-      <div><${Highlighted} text=${content} leaks=${leaks} /></div>
+      <div><${Highlighted} text=${prettyContent(content, leaks)} leaks=${leaks} /></div>
     </div>
   `;
 }
@@ -554,13 +778,21 @@ function kb(n) {
   return n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`;
 }
 
-function pretty(s) {
+// Pretty-print a captured body for the raw view. First try the whole body as
+// one JSON document (a wire request/response is one). If that fails, fall back
+// to line-by-line — Mode B bodies are `Tool\n{input}\n{output}`, several JSON
+// docs on their own lines, not one. Leak-guarded: a reformat that would drop
+// an inline secret highlight is rejected in favor of the raw text (string
+// values are atomic across a JSON round-trip, so this practically never trips,
+// but never gamble a highlight on cosmetics).
+function pretty(s, leaks) {
   if (!s) return "(empty)";
+  const vals = (leaks ?? []).map((l) => l.value).filter(Boolean);
   try {
-    return JSON.stringify(JSON.parse(s), null, 2);
-  } catch {
-    return s;
-  }
+    const whole = JSON.stringify(JSON.parse(s), null, 2);
+    if (vals.every((v) => !s.includes(v) || whole.includes(v))) return whole;
+  } catch { /* not a single JSON document — try line by line */ }
+  return prettyContent(s, leaks);
 }
 
 // ---- mount ----
