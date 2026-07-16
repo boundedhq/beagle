@@ -21,6 +21,7 @@ export interface SessionRow {
   calls: number;
   leaks: number; // leak events pinned to this session
   source: string; // 'wire' | 'otel' | 'mixed'
+  title?: string; // earliest meaningful call summary — reads like a conversation title
 }
 
 // The browse tab: one row per session, newest activity first. Display query,
@@ -35,7 +36,16 @@ export function listSessions(store: Store, limit: number): SessionRow[] {
               MIN(e.ts_request) AS first_ts, MAX(e.ts_request) AS last_ts,
               COUNT(*) AS calls,
               COUNT(DISTINCT e.source) AS n_sources, MAX(e.source) AS one_source,
-              (SELECT COUNT(*) FROM leak_events le WHERE le.session_id = e.session_id) AS leaks
+              (SELECT COUNT(*) FROM leak_events le WHERE le.session_id = e.session_id) AS leaks,
+              -- The session's opening summary as a title. Skip buildSummary's
+              -- placeholder sentinels so a tool-only / empty opening turn doesn't
+              -- title the session; take the next real prompt instead. Summaries
+              -- are already secret-scrubbed at capture, so no leak enters a title.
+              (SELECT t.summary FROM exchanges t
+                 WHERE t.session_id = e.session_id
+                   AND t.summary IS NOT NULL AND t.summary != ''
+                   AND t.summary NOT IN ('(no message content)', 'unparsed call (raw view available)')
+                 ORDER BY t.ts_request ASC, t.id ASC LIMIT 1) AS title
        FROM exchanges e GROUP BY e.session_id
        ORDER BY last_ts DESC LIMIT ?`,
       [limit],
@@ -50,6 +60,7 @@ export function listSessions(store: Store, limit: number): SessionRow[] {
       calls: r.calls as number,
       leaks: (r.leaks as number) ?? 0,
       source: (r.n_sources as number) > 1 ? "mixed" : ((r.one_source as string) ?? "wire"),
+      title: (r.title as string) ?? undefined,
     }));
 }
 

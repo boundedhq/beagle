@@ -102,6 +102,13 @@ header .stat {
   border: 1px solid var(--border);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
+/* stat cards that navigate: reset the <button> chrome, add an affordance */
+header button.stat { font: inherit; color: inherit; text-align: left; }
+header .stat.clickable { cursor: pointer; transition: border-color 0.15s, transform 0.05s; }
+header .stat.clickable:hover { border-color: rgba(110, 168, 254, 0.65); }
+header .stat.leak.clickable:hover { border-color: rgba(255, 93, 93, 0.9); }
+header .stat.clickable:active { transform: translateY(1px); }
+header .stat.clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 header .num { font-size: 17px; font-weight: 700; line-height: 1; color: var(--text); }
 header .label {
   font-family: var(--sans); font-size: 9.5px;
@@ -247,8 +254,6 @@ main { flex: 1; padding: 8px 16px; }
 .session-link:hover { text-decoration: underline; }
 .session-link .go { color: var(--muted); }
 .session-link:hover .go { color: var(--accent); }
-.open-link { color: var(--muted); font-size: 12px; white-space: nowrap; }
-.row:hover .open-link { color: var(--accent); text-decoration: underline; }
 button.linklike {
   background: none; border: none; padding: 0; color: var(--accent);
   cursor: pointer; font: inherit; font-size: inherit;
@@ -270,6 +275,36 @@ button.linklike:hover { text-decoration: underline; }
 .row.head:hover { background: transparent; }
 .row.head .agent, .row.head .model, .row.head .summary { color: var(--muted); }
 .row.head .dot.spacer { background: transparent; }
+
+/* sessions tab: a titled two-line list item — its OWN class, not the calls-tab
+   .row flex-table, so the calls columns stay untouched and the full-timestamp
+   overflow that shoved the sessions columns out of line cannot recur (no
+   columns to misalign). */
+.srow {
+  display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px;
+  border-left: 3px solid transparent; border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.srow:hover { background: var(--row-hover); }
+.srow.leak { border-left-color: var(--leak); background: #1f151a; }
+.srow .dot { align-self: flex-start; margin-top: 5px; } /* sit on the title line */
+.scol { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.stitle-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.stitle {
+  flex: 0 1 auto; min-width: 0; font-size: 13.5px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.stitle.untitled { color: var(--muted); font-style: italic; }
+.smeta {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums;
+}
+.smeta .s-agent { color: var(--accent); }
+.smeta .s-model { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.s-go { flex: none; align-self: center; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.srow:hover .s-go { color: var(--accent); text-decoration: underline; }
+@media (max-width: 760px) { .smeta .s-model { display: none; } }
+
 .dot { flex: 0 0 8px; height: 8px; border-radius: 50%; background: var(--ok); align-self: center; }
 .dot.err { background: var(--leak); }
 .dot.pending { background: transparent; border: 1.5px solid var(--muted); }
@@ -289,9 +324,30 @@ button.linklike:hover { text-decoration: underline; }
   background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
   margin: 4px 0 10px; padding: 12px; overflow-x: auto;
 }
-.detail .meta { color: var(--text); margin-bottom: 8px; line-height: 1.7; }
+/* tiered detail header: a glanceable primary line, a quiet secondary line, and
+   a "▸ technical" fold for the ids/tier/endpoint/bytes nobody reads at a glance */
+.detail .meta { color: var(--text); margin-bottom: 8px; }
+.detail .meta-primary {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 13.5px; margin-bottom: 5px;
+}
+.detail .meta-primary .agent-name { color: var(--accent); font-weight: 600; }
+.detail .meta-primary .arrow { color: var(--muted); }
+.detail .meta-primary .to { color: var(--text); }
+.detail .meta-primary .err { color: var(--leak-fg); font-size: 12px; }
+.detail .meta-sub {
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  color: var(--muted); font-size: 12px;
+}
+.detail .meta-sub .toks { font-variant-numeric: tabular-nums; }
 .detail .meta .k { color: var(--muted); }
-.detail .meta .warn { color: var(--leak); }
+.detail .meta .warn { color: var(--leak); font-size: 12px; margin-top: 4px; }
+.detail .meta-tech { font-size: 11px; margin-top: 6px; } /* .folded supplies color/cursor/padding */
+.detail .meta-tech-body {
+  color: var(--muted); font-size: 11px; line-height: 1.7;
+  padding: 2px 0 2px 12px; border-left: 1px solid var(--border); margin-top: 2px;
+}
+.detail .meta-tech-body .k { color: var(--muted); }
 .detail .msg { margin: 6px 0; padding: 6px 10px; border-left: 2px solid var(--border); }
 .detail .msg .role { color: var(--accent); font-size: 12px; }
 .detail .msg.assistant .role, .detail .msg.response .role { color: var(--ok); }
@@ -377,7 +433,7 @@ button.linklike:hover { text-decoration: underline; }
   flex: 1 1 auto; min-width: 0; color: var(--muted); font-size: 12px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.mc-size { flex: none; color: var(--muted); font-size: 11px; margin-left: auto; }
+.mc-chev { flex: none; color: var(--muted); font-size: 11px; margin-left: auto; }
 .mc-body {
   padding: 4px 12px 9px; line-height: 1.55; font-size: var(--content);
   white-space: pre-wrap; overflow-wrap: anywhere;
