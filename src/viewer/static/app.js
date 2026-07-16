@@ -16,9 +16,10 @@ let deepLinkSession = null;
 async function bootstrap() {
   const params = new URLSearchParams(location.search);
   const boot = params.get("boot");
-  // Read the fragment BEFORE the history scrub below drops it.
+  // Read the fragment BEFORE the history scrub below drops it. Guard the
+  // decode: a malformed fragment must be ignored, never blank the dashboard.
   const frag = /^#s=(.+)$/.exec(location.hash);
-  if (frag) deepLinkSession = decodeURIComponent(frag[1]);
+  if (frag) { try { deepLinkSession = decodeURIComponent(frag[1]); } catch { /* ignore */ } }
   if (boot) history.replaceState(null, "", "/"); // token out of the URL/history
   if (!boot) return false;
   const r = await fetch("/api/session", {
