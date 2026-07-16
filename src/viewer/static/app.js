@@ -578,8 +578,16 @@ function Detail({ id, onSession }) {
   if (detail.error) return html`<div class="detail">${detail.error}</div>`;
 
   // The server assembles the readable structure (detail.ts): parsed messages,
-  // reassembled response text, and the secret strings to highlight.
-  const messages = detail.messages ?? [];
+  // reassembled response text, and the secret strings to highlight. Legacy
+  // Mode B rows (captured before display_messages existed) parse to no
+  // structured messages — show their captured request as a "request" card
+  // rather than dumping the user into the raw <pre> view (mirrors the
+  // transcript's legacy fallback). The raw-bytes toggle still shows true bytes.
+  const messages = detail.messages?.length
+    ? detail.messages
+    : detail.source === "otel" && detail.requestRaw
+      ? [{ role: "request", content: detail.requestRaw }]
+      : [];
   const system = detail.system;
   const leaks = detail.leaks ?? [];
   const older = messages.slice(0, -1);
@@ -632,7 +640,7 @@ function Detail({ id, onSession }) {
       ${showRaw
         ? html`
             <h4>request</h4>
-            <pre><${Highlighted} text=${pretty(detail.requestRaw)} leaks=${leaks} /></pre>
+            <pre><${Highlighted} text=${pretty(detail.requestRaw, leaks)} leaks=${leaks} /></pre>
             <h4>response</h4>
             <pre>${pretty(detail.responseRaw)}</pre>
             ${detail.sseRaw &&
@@ -761,13 +769,21 @@ function kb(n) {
   return n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`;
 }
 
-function pretty(s) {
+// Pretty-print a captured body for the raw view. First try the whole body as
+// one JSON document (a wire request/response is one). If that fails, fall back
+// to line-by-line — Mode B bodies are `Tool\n{input}\n{output}`, several JSON
+// docs on their own lines, not one. Leak-guarded: a reformat that would drop
+// an inline secret highlight is rejected in favor of the raw text (string
+// values are atomic across a JSON round-trip, so this practically never trips,
+// but never gamble a highlight on cosmetics).
+function pretty(s, leaks) {
   if (!s) return "(empty)";
+  const vals = (leaks ?? []).map((l) => l.value).filter(Boolean);
   try {
-    return JSON.stringify(JSON.parse(s), null, 2);
-  } catch {
-    return s;
-  }
+    const whole = JSON.stringify(JSON.parse(s), null, 2);
+    if (vals.every((v) => !s.includes(v) || whole.includes(v))) return whole;
+  } catch { /* not a single JSON document — try line by line */ }
+  return prettyContent(s, leaks);
 }
 
 // ---- mount ----
