@@ -255,3 +255,63 @@ describe("ViewerServer hardening (design §6.8)", () => {
     expect(viewer.isRunning).toBe(true);
   });
 });
+
+// The dashboard's per-session delete routes through /api/purge with a
+// sessionId; the daemon turns that into store.purge({kind:"session"}).
+describe("per-session purge routing", () => {
+  let stateDir: string;
+  let viewer: ViewerServer;
+  let url: string;
+  let calls: Array<{ kind: string; sessionId?: string }>;
+
+  beforeEach(async () => {
+    stateDir = mkdtempSync(join(tmpdir(), "beagle-purge-"));
+    seedStore(stateDir);
+    calls = [];
+    viewer = new ViewerServer({
+      stateDir, idleTimeoutMs: 60_000,
+      onPurge: (kind, sessionId) => calls.push({ kind, sessionId }),
+    });
+    url = await viewer.start();
+  });
+  afterEach(() => viewer.stop());
+
+  const origin = () => new URL(url).origin;
+  async function cred(): Promise<string> {
+    const r = await fetch(`${origin()}/api/session`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ boot: new URL(url).searchParams.get("boot") }),
+    });
+    return ((await r.json()) as { credential: string }).credential;
+  }
+  const purge = async (body: unknown) =>
+    fetch(`${origin()}/api/purge`, {
+      method: "POST",
+      headers: { "x-beagle-token": await cred(), "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  test("a session purge forwards the sessionId to onPurge", async () => {
+    const r = await purge({ kind: "session", sessionId: "s1" });
+    expect(r.status).toBe(200);
+    expect(calls).toEqual([{ kind: "session", sessionId: "s1" }]);
+  });
+
+  test("a session purge without a sessionId is rejected, never widened to 'all'", async () => {
+    const r = await purge({ kind: "session" });
+    expect(r.status).toBe(400);
+    expect(calls).toEqual([]); // the scoped delete must not fall through to a full wipe
+  });
+
+  test("an unscoped purge still routes through with no sessionId", async () => {
+    const r = await purge({ kind: "all" });
+    expect(r.status).toBe(200);
+    expect(calls).toEqual([{ kind: "all", sessionId: undefined }]);
+  });
+
+  test("an unknown kind is rejected, never routed as a full wipe", async () => {
+    const r = await purge({ kind: "everything" });
+    expect(r.status).toBe(400);
+    expect(calls).toEqual([]); // a typo/unknown verb must not reach the store
+  });
+});

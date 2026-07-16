@@ -607,9 +607,14 @@ export class Daemon {
   private makeViewer(): ViewerServer {
     const v = new ViewerServer({
       stateDir: this.opts.stateDir,
-      onPurge: (kind) => {
+      onPurge: (kind, sessionId) => {
         if (kind === "panic") this.store.panicPurge();
-        else this.store.purge({ kind: "all" });
+        // Scoped delete of one session (the dashboard's per-session control).
+        // No id → do nothing, never fall back to wiping everything.
+        else if (kind === "session") { if (sessionId) this.store.purge({ kind: "session", sessionId }); }
+        else if (kind === "all") this.store.purge({ kind: "all" });
+        // Any other kind is a no-op: an unrecognized value must never be
+        // treated as "delete everything".
       },
     });
     v.onStop = () => this.armIdleExit(); // viewer closed → maybe wind down

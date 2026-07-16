@@ -393,6 +393,18 @@ button.linklike:hover { text-decoration: underline; }
   padding: 12px 0 4px;
 }
 .transcript-head .agent-name { font-size: 15px; font-weight: 600; color: var(--text); }
+/* Per-session delete: quiet by default (right-aligned, muted), turns red on
+   hover, and swaps to an explicit two-step confirm so it can't be misfired. */
+.th-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.danger-link {
+  background: transparent; border: 1px solid transparent; color: var(--muted);
+  padding: 4px 9px; font-size: 12px; border-radius: 6px;
+}
+.danger-link:hover { color: var(--leak); border-color: rgba(255, 93, 93, 0.55); }
+.th-actions .confirm { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; }
+.th-actions .confirm-q { color: var(--leak-fg); }
+button.danger { border-color: rgba(255, 93, 93, 0.7); color: var(--leak-fg); background: var(--leak-bg); }
+button.danger:hover:not(:disabled) { background: #4a1a28; }
 .copy-chip { cursor: pointer; }
 .copy-chip:hover { border-color: var(--accent); color: var(--accent); }
 .transcript-meta {
