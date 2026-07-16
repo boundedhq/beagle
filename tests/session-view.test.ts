@@ -75,6 +75,33 @@ describe("listSessions", () => {
     store.close();
   });
 
+  test("title is the earliest call's summary (reads like a conversation title)", () => {
+    const store = Store.open(dir);
+    store.insertCall(call({ sessionId: "a", tsRequest: 3, summary: "later turn" }));
+    store.insertCall(call({ sessionId: "a", tsRequest: 1, summary: "hey is hyper connected?" }));
+    store.insertCall(call({ sessionId: "a", tsRequest: 2, summary: "middle" }));
+    expect(listSessions(store, 100)[0]!.title).toBe("hey is hyper connected?");
+    store.close();
+  });
+
+  test("title skips buildSummary placeholder sentinels, takes the next real prompt", () => {
+    const store = Store.open(dir);
+    // the opening turn was a tool call with no message content; the title
+    // should be the next meaningful summary, not the placeholder.
+    store.insertCall(call({ sessionId: "a", tsRequest: 1, summary: "(no message content)" }));
+    store.insertCall(call({ sessionId: "a", tsRequest: 2, summary: "unparsed call (raw view available)" }));
+    store.insertCall(call({ sessionId: "a", tsRequest: 3, summary: "the real opening ask" }));
+    expect(listSessions(store, 100)[0]!.title).toBe("the real opening ask");
+    store.close();
+  });
+
+  test("a session with only placeholder summaries has no title", () => {
+    const store = Store.open(dir);
+    store.insertCall(call({ sessionId: "a", tsRequest: 1, summary: "(no message content)" }));
+    expect(listSessions(store, 100)[0]!.title).toBeUndefined();
+    store.close();
+  });
+
   test("counts the session's leak events", () => {
     const store = Store.open(dir);
     const c = call({ sessionId: "a" });
