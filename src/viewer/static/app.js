@@ -323,6 +323,8 @@ function Sessions({ onOpen }) {
         <span class="session"><span class="open-link">view thread ›</span></span>
       </div>`;
     })}
+    ${sessions.length >= 200 &&
+    html`<div class="empty">showing the 200 most recently active sessions</div>`}
   `;
 }
 
@@ -409,8 +411,8 @@ function SessionTranscript({ sessionId, row, onBack }) {
                   showLabel=${j === 0 || t.messages[j - 1].role !== m.role} />`,
               )}
               ${t.responseText != null && t.responseText !== "" &&
-              html`<${TMsg} m=${{ role: "assistant", content: t.responseText }} leaks=${t.leaks}
-                showLabel=${lastRole !== "assistant"} />`}
+              html`<${TMsg} key=${`${t.id}:resp`} m=${{ role: "assistant", content: t.responseText }}
+                leaks=${t.leaks} showLabel=${lastRole !== "assistant"} />`}
               ${t.messages.length === 0 && !t.responseText &&
               html`<div class="turn-empty">(no parsed content — open details for raw bytes)</div>`}
             </div>
