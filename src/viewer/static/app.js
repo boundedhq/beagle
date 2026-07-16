@@ -717,9 +717,18 @@ function Detail({ id, onSession }) {
         ${leaks.map((l) => html`<span class="chip leak">${secretLabel(l.secretType)}</span>`)}
       </div>`}
       ${hasStructure &&
-      html`<button class=${showRaw ? "active" : ""} onClick=${() => setRaw(!raw)}>
-        ${showRaw ? "structured view" : "raw bytes"}
-      </button>`}
+      html`<div class="viewswitch">
+        <div class="viewtoggle" role="group" aria-label="detail view">
+          <button class=${!showRaw ? "active" : ""} aria-pressed=${!showRaw}
+            onClick=${() => setRaw(false)}>readable</button>
+          <button class=${showRaw ? "active" : ""} aria-pressed=${showRaw}
+            onClick=${() => setRaw(true)}>raw</button>
+        </div>
+        ${showRaw &&
+        html`<span class="viewhint">${detail.source === "wire"
+          ? "the exact request and response Beagle saw on the wire"
+          : "the request and response the agent reported sending"}</span>`}
+      </div>`}
       ${showRaw
         ? html`
             <h4>request</h4>
