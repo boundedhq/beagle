@@ -291,7 +291,8 @@ button.linklike:hover { text-decoration: underline; }
 .scol { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .stitle-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .stitle {
-  flex: 0 1 auto; min-width: 0; font-size: 13.5px; color: var(--text);
+  flex: 0 1 auto; min-width: 0; font-size: 12.5px; font-weight: 600;
+  letter-spacing: -0.1px; color: var(--text);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .stitle.untitled { color: var(--muted); font-style: italic; }
@@ -356,11 +357,31 @@ button.linklike:hover { text-decoration: underline; }
 .detail .msg > div:last-child {
   white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--content);
 }
+/* Raw payload / stream. Wrap at token boundaries, not mid-token: break-all
+   turned indented JSON into a wall of characters. overflow-wrap only breaks a
+   genuinely-unbreakable long token (e.g. a minified line) as a last resort. */
 .detail pre {
-  background: var(--bg); padding: 10px; border-radius: 6px; overflow-x: auto;
-  white-space: pre-wrap; word-break: break-all; max-height: 420px; overflow-y: auto;
-  font-size: var(--content);
+  background: var(--bg); padding: 11px 12px; border-radius: 7px;
+  border: 1px solid var(--border); overflow-x: auto; overflow-y: auto;
+  white-space: pre-wrap; word-break: normal; overflow-wrap: anywhere;
+  max-height: 460px; line-height: 1.5; font-size: var(--content);
 }
+/* Section labels above each raw block — small caps, not browser-default h4. */
+.detail h4 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+  font-weight: 600; color: var(--muted); margin: 14px 0 5px;
+}
+/* The readable ⇄ raw switch: a segmented control so it reads as two views,
+   not a lone button (users didn't notice it toggled anything). */
+.viewswitch { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 0 4px; }
+.viewtoggle { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+.viewtoggle button {
+  border: 0; border-radius: 0; background: transparent; color: var(--muted);
+  padding: 4px 14px; font-size: 12px;
+}
+.viewtoggle button + button { border-left: 1px solid var(--border); }
+.viewtoggle button.active { background: var(--chip); color: var(--text); }
+.viewhint { color: var(--muted); font-size: 11.5px; }
 .folded { color: var(--muted); cursor: pointer; padding: 4px 0; }
 /* ---- session transcript: the whole session as a conversation thread ---- */
 /* Centered reading column — the feed stays full-width, the transcript earns
