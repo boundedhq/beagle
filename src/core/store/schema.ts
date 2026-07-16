@@ -29,11 +29,11 @@ CREATE TABLE IF NOT EXISTS payloads (
   request_headers  TEXT,
   response_body BLOB,
   response_headers TEXT,
-  sse_raw       BLOB,
-  -- Mode B only: the self-report's pre-flattened display messages (JSON array
-  -- of {role, content}). Wire rows leave this NULL — their structure re-parses
-  -- from request_body. Redact-on-capture scrubs this like summary/searchText.
-  display_messages TEXT
+  -- Mode B only: the self-report's pre-flattened display messages (JSON of
+  -- [{role,content}]); wire rows leave it NULL, redact-on-capture scrubs it.
+  -- Before sse_raw on purpose: a line comment before the LAST column breaks DROP.
+  display_messages TEXT,
+  sse_raw       BLOB
 );
 
 CREATE TABLE IF NOT EXISTS leak_events (

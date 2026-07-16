@@ -99,6 +99,7 @@ describe("Store lifecycle", () => {
     raw.exec("ALTER TABLE exchanges DROP COLUMN redacted");
     raw.exec("ALTER TABLE leak_occurrences DROP COLUMN span_start");
     raw.exec("ALTER TABLE leak_occurrences DROP COLUMN span_end");
+    raw.exec("ALTER TABLE payloads DROP COLUMN display_messages"); // v3 column
     raw.exec("PRAGMA user_version=1");
     raw.close();
 
@@ -108,10 +109,12 @@ describe("Store lifecycle", () => {
     // Pre-migration rows survived.
     expect(migrated.getCall(call.id)?.provider).toBe("anthropic");
     expect(listLeakEvents(migrated).length).toBe(1);
-    // The re-added columns now accept writes (the redact-on-capture flag).
-    const ex2 = fakeCall({ redacted: true });
+    // The re-added columns now accept writes: the redact flag (v2) and the
+    // Mode B display messages (v3) both round-trip through the migrated schema.
+    const ex2 = fakeCall({ redacted: true, displayMessages: [{ role: "user", content: "hi" }] });
     migrated.insertCall(ex2);
     expect(migrated.getCall(ex2.id)?.redacted).toBe(true);
+    expect(migrated.getCall(ex2.id)?.displayMessages).toEqual([{ role: "user", content: "hi" }]);
     migrated.close();
   });
 });

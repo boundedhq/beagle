@@ -121,6 +121,44 @@ describe("buildSessionTurns — the conversation delta", () => {
     store.close();
   });
 
+  test("a truncated wire turn (0 parsed messages) doesn't reset the delta baseline", () => {
+    // Regression: an unparseable/truncated wire body yields 0 messages; if it
+    // clobbered the running history baseline, the NEXT full turn would re-show
+    // its entire history as new — the repetition the delta exists to kill.
+    const store = Store.open(dir);
+    store.insertCall(call({
+      id: ulid(1000), tsRequest: 1000,
+      requestBody: body([
+        { role: "user", content: "q1" },
+        { role: "assistant", content: "a1" },
+        { role: "user", content: "q2" },
+      ]),
+    }));
+    // a truncated capture: body is not valid provider JSON → 0 parsed messages
+    store.insertCall(call({
+      id: ulid(2000), tsRequest: 2000, captureState: "truncated",
+      requestBody: enc("\x00\x01 not json"),
+    }));
+    store.insertCall(call({
+      id: ulid(3000), tsRequest: 3000,
+      requestBody: body([
+        { role: "user", content: "q1" },
+        { role: "assistant", content: "a1" },
+        { role: "user", content: "q2" },
+        { role: "assistant", content: "a2" },
+        { role: "user", content: "q3" },
+      ]),
+    }));
+    const v = buildSessionTurns(store, "sess-1");
+    expect(v.turns.length).toBe(3);
+    // turn 3 diffs against turn 1's history (turn 2 didn't parse) → only the tail
+    expect(v.turns[2]!.messages).toEqual([
+      { role: "assistant", content: "a2" },
+      { role: "user", content: "q3" },
+    ]);
+    store.close();
+  });
+
   test("a rewritten history (compaction) falls back to the newest message, not a bogus tail", () => {
     const store = Store.open(dir);
     store.insertCall(call({

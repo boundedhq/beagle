@@ -103,7 +103,11 @@ export function buildSessionTurns(store: Store, sessionId: string, cap = 200): S
       } else if (messages.length > 0) {
         messages = messages.slice(-1);
       }
-      prevWire = d.messages;
+      // Only advance the baseline on a turn that actually parsed. A truncated /
+      // unparseable wire body yields 0 messages; clobbering prevWire with [] would
+      // make the NEXT turn re-show its whole history as new (the repetition this
+      // delta exists to kill). Keep the last good history as the diff base.
+      if (d.messages.length > 0) prevWire = d.messages;
     }
     turns.push({
       id: d.id,
