@@ -3,10 +3,10 @@
 // - Lead with "Beagle": macOS shows osascript notifications under Script
 //   Editor's name and icon (an Apple limitation of `display notification`),
 //   so the TEXT itself must say who is talking.
-// - Say what leaked and where in plain words ("AWS access key sent to
-//   Anthropic"), not detector tags ("aws-access-key-id → anthropic/model").
-// - Be honest that the data already left the machine, and give exactly one
-//   next step: open the dashboard.
+// - Say what leaked and where in plain words (title "secret sent to
+//   Anthropic", subtitle "AWS access key"), not detector tags.
+// - Be honest that it has already been sent, and give exactly one next step,
+//   framed as a command to run — a new user doesn't know what "beagle ui" is.
 import type { AlertEvent } from "../core/alert/engine";
 import type { AlertMessage } from "./notifier";
 
@@ -47,18 +47,25 @@ export function secretName(t: string): string {
   return SECRET_NAMES[t] ?? t.replace(/-/g, " ");
 }
 
-/** The OS-notification / terminal wording for one structured alert. */
+/** The OS-notification / terminal wording for one structured alert.
+ *
+ *  macOS truncates the banner TITLE hard (~35 chars visible), so the three
+ *  lines each carry one job and each fits its own budget:
+ *    title     Beagle — secret sent to Anthropic        (short, never clipped)
+ *    subtitle  AWS access key                           (the specifics)
+ *    body      Your claude-code agent has already sent it. Run "beagle ui"
+ *              for details.
+ *  No lecture ("Beagle alerts, it can't block") — that's product philosophy,
+ *  not something to repeat on every alert. The model name lives in the
+ *  dashboard, not the banner. */
 export function buildAlertMessage(a: AlertEvent): AlertMessage {
   const provider = providerName(a.provider);
-  const secret = secretName(a.secretType);
-  const title = `Beagle — ${secret} sent to ${provider}${a.seenBefore ? " again" : ""}`;
-  const sender = a.agent ?? "an agent";
-  const via = a.model ? ` (model ${a.model})` : "";
+  const title = `Beagle — secret sent to ${provider}${a.seenBefore ? " again" : ""}`;
+  const subtitle = secretName(a.secretType);
+  const sender = a.agent ? `Your ${a.agent} agent` : "An agent";
   const ownKey = a.destinationOwnKey
-    ? ` Note: it is ${provider}'s own API key, pasted into the message body.`
+    ? ` It is ${provider}'s own API key, pasted into the message body.`
     : "";
-  const body =
-    `Sent by ${sender}${via} — the data already left your machine; ` +
-    `Beagle alerts, it can't block.${ownKey} Review: beagle ui`;
-  return { title, body };
+  const body = `${sender} has already sent it.${ownKey} Run "beagle ui" for details.`;
+  return { title, subtitle, body };
 }

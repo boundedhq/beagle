@@ -6,6 +6,9 @@ import { spawn } from "node:child_process";
 
 export interface AlertMessage {
   title: string;
+  /** Second line on macOS banners (its own truncation budget); folded into
+   *  the body elsewhere. Carries the specifics the short title can't. */
+  subtitle?: string;
   body: string;
 }
 
@@ -32,21 +35,31 @@ export function trimBody(s: string, max = 200): string {
 export function osascriptArgs(msg: AlertMessage): string[] {
   const title = escapeAppleScript(stripControlChars(msg.title));
   const body = escapeAppleScript(trimBody(stripControlChars(msg.body)));
+  // The subtitle is macOS's second banner line — it gives the specifics
+  // their own truncation budget so the short title always fits.
+  const subtitle = msg.subtitle
+    ? ` subtitle "${escapeAppleScript(stripControlChars(msg.subtitle))}"`
+    : "";
   // A leak alert should be heard, not just seen — "Ping" is a stock macOS
   // sound, so this stays dependency-free. (Known limitation of osascript
   // notifications: the icon is Script Editor's and a click activates Script
   // Editor — Apple offers no hook there without shipping a signed .app, so
   // the TITLE carries the Beagle branding instead.)
-  return ["osascript", "-e", `display notification "${body}" with title "${title}" sound name "Ping"`];
+  return [
+    "osascript", "-e",
+    `display notification "${body}" with title "${title}"${subtitle} sound name "Ping"`,
+  ];
 }
 
 export function notifySendArgs(msg: AlertMessage): string[] {
+  // notify-send has no subtitle slot — it leads the body on its own line.
+  const body = msg.subtitle ? `${msg.subtitle}\n${msg.body}` : msg.body;
   return [
     "notify-send",
     "--urgency=critical",
     "--app-name=beagle",
     stripControlChars(msg.title),
-    stripControlChars(msg.body),
+    stripControlChars(body),
   ];
 }
 
@@ -70,8 +83,11 @@ export class Notifier {
     }
   }
 
-  /** Terminal fallback/backstop line (full-screen TUIs eat stderr, R2). */
+  /** Terminal fallback/backstop line (full-screen TUIs eat stderr, R2).
+   *  The string opens with an invisible BEL (\\u0007) — the terminal beeps
+   *  when the alert prints. Deliberate since PR 5; easy to miss in an editor. */
   terminalLine(msg: AlertMessage): string {
-    return `beagle ▲ ${stripControlChars(msg.title)} — ${stripControlChars(msg.body)}`;
+    const mid = msg.subtitle ? `${stripControlChars(msg.subtitle)} — ` : "";
+    return `beagle ▲ ${stripControlChars(msg.title)} — ${mid}${stripControlChars(msg.body)}`;
   }
 }

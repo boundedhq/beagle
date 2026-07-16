@@ -114,22 +114,25 @@ describe("buildAlertMessage", () => {
     ...over,
   });
 
-  test("title is branded and plain: 'Beagle — AWS access key sent to Anthropic'", () => {
-    expect(buildAlertMessage(event()).title).toBe("Beagle — AWS access key sent to Anthropic");
+  test("three lines, each with one job: short branded title, specifics, plain body", () => {
+    const msg = buildAlertMessage(event());
+    // the title must survive macOS's ~35-char banner truncation
+    expect(msg.title).toBe("Beagle — secret sent to Anthropic");
+    expect(msg.title.length).toBeLessThanOrEqual(35);
+    expect(msg.subtitle).toBe("AWS access key");
+    expect(msg.body).toBe('Your claude-code agent has already sent it. Run "beagle ui" for details.');
   });
 
-  test("body names the sender and model, is honest, points at the dashboard", () => {
+  test("no lecture, no jargon: the body drops the observes-not-blocks line and the model", () => {
     const { body } = buildAlertMessage(event());
-    expect(body).toContain("claude-code");
-    expect(body).toContain("claude-sonnet-5");
-    expect(body).toContain("already left your machine");
-    expect(body).toContain("can't block");
-    expect(body).toContain("beagle ui");
+    expect(body).not.toContain("block");
+    expect(body).not.toContain("claude-sonnet-5");
+    expect(body).not.toContain("left your machine");
   });
 
   test("a repeat leak says 'again' in the title", () => {
     expect(buildAlertMessage(event({ seenBefore: true })).title)
-      .toBe("Beagle — AWS access key sent to Anthropic again");
+      .toBe("Beagle — secret sent to Anthropic again");
   });
 
   test("the destination's own key gets the plain-words note", () => {
@@ -141,13 +144,13 @@ describe("buildAlertMessage", () => {
     const msg = buildAlertMessage(
       event({ provider: "sol-inc", secretType: "sol-signing-token" }),
     );
-    expect(msg.title).toBe("Beagle — sol signing token sent to sol-inc");
+    expect(msg.title).toBe("Beagle — secret sent to sol-inc");
+    expect(msg.subtitle).toBe("sol signing token");
   });
 
-  test("missing agent and model still read as a sentence", () => {
-    const { body } = buildAlertMessage(event({ agent: undefined, model: undefined }));
-    expect(body).toContain("Sent by an agent —");
-    expect(body).not.toContain("model");
+  test("missing agent still reads as a sentence", () => {
+    const { body } = buildAlertMessage(event({ agent: undefined }));
+    expect(body).toBe('An agent has already sent it. Run "beagle ui" for details.');
   });
 
   test("name helpers: known mappings and fallbacks", () => {
