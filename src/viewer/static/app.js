@@ -489,7 +489,7 @@ const fmtChars = (n) => (n < 1000 ? `${n} chars` : `${(n / 1000).toFixed(1)}k ch
 // its red mark to cosmetics.
 function prettyContent(text, leaks) {
   const values = (leaks ?? []).map((l) => l.value).filter(Boolean);
-  return text
+  const out = text
     .split("\n")
     .map((line) => {
       const t = line.trim();
@@ -505,6 +505,15 @@ function prettyContent(text, leaks) {
       }
     })
     .join("\n");
+  // Whole-string backstop over the per-line guard: a secret that STRADDLES a
+  // line boundary can be broken by reformatting even though each line's own
+  // guard passed (per-line `includes` never saw the whole value). If any
+  // detected value the input carried is no longer contiguous in the result,
+  // return the text verbatim — a highlight is never worth losing to cosmetics.
+  // This also ties hasLeak (computed on `text`) to the rendered output: the
+  // result now contains a value iff `text` did.
+  for (const v of values) if (text.includes(v) && !out.includes(v)) return text;
+  return out;
 }
 
 // Long-content guard: a CSS max-height clamp with a fade + expander. The text
