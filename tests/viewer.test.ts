@@ -308,4 +308,10 @@ describe("per-session purge routing", () => {
     expect(r.status).toBe(200);
     expect(calls).toEqual([{ kind: "all", sessionId: undefined }]);
   });
+
+  test("an unknown kind is rejected, never routed as a full wipe", async () => {
+    const r = await purge({ kind: "everything" });
+    expect(r.status).toBe(400);
+    expect(calls).toEqual([]); // a typo/unknown verb must not reach the store
+  });
 });

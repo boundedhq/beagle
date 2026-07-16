@@ -612,7 +612,9 @@ export class Daemon {
         // Scoped delete of one session (the dashboard's per-session control).
         // No id → do nothing, never fall back to wiping everything.
         else if (kind === "session") { if (sessionId) this.store.purge({ kind: "session", sessionId }); }
-        else this.store.purge({ kind: "all" });
+        else if (kind === "all") this.store.purge({ kind: "all" });
+        // Any other kind is a no-op: an unrecognized value must never be
+        // treated as "delete everything".
       },
     });
     v.onStop = () => this.armIdleExit(); // viewer closed → maybe wind down

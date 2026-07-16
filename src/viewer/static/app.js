@@ -409,8 +409,10 @@ function SessionTranscript({ sessionId, row, onBack, onPurged }) {
 
   async function purgeSession() {
     setDeleting(true);
-    const r = await api.post("/api/purge", { kind: "session", sessionId });
-    if (r?.ok) { onPurged?.(); return; } // component unmounts; no state left to reset
+    try {
+      const r = await api.post("/api/purge", { kind: "session", sessionId });
+      if (r?.ok) { onPurged?.(); return; } // component unmounts; no state left to reset
+    } catch { /* network drop — fall through and reset so it isn't stuck */ }
     setDeleting(false);
     setConfirmDel(false);
   }

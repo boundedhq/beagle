@@ -211,6 +211,10 @@ export class ViewerServer {
         const kind = String(b?.kind ?? "all");
         const sessionId = typeof b?.sessionId === "string" ? b.sessionId : undefined;
         if (!this.opts.onPurge) return this.json(res, 501, { error: "purge runs via the daemon" });
+        // Whitelist the destructive verbs — an unrecognized kind must be
+        // rejected, never quietly widened into a full wipe downstream.
+        if (kind !== "all" && kind !== "panic" && kind !== "session")
+          return this.json(res, 400, { error: "unknown purge kind" });
         // A scoped purge without a target must never fall through to "all".
         if (kind === "session" && !sessionId)
           return this.json(res, 400, { error: "session purge needs a sessionId" });
