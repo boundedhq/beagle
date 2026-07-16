@@ -214,7 +214,13 @@ function App() {
         onOpen=${(id) => { setTab("calls"); setOpenSession(null); setExpanded(id); }} />`}
       ${openSession != null &&
       html`<${SessionTranscript} sessionId=${openSession.id} row=${openSession.row}
-        onBack=${() => setOpenSession(null)} />`}
+        onBack=${() => setOpenSession(null)}
+        onPurged=${() => {
+          setOpenSession(null); // the session is gone — leave the transcript
+          api.get("/api/feed").then(setCalls);
+          api.get("/api/leaks").then(setLeaks);
+          api.get("/api/stats").then(setStats);
+        }} />`}
       ${openSession == null && tab === "sessions" &&
       html`<${Sessions} leaksOnly=${leaksOnly}
         onOpen=${(s) => setOpenSession({ id: s.sessionId, row: s })} />`}
@@ -394,10 +400,20 @@ function secretLabel(type) {
 // shows only what it ADDED (the server diffs wire histories), flowing as one
 // continuous document: time dividers on gaps, a metadata rail per turn, then
 // the messages (tinted user box, flat assistant text, collapsible tool cards).
-function SessionTranscript({ sessionId, row, onBack }) {
+function SessionTranscript({ sessionId, row, onBack, onPurged }) {
   const [view, setView] = useState(null);
   const [openCall, setOpenCall] = useState(null);
+  const [confirmDel, setConfirmDel] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   useEffect(() => { api.get(`/api/session/${sessionId}`).then(setView); }, [sessionId]);
+
+  async function purgeSession() {
+    setDeleting(true);
+    const r = await api.post("/api/purge", { kind: "session", sessionId });
+    if (r?.ok) { onPurged?.(); return; } // component unmounts; no state left to reset
+    setDeleting(false);
+    setConfirmDel(false);
+  }
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onBack(); };
     window.addEventListener("keydown", onKey);
@@ -424,6 +440,19 @@ function SessionTranscript({ sessionId, row, onBack }) {
         <button onClick=${onBack} title="back to the list (Esc)">← sessions</button>
         <span class="agent-name">${agent}</span>
         <${CopyChip} value=${sessionId} />
+        <div class="th-actions">
+          ${!confirmDel
+            ? html`<button class="danger-link"
+                title="permanently erase everything Beagle captured in this session"
+                onClick=${() => setConfirmDel(true)}>🗑 delete session</button>`
+            : html`<span class="confirm">
+                <span class="confirm-q">delete this session for good?</span>
+                <button onClick=${() => setConfirmDel(false)} disabled=${deleting}>cancel</button>
+                <button class="danger" onClick=${purgeSession} disabled=${deleting}>
+                  ${deleting ? "deleting…" : "delete"}
+                </button>
+              </span>`}
+        </div>
       </div>
       <div class="transcript-meta">
         ${model ? html`<span>${model}</span><span aria-hidden="true">·</span>` : ""}

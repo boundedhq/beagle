@@ -36,7 +36,7 @@ export interface ViewerOptions {
    *  so a larger linger here costs ~nothing and is much safer. */
   lingerMs?: number;
   /** Mutations ride through the daemon (single writer); absent → 501. */
-  onPurge?: (kind: string) => void;
+  onPurge?: (kind: string, sessionId?: string) => void;
 }
 
 const STATIC_FILES: Record<string, { body: string; type: string }> = {
@@ -207,9 +207,14 @@ export class ViewerServer {
     }
     if (path === "/api/purge" && req.method === "POST") {
       void this.readJson(req).then((body) => {
-        const kind = String((body as { kind?: string })?.kind ?? "all");
+        const b = body as { kind?: string; sessionId?: string };
+        const kind = String(b?.kind ?? "all");
+        const sessionId = typeof b?.sessionId === "string" ? b.sessionId : undefined;
         if (!this.opts.onPurge) return this.json(res, 501, { error: "purge runs via the daemon" });
-        this.opts.onPurge(kind);
+        // A scoped purge without a target must never fall through to "all".
+        if (kind === "session" && !sessionId)
+          return this.json(res, 400, { error: "session purge needs a sessionId" });
+        this.opts.onPurge(kind, sessionId);
         this.json(res, 200, { ok: true });
       });
       return;
