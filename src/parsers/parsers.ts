@@ -56,7 +56,7 @@ export function parseRequest(format: Format, bytes: Uint8Array): ParsedRequest |
       const messages: Message[] =
         typeof input === "string"
           ? [{ role: "user", content: input }]
-          : (input ?? []).map(toMessage);
+          : (input ?? []).map(responsesItem).filter((m: Message | null): m is Message => m !== null);
       // prompt_cache_key is a per-CONVERSATION affinity key by design (cache
       // routing works by shared prompt prefix), and clients use it that way —
       // opencode sends "ses_<its session id>" on every conversational call.
@@ -263,6 +263,23 @@ function toMessage(m: Record<string, unknown>): Message {
     role: String(m.role ?? "unknown"),
     content: flattenContent(m.content) ?? "",
   };
+}
+
+// Responses-API `input` items are not all role-messages: tool calls, tool
+// outputs, and encrypted reasoning ride the same array as TYPED items with no
+// role — which used to render as a wall of "unknown" cards. Label them what
+// they are, in the "Name: payload" convention the viewer's tool cards parse.
+function responsesItem(item: Record<string, unknown>): Message | null {
+  if (item.type === "function_call") {
+    return { role: "tool", content: `${String(item.name ?? "tool")}: ${String(item.arguments ?? "")}` };
+  }
+  if (item.type === "function_call_output") {
+    return { role: "tool", content: flattenContent(item.output) ?? String(item.output ?? "") };
+  }
+  // Encrypted model-internal state — unreadable by design. The raw view
+  // carries the exact bytes; the readable projection skips the ciphertext.
+  if (item.type === "reasoning") return null;
+  return toMessage(item);
 }
 
 function flattenContent(content: unknown): string | undefined {

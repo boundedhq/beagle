@@ -99,6 +99,26 @@ describe("OpenAI Responses", () => {
     expect(p.messages[0]?.content).toBe("continue");
   });
 
+  test("request: typed input items label as tools, never 'unknown'; reasoning is skipped", () => {
+    // The exact shape of a real opencode tool-use turn: role messages mixed
+    // with typed items (function_call / function_call_output / reasoning).
+    const body = JSON.stringify({
+      model: "gpt-5",
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "check my calendar" }] },
+        { type: "reasoning", encrypted_content: "gAAAAABqWcxbdSlz…" },
+        { type: "function_call", name: "bash", arguments: '{"command":"open -a Calendar"}', call_id: "c1" },
+        { type: "function_call_output", call_id: "c1", output: "Calendar launched" },
+        { role: "assistant", content: [{ type: "output_text", text: "opened it" }] },
+      ],
+    });
+    const p = parseRequest("openai-responses", enc(body))!;
+    expect(p.messages.map((m) => m.role)).toEqual(["user", "tool", "tool", "assistant"]);
+    expect(p.messages[1]!.content).toBe('bash: {"command":"open -a Calendar"}');
+    expect(p.messages[2]!.content).toBe("Calendar launched");
+    expect(p.messages.some((m) => m.role === "unknown")).toBe(false);
+  });
+
   test("request: prompt_cache_key is the conversation identity", () => {
     // opencode sends its own session id as prompt_cache_key on every
     // conversational call — a deterministic session signal.
