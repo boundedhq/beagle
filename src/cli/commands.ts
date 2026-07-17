@@ -324,7 +324,7 @@ function clip(s: string, max = 4000): string {
 // groupedBy() in the dashboard (app.js) so both surfaces say the same thing.
 function groupedByPhrase(tier: string): string {
   switch (tier) {
-    case "conv-id": return "the provider's conversation id";
+    case "conv-id": return "the request's conversation id";
     case "prefix": return "matching message history";
     case "compaction-link": return "history matched across a compaction (medium confidence)";
     case "run": return "the same run, no history match (lower confidence)";

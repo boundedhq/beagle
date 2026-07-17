@@ -99,6 +99,54 @@ describe("OpenAI Responses", () => {
     expect(p.messages[0]?.content).toBe("continue");
   });
 
+  test("request: prompt_cache_key is the conversation identity", () => {
+    // opencode sends its own session id as prompt_cache_key on every
+    // conversational call — a deterministic session signal.
+    const body = JSON.stringify({
+      model: "gpt-5",
+      prompt_cache_key: "ses_092219142ffe",
+      store: false,
+      input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }],
+    });
+    const p = parseRequest("openai-responses", enc(body))!;
+    expect(p.convId).toBe("ses_092219142ffe");
+    expect(p.oneShot).toBe(false); // it HAS identity — not a stateless one-shot
+  });
+
+  test("request: previous_response_id (server-issued) outranks the client cache key", () => {
+    // A chaining client keeps its known-good identity; the client-chosen key
+    // must never shadow it (a per-USER key would merge every conversation).
+    const p = parseRequest("openai-responses", enc(JSON.stringify({
+      model: "gpt-5",
+      previous_response_id: "resp_9",
+      prompt_cache_key: "user_static_key",
+      input: [{ role: "user", content: [{ type: "input_text", text: "next" }] }],
+    })))!;
+    expect(p.convId).toBeUndefined();
+    expect(p.prevResponseId).toBe("resp_9");
+    expect(p.oneShot).toBe(false);
+  });
+
+  test("request: store:false with no identity is a stateless one-shot (title-gen)", () => {
+    const body = JSON.stringify({
+      model: "gpt-5",
+      store: false,
+      instructions: "You are a title generator.",
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "Generate a title for this conversation:\n" }] },
+        { role: "user", content: [{ type: "input_text", text: "the actual first prompt" }] },
+      ],
+    });
+    const p = parseRequest("openai-responses", enc(body))!;
+    expect(p.convId).toBeUndefined();
+    expect(p.oneShot).toBe(true);
+    // a stored (stateful) call without a key is NOT a one-shot
+    const stored = parseRequest("openai-responses", enc(JSON.stringify({
+      model: "gpt-5", input: [{ role: "user", content: [{ type: "input_text", text: "q" }] }],
+    })))!;
+    expect(stored.oneShot).toBe(false);
+  });
+
   test("response: id and output text", () => {
     const body = JSON.stringify({
       id: "resp_456",

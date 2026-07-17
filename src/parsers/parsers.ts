@@ -11,6 +11,9 @@ export interface ParsedRequest {
   messages: Message[];
   convId?: string;
   prevResponseId?: string;
+  /** Explicitly stateless one-shot (store:false, no conversation identity) —
+   *  e.g. opencode's title-generation turn. Must never fuzzy-link. */
+  oneShot?: boolean;
 }
 
 export interface ParsedResponse {
@@ -54,11 +57,30 @@ export function parseRequest(format: Format, bytes: Uint8Array): ParsedRequest |
         typeof input === "string"
           ? [{ role: "user", content: input }]
           : (input ?? []).map(toMessage);
+      // prompt_cache_key is a per-CONVERSATION affinity key by design (cache
+      // routing works by shared prompt prefix), and clients use it that way —
+      // opencode sends "ses_<its session id>" on every conversational call.
+      // That is a deterministic session identity, far stronger than history
+      // heuristics. Precedence: a request that chains with previous_response_id
+      // (server-issued ground truth) keeps that as its identity — the CLIENT-
+      // chosen cache key only steps in when there is no chain, so a client
+      // that keyed its cache per-user rather than per-conversation could never
+      // shadow correct chaining and merge its conversations.
+      const cacheKey =
+        typeof body.prompt_cache_key === "string" && body.prompt_cache_key !== ""
+          ? body.prompt_cache_key
+          : undefined;
       return {
         model: body.model,
         system: flattenContent(body.instructions),
         messages,
+        convId: body.previous_response_id ? undefined : cacheKey,
         prevResponseId: body.previous_response_id,
+        // store:false with no conversation identity at all is an explicitly
+        // stateless one-shot — opencode's title-generation turn. Its system
+        // prompt and opening message are IDENTICAL across conversations, so it
+        // must never fuzzy-link into another session.
+        oneShot: body.store === false && !cacheKey && !body.previous_response_id,
       };
     }
     return null;

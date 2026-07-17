@@ -891,7 +891,7 @@ function SearchResults({ hits, term, onClear, onOpen }) {
 // no caveat; a weaker one earns the disclosure.
 function groupedBy(tier) {
   switch (tier) {
-    case "conv-id": return "the provider's conversation id";
+    case "conv-id": return "the request's conversation id";
     case "prefix": return "matching message history";
     case "compaction-link": return "history matched across a compaction (medium confidence)";
     case "run": return "the same run, no history match (lower confidence)";
