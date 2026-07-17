@@ -151,6 +151,15 @@ function parseSseEvents(content, leaks) {
   }
   flush();
   if (!events.length) return null;
+  // A very long stream is delta-dominated — hundreds of token-fragment events
+  // the readable view reassembles anyway — and a tree per event balloons the
+  // DOM (a 2000-event response builds ~44k nodes and makes layout janky, and
+  // it only grows with output length). Past a few hundred events the flat,
+  // highlighted view is both lighter and no less readable, so fall back to it
+  // (same "fold when it's worth it, flat when pathological" call as the
+  // parseForTree size cap). Short/medium streams — tool calls, ordinary
+  // responses — stay folded.
+  if (events.length > 500) return null;
   // R7 backstop: a detected value that is contiguous in the raw stream but not
   // inside any single event's data can't be highlighted once we split by event
   // — keep the flat, highlighted view instead. (A value fragmented across
