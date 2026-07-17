@@ -14,6 +14,7 @@ import { watchAgent, unwatchAgent, type WatchEnv, type WatchModeRequest } from "
 import { ChangeManifest } from "../install/manifest";
 import { listLeakEvents } from "../viewer/feed-query";
 import { sessionHeadlines } from "../viewer/session-view";
+import { buildDetail, leakSpansFor, leakTypesFor } from "../viewer/detail";
 import { secretName } from "../notifier/alert-copy";
 import { buildCodexOtelArgs, buildCodexOtelEnv, buildHookSettings, buildOtelEnv, mergeHookIntoSettings } from "../parsers/otlp-map";
 import { buildExtensionRedirect, buildRedirectConfig, readFirstConfig, writeRedirectConfig, writeRedirectExtension } from "../install/config-redirect";
@@ -303,24 +304,131 @@ export function cmdLeaks(stateDir: string): string {
   return lines.join("\n");
 }
 
-export function cmdShow(stateDir: string, idPrefix: string): string {
+function fmtBytes(n?: number): string {
+  if (n == null) return "?";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// Clip long captured content in the readable view so one giant message (a
+// pasted file, a huge system prompt) can't bury the rest. --full / --raw show
+// everything.
+function clip(s: string, max = 4000): string {
+  return s.length <= max ? s : `${s.slice(0, max)} …(+${s.length - max} more chars)`;
+}
+
+// How this call was grouped into its session, in plain words — mirrors
+// groupedBy() in the dashboard (app.js) so both surfaces say the same thing.
+function groupedByPhrase(tier: string): string {
+  switch (tier) {
+    case "conv-id": return "the provider's conversation id";
+    case "prefix": return "matching message history";
+    case "compaction-link": return "history matched across a compaction (medium confidence)";
+    case "run": return "the same run, no history match (lower confidence)";
+    case "time-gap": return "recent activity — a best guess (low confidence)";
+    default: return tier;
+  }
+}
+
+export interface ShowOptions { full?: boolean; raw?: boolean }
+
+export function cmdShow(stateDir: string, idPrefix: string, opts: ShowOptions = {}): string {
   const store = openStore(stateDir);
   if (isStoreError(store)) return store.error;
   const call = store?.getCall(idPrefix) ?? null;
-  store?.close();
-  if (!call) return `no call matches '${idPrefix}' (prefix may be ambiguous or unknown).`;
+  if (!store || !call) {
+    store?.close();
+    return `no call matches '${idPrefix}' (prefix may be ambiguous or unknown).`;
+  }
+  const spans = leakSpansFor(store, call.id);
+  // Leak EVENTS, not spans: a span-less occurrence (v1-era row) must still
+  // flag — this line must never read "clean" for a call that leaked.
+  const leakTypes = leakTypesFor(store, call.id);
+  store.close();
+  const d = buildDetail(call, spans);
+
+  // Same words as the dashboard's detail view: "✓ observed" / "self-reported"
+  // provenance, errors only when they are errors, "grouped by" in plain
+  // English. Endpoint/size/tier live behind --full, like the ▸ technical fold;
+  // the run id is shown nowhere (nothing a user can do takes one).
+  const prov = call.source === "wire" ? "✓ observed" : "self-reported";
+  const err = call.status != null && call.status >= 400 ? ` · error ${call.status}` : "";
+  const toks = call.tokensIn != null || call.tokensOut != null
+    ? ` · ${call.tokensIn ?? "?"} → ${call.tokensOut ?? "?"} tokens`
+    : "";
   const lines = [
-    `call ${call.id}`,
-    `  ${clean(call.agent ?? "?")} → ${clean(call.provider ?? "?")}${call.model ? `/${clean(call.model)}` : ""}  ${clean(call.endpoint ?? "")}`,
-    `  at ${new Date(call.tsRequest).toISOString()}  status ${call.status ?? "?"}  tokens ${call.tokensIn ?? "?"}→${call.tokensOut ?? "?"}`,
-    `  session ${call.sessionId.slice(0, 8)} (keyed by ${call.sessionTier})  run ${clean(call.runId)}`,
-    `  summary: ${clean(call.summary ?? "—")}`,
+    `call ${call.id}   ${prov}${err}`,
+    `  ${clean(call.agent ?? "?")} → ${clean(call.provider ?? "?")}${call.model ? ` · ${clean(call.model)}` : ""}`,
+    `  ${fmtWhen(call.tsRequest)}${toks}`,
+    `  session ${clean(call.sessionId)} · grouped by ${groupedByPhrase(clean(call.sessionTier))}`,
   ];
+  if (call.redacted) lines.push("  secrets masked in storage (redact-on-capture)");
+  if (opts.full) {
+    lines.push(
+      `  technical: ${clean(call.endpoint ?? "?")} · ${fmtBytes(call.bytesReq)} sent · ` +
+        `${fmtBytes(call.bytesResp)} received · grouping tier ${clean(call.sessionTier)}`,
+    );
+  }
+
+  // The headline for a security tool: did this call leak, and what.
+  if (leakTypes.length > 0) {
+    const tiers = new Map<string, string>();
+    for (const l of leakTypes) {
+      if (!tiers.has(l.secretType) || l.tier === "structured") tiers.set(l.secretType, l.tier);
+    }
+    // clean() the rendered names too — §6.10 applies to every printed string.
+    const names = [...tiers].map(
+      ([t, tier]) => clean(secretName(t)) + (tier === "structured" ? "" : " (possible)"),
+    );
+    lines.push(
+      "",
+      `  🔴 ${names.length} secret${names.length === 1 ? "" : "s"} sent to ${clean(call.provider ?? "?")}: ${names.join(", ")}`,
+    );
+  }
+  lines.push("", `  summary: ${clean(call.summary ?? "—")}`);
+
+  if (opts.raw) {
+    lines.push("", "── request (raw) ──", clean(d.requestRaw || "(empty)"));
+    lines.push("", "── response (raw) ──", clean(d.responseRaw || "(empty)"));
+    if (d.sseRaw) lines.push("", "── raw stream (as received) ──", clean(d.sseRaw));
+  } else {
+    lines.push("", "  sent —");
+    if (d.system != null) {
+      lines.push(opts.full
+        ? `    system:\n${clean(d.system)}`
+        : `    system · ${d.system.length} chars (--full to show)`);
+    }
+    const msgs = d.messages ?? [];
+    if (msgs.length === 0) {
+      lines.push("    (no parsed request content — --raw for the exact bytes)");
+    } else if (opts.full) {
+      for (const m of msgs) lines.push(`    ${clean(m.role)}: ${clean(m.content)}`);
+    } else {
+      if (msgs.length > 1) lines.push(`    (${msgs.length - 1} earlier message${msgs.length - 1 === 1 ? "" : "s"} — --full to show)`);
+      const last = msgs.at(-1)!;
+      lines.push(`    ${clean(last.role)}: ${clip(clean(last.content))}`);
+    }
+    lines.push("", "  received —");
+    lines.push(d.responseText != null
+      ? `    ${opts.full ? clean(d.responseText) : clip(clean(d.responseText))}`
+      : "    (no readable response captured — --raw for the exact bytes)");
+  }
+
+  // Same wording as the dashboard's warnings.
   if (call.scanState !== "ok") {
-    lines.push("  ⚠ scan timed out — treated as unverified, not clean");
+    lines.push("", "  ⚠ scan incomplete — this body was not fully verified, not marked clean");
   }
   if (call.captureState !== "ok") {
-    lines.push("  ⚠ capture truncated — the stream to the agent was complete; the stored copy is not");
+    lines.push("  ⚠ capture truncated — the stored bytes are incomplete");
+  }
+  if (!opts.raw && !opts.full) {
+    // Full session id here — the dashboard deep link matches it exactly.
+    lines.push(
+      "",
+      "  --full for every message · --raw for exact bytes",
+      `  beagle ui --session ${clean(call.sessionId)}   (the whole conversation)`,
+    );
   }
   return lines.join("\n");
 }
