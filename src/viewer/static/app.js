@@ -746,6 +746,12 @@ function Detail({ id, onSession }) {
           html`<span class="err">error ${detail.status}</span>`}
         </div>
         <div class="meta-sub">
+          <span class="k">call</span> <${CopyChip} value=${detail.id} />
+          ${(detail.tokensIn != null || detail.tokensOut != null) &&
+          html`<span aria-hidden="true">·</span>
+            <span class="toks" title="input → output tokens">${tok(detail.tokensIn)} → ${tok(detail.tokensOut)} tokens</span>`}
+        </div>
+        <div class="meta-sub">
           <span class="k">session</span> <${CopyChip} value=${detail.sessionId} />
           <span aria-hidden="true">·</span>
           <span class="k">grouped by</span> <span>${groupedBy(detail.sessionTier)}</span>
@@ -753,11 +759,6 @@ function Detail({ id, onSession }) {
           html`<span aria-hidden="true">·</span>
             <button class="linklike"
               onClick=${() => onSession(detail.sessionId)}>view session →</button>`}
-          ${(detail.tokensIn != null || detail.tokensOut != null) &&
-          html`<span aria-hidden="true">·</span>
-            <span class="toks" title="input → output tokens">${tok(detail.tokensIn)} → ${tok(detail.tokensOut)} tokens</span>`}
-          <span aria-hidden="true">·</span>
-          <span class="k">call</span> <${CopyChip} value=${detail.id} />
         </div>
         ${detail.captureState !== "ok" &&
         html`<div class="warn">⚠ capture truncated — the stored bytes are incomplete</div>`}
@@ -794,7 +795,7 @@ function Detail({ id, onSession }) {
           `
         : html`
             ${system != null &&
-            html`<${Chip} label=${`system prompt · ${system.length} chars`} body=${system} />`}
+            html`<${Chip} label="system prompt" body=${system} />`}
             ${older.length > 0 && older.length <= 3
               ? older.map((m) => html`<${Msg} m=${m} leaks=${leaks} />`)
               : html`
