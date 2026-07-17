@@ -98,6 +98,18 @@ describe("Store lifecycle", () => {
     expect(() => Store.openReadOnly(join(dir, "nope"))).toThrow();
   });
 
+  test("openOrRecover surfaces a version mismatch — never quarantines a healthy store", () => {
+    // A rollback (older binary, newer store) must fail with the clean version
+    // error, not shelve the entire capture history as "corruption".
+    const store = Store.open(dir);
+    store.insertCall(fakeCall());
+    store.setUserVersionForTest(SCHEMA_VERSION + 1);
+    store.close();
+    expect(() => Store.openOrRecover(dir)).toThrow(StoreVersionError);
+    // the history is still there, un-quarantined
+    expect(statSync(join(dir, "beagle.db")).size).toBeGreaterThan(0);
+  });
+
   test("migrates an older store forward in place, preserving captured data", () => {
     // Populate a real store, then rewind its on-disk schema to look like a v1
     // store (no v2 columns, user_version=1) so Store.open exercises migrate().
@@ -116,6 +128,7 @@ describe("Store lifecycle", () => {
     raw.exec("ALTER TABLE leak_occurrences DROP COLUMN span_start");
     raw.exec("ALTER TABLE leak_occurrences DROP COLUMN span_end");
     raw.exec("ALTER TABLE payloads DROP COLUMN display_messages"); // v3 column
+    raw.exec("ALTER TABLE exchanges DROP COLUMN one_shot"); // v4 column
     raw.exec("PRAGMA user_version=1");
     raw.close();
 
@@ -127,10 +140,12 @@ describe("Store lifecycle", () => {
     expect(listLeakEvents(migrated).length).toBe(1);
     // The re-added columns now accept writes: the redact flag (v2) and the
     // Mode B display messages (v3) both round-trip through the migrated schema.
-    const ex2 = fakeCall({ redacted: true, displayMessages: [{ role: "user", content: "hi" }] });
+    const ex2 = fakeCall({ redacted: true, displayMessages: [{ role: "user", content: "hi" }], oneShot: true });
     migrated.insertCall(ex2);
     expect(migrated.getCall(ex2.id)?.redacted).toBe(true);
     expect(migrated.getCall(ex2.id)?.displayMessages).toEqual([{ role: "user", content: "hi" }]);
+    expect(migrated.getCall(ex2.id)?.oneShot).toBe(true); // v4 column round-trips post-migration
+    expect(migrated.getCall(call.id)?.oneShot).toBe(false); // pre-migration row reads false, not undefined
     migrated.close();
   });
 });

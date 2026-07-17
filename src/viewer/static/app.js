@@ -344,6 +344,11 @@ function Sessions({ onOpen, leaksOnly }) {
           <div class="stitle-line">
             <span class=${title ? "stitle" : "stitle untitled"}
               title=${title || "no opening prompt captured"}>${title || "untitled session"}</span>
+            ${s.utility && s.calls === 1 &&
+            html`<span class="chip"
+              title=${"a single stateless one-shot request (opencode fires these to name a " +
+                "conversation) — it carries no identity linking it to the conversation it " +
+                "titled, so it can't be merged into it"}>title turn</span>`}
             ${s.leaks > 0 &&
             html`<span class="chip leak">${s.leaks} leak${s.leaks === 1 ? "" : "s"}</span>`}
             ${s.source !== "wire" &&
@@ -485,6 +490,8 @@ function SessionTranscript({ sessionId, row, onBack, onPurged }) {
         ${source === "otel" &&
         html`<span class="chip otel" title="the agent's own report — Beagle did not see the wire">self-reported</span>`}
         ${mixed && html`<span class="chip otel">partly self-reported</span>`}
+        ${view.utility && turns.length === 1 &&
+        html`<span class="chip" title="a single stateless one-shot fired to name a conversation">title turn</span>`}
         ${secretCount > 0 &&
         html`<span class="chip leak">${secretCount} secret${secretCount === 1 ? "" : "s"}</span>`}
         ${view.truncated && html`<span class="warn">showing the first 200 calls only</span>`}

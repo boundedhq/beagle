@@ -57,6 +57,29 @@ describe("listSessions", () => {
     store.close();
   });
 
+  test("utility: only sessions whose EVERY call is a one-shot get the flag", () => {
+    const store = Store.open(dir);
+    store.insertCall(call({ sessionId: "title-turn", oneShot: true }));
+    store.insertCall(call({ sessionId: "convo", oneShot: false }));
+    store.insertCall(call({ sessionId: "mixed", oneShot: true }));
+    store.insertCall(call({ sessionId: "mixed", oneShot: false, tsRequest: 2000 }));
+    const byId = new Map(listSessions(store, 100).map((r) => [r.sessionId, r.utility]));
+    expect(byId.get("title-turn")).toBe(true);
+    expect(byId.get("convo")).toBe(false);
+    expect(byId.get("mixed")).toBe(false); // one real call → a real conversation
+    store.close();
+  });
+
+  test("the transcript view carries utility itself — badge independent of navigation", () => {
+    const store = Store.open(dir);
+    store.insertCall(call({ sessionId: "t", oneShot: true }));
+    store.insertCall(call({ sessionId: "c", oneShot: false }));
+    expect(buildSessionTurns(store, "t").utility).toBe(true);
+    expect(buildSessionTurns(store, "c").utility).toBe(false);
+    expect(buildSessionTurns(store, "nonexistent").utility).toBe(false);
+    store.close();
+  });
+
   test("a session with both wire and otel calls reads 'mixed'", () => {
     const store = Store.open(dir);
     store.insertCall(call({ sessionId: "m", source: "wire" }));
