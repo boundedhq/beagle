@@ -83,4 +83,16 @@ describe("dropIdentityFieldNoise (protocol identity fields)", () => {
     const findings = (await host.scan(bytes, {})).findings;
     expect(dropIdentityFieldNoise(bytes, findings)).toEqual(findings);
   });
+
+  test("keyword-free field shapes ('user', 'session_id') never suppress — only prompt_cache_key does", async () => {
+    // The generic rule can't anchor on names like "user" or "session_id"
+    // (no keyword), so suppressing them would never prevent a false positive —
+    // it would only swallow real findings in pasted content shaped like them.
+    // A secret pasted into the top-level OpenAI "user" field: the old
+    // six-field list would have suppressed this finding outright.
+    const bytes = enc('{"model":"gpt-5","user":"password: kJ9x2mQ8vLp4nR7wZs3TqB6yD","input":[]}');
+    const raw = await host.scan(bytes, {});
+    expect(raw.findings.some((f) => f.tier === "possible")).toBe(true); // the finding exists…
+    expect(dropIdentityFieldNoise(bytes, raw.findings)).toEqual(raw.findings); // …and survives
+  });
 });

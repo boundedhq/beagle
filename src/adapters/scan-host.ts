@@ -11,12 +11,19 @@ export interface ScanResult {
 
 // Protocol identity fields carry expected high-entropy plumbing — opencode's
 // prompt_cache_key IS its session id (the value Beagle groups sessions by),
-// not a credential. The generic entropy detector fires on them because the
+// not a credential. The generic entropy detector fires on it because the
 // field NAME supplies its context keyword ("…key"). Drop possible-tier
 // findings that overlap such a field; structured detectors (a real AWS key
-// pasted anywhere, even inside one of these fields) still fire.
-const IDENTITY_FIELD_RE =
-  /"(?:prompt_cache_key|previous_response_id|conversation_id|session_id|safety_identifier|user)"\s*:\s*"(?:[^"\\]|\\.)*"/g;
+// pasted anywhere, even inside the field) still fire.
+//
+// Deliberately ONLY keyword-bearing field names: the generic rule cannot
+// anchor on names like previous_response_id or session_id (no keyword), so
+// listing them would never prevent a false positive — it would only suppress
+// real findings in pasted content that happens to be shaped like those
+// fields. Extend only when a new keyword-bearing protocol field is observed.
+// (Linear regex — disjoint alternatives, anchored on the literal name — safe
+// to run here in the daemon, outside the scan worker's ReDoS sandbox.)
+const IDENTITY_FIELD_RE = /"prompt_cache_key"\s*:\s*"(?:[^"\\]|\\.)*"/g;
 
 export function dropIdentityFieldNoise(bytes: Uint8Array, findings: Finding[]): Finding[] {
   if (!findings.some((f) => f.tier === "possible")) return findings;
