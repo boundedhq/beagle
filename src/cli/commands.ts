@@ -13,7 +13,7 @@ import { claudeAuthMode, codexAuthMode, detectAgents, knownExtraLocations, pathD
 import { watchAgent, unwatchAgent, type WatchEnv, type WatchModeRequest } from "../install/watch";
 import { ChangeManifest } from "../install/manifest";
 import { listLeakEvents } from "../viewer/feed-query";
-import { sessionHeadline } from "../viewer/session-view";
+import { sessionHeadlines } from "../viewer/session-view";
 import { secretName } from "../notifier/alert-copy";
 import { buildCodexOtelArgs, buildCodexOtelEnv, buildHookSettings, buildOtelEnv, mergeHookIntoSettings } from "../parsers/otlp-map";
 import { buildExtensionRedirect, buildRedirectConfig, readFirstConfig, writeRedirectConfig, writeRedirectExtension } from "../install/config-redirect";
@@ -271,12 +271,15 @@ export function cmdLeaks(stateDir: string): string {
     (a, b) => Math.max(...b[1].map((e) => e.lastTs)) - Math.max(...a[1].map((e) => e.lastTs)),
   );
 
+  // One query for every group's headline, not one per session.
+  const headlines = sessionHeadlines(store, groups.map(([sid]) => sid));
+
   const lines = [
     `${events.length} leak event${events.length === 1 ? "" : "s"} across ` +
       `${groups.length} session${groups.length === 1 ? "" : "s"} — newest first:`,
   ];
   for (const [sessionId, group] of groups) {
-    const head = sessionHeadline(store, sessionId);
+    const head = headlines.get(sessionId) ?? {};
     const full = clean(unwrapTitle(head.title));
     // Cap the headline: stored summaries can run a sentence long, and the
     // title only needs to identify the conversation.
