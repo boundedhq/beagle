@@ -354,8 +354,14 @@ button.linklike:hover { text-decoration: underline; }
   border-left: 2px dashed var(--border);
 }
 .detail .history-fold:hover { color: var(--accent); border-left-color: var(--accent); }
-.detail .msg { margin: 6px 0; padding: 6px 10px; border-left: 2px solid var(--border); }
-.detail .msg .role { color: var(--accent); font-size: 12px; }
+.detail .msg { margin: 10px 0; padding: 6px 10px; border-left: 2px solid var(--border); }
+/* Role labels: same typography as the transcript's .mc-name — the two
+   screens must read as one product. */
+.detail .msg .role {
+  color: var(--accent); font-family: var(--sans); font-size: 10.5px;
+  font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em;
+  margin-bottom: 3px;
+}
 .detail .msg.assistant .role, .detail .msg.response .role { color: var(--ok); }
 /* bodies keep their newlines — pretty-printed JSON must not re-collapse —
    and match the transcript/feed content size */
@@ -371,14 +377,17 @@ button.linklike:hover { text-decoration: underline; }
   white-space: pre-wrap; word-break: normal; overflow-wrap: anywhere;
   max-height: 460px; line-height: 1.5; font-size: var(--content);
 }
-/* Section labels above each raw block — small caps, not browser-default h4. */
+/* Section labels above each raw block — same typography as the transcript's
+   .mc-name labels, colored the same way (request accent, response ok). */
 .detail h4 {
-  font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
-  font-weight: 600; color: var(--muted); margin: 14px 0 5px;
+  font-family: var(--sans); font-size: 10.5px; text-transform: uppercase;
+  letter-spacing: 0.07em; font-weight: 600; color: var(--muted); margin: 16px 0 6px;
 }
+.detail h4.req { color: var(--accent); }
+.detail h4.resp { color: var(--ok); }
 /* The readable ⇄ raw switch: a segmented control so it reads as two views,
    not a lone button (users didn't notice it toggled anything). */
-.viewswitch { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 0 4px; }
+.viewswitch { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 14px 0 12px; }
 .viewtoggle { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
 .viewtoggle button {
   border: 0; border-radius: 0; background: transparent; color: var(--muted);
@@ -420,10 +429,17 @@ button.danger:hover:not(:disabled) { background: #4a1a28; }
 .transcript-meta .warn { color: #e6c36b; }
 .syscard {
   background: var(--panel); border: 1px solid var(--border);
-  border-radius: 10px; margin: 8px 0;
+  border-radius: 10px; margin: 10px 0;
 }
-.syscard .sys-head { padding: 6px 12px; color: var(--muted); cursor: pointer; font-size: 12px; }
-.syscard pre { max-height: 300px; overflow-y: auto; margin: 0; border-top: 1px solid var(--border); }
+.syscard .sys-head { padding: 7px 12px; color: var(--muted); cursor: pointer; font-size: 12px; }
+.syscard .sys-head:hover { color: var(--text); }
+/* Body: the unified content font, on BOTH screens (this card serves the
+   calls detail and the transcript alike). */
+.syscard pre {
+  max-height: 300px; overflow-y: auto; margin: 0; border-top: 1px solid var(--border);
+  padding: 10px 12px; font-size: var(--content); line-height: 1.5;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
 
 /* thread flow: no per-turn boxes — dividers and rails carry the structure */
 .thread { display: flex; flex-direction: column; }

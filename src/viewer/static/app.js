@@ -568,7 +568,7 @@ function SystemCard({ text }) {
   return html`
     <div class="syscard">
       <div class="sys-head" onClick=${() => setOpen(!open)}>
-        ${open ? "▾" : "▸"} system prompt · ${text.length.toLocaleString()} chars
+        ${open ? "▾" : "▸"} system prompt
       </div>
       ${open && html`<pre>${text}</pre>`}
     </div>
@@ -793,9 +793,9 @@ function Detail({ id, onSession }) {
       </div>`}
       ${showRaw
         ? html`
-            <h4>request</h4>
+            <h4 class="req">request</h4>
             <pre><${Highlighted} text=${pretty(detail.requestRaw, leaks)} leaks=${leaks} /></pre>
-            <h4>response</h4>
+            <h4 class="resp">response</h4>
             <pre>${pretty(detail.responseRaw)}</pre>
             ${detail.sseRaw &&
             html`<h4>raw stream (as received)</h4><pre>${detail.sseRaw}</pre>`}
@@ -860,11 +860,13 @@ function Highlighted({ text, leaks }) {
   return html`${out}`;
 }
 
+// Same collapsible card the transcript uses for its system prompt — one
+// visual for one concept, on both screens.
 function Chip({ label, body }) {
   const [open, setOpen] = useState(false);
   return html`
-    <div>
-      <span class="chip" onClick=${() => setOpen(!open)}>${label} ${open ? "▾" : "▸"}</span>
+    <div class="syscard">
+      <div class="sys-head" onClick=${() => setOpen(!open)}>${open ? "▾" : "▸"} ${label}</div>
       ${open && html`<pre>${body}</pre>`}
     </div>
   `;
