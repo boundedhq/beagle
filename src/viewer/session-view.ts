@@ -164,8 +164,14 @@ export function buildSessionTurns(store: Store, sessionId: string, cap = 200): S
       // assistant message — new to the wire history, but the reader just read
       // it one card up. Drop the leading echo (exact match only; anything
       // reworded stays visible). The raw view keeps every byte.
+      // R7 guard: NEVER drop an echo that carries a leak. A secret first seen
+      // in a response isn't a leak there (responses aren't request-scanned),
+      // so this resend is the ONLY place the transcript can highlight it —
+      // dropping it would show "secret sent" with nothing highlighted.
+      const echoHasLeak =
+        messages.length > 0 && d.leaks.some((l) => l.value && messages[0]!.content.includes(l.value));
       if (
-        messages.length > 0 && prevResponseText !== null &&
+        messages.length > 0 && prevResponseText !== null && !echoHasLeak &&
         messages[0]!.role === "assistant" && messages[0]!.content === prevResponseText
       ) {
         messages = messages.slice(1);

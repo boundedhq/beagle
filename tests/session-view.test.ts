@@ -93,6 +93,39 @@ describe("listSessions", () => {
     store.close();
   });
 
+  test("an echo carrying a leak is NOT deduped — the secret stays highlightable (R7)", () => {
+    // A secret first appears in turn 1's RESPONSE (not a leak there — responses
+    // aren't request-scanned). Turn 2 echoes it back → now a leak. Dropping the
+    // echo would show "secret sent" with the value highlighted nowhere.
+    const SECRET = "AKIAZQ3DRSTUVWXY2345";
+    const echo = `here is the key ${SECRET}`;
+    const store = Store.open(dir);
+    store.insertCall(call({
+      tsRequest: 1000,
+      requestBody: body([{ role: "user", content: "q1" }]),
+      responseBody: resp(echo),
+    }));
+    const t2 = body([
+      { role: "user", content: "q1" },
+      { role: "assistant", content: echo },
+      { role: "user", content: "q2" },
+    ]);
+    const id2 = ulid();
+    const span = new TextDecoder().decode(t2).indexOf(SECRET);
+    store.insertCall(call({ id: id2, tsRequest: 2000, requestBody: t2, responseBody: resp("ok") }));
+    store.upsertLeakEvent({
+      fingerprint: "fp", sessionId: "sess-1", detector: "aws-access-key-id",
+      secretType: "aws-access-key-id", severity: "high", confidenceTier: "structured",
+      destination: "anthropic", callId: id2, ts: Date.now(),
+      spanStart: span, spanEnd: span + SECRET.length,
+    });
+    const turns = buildSessionTurns(store, "sess-1").turns;
+    // turn 2 keeps the echoed assistant message BECAUSE it holds the leak
+    expect(turns[1]!.messages.some((m) => m.content.includes(SECRET))).toBe(true);
+    expect(turns[1]!.leaks.some((l) => l.value === SECRET)).toBe(true);
+    store.close();
+  });
+
   test("utility: only sessions whose EVERY call is a one-shot get the flag", () => {
     const store = Store.open(dir);
     store.insertCall(call({ sessionId: "title-turn", oneShot: true }));
