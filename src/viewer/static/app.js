@@ -330,7 +330,7 @@ function Sessions({ onOpen, leaksOnly }) {
   const shown = sessions.filter((s) => !leaksOnly || s.leaks > 0);
   if (shown.length === 0)
     return html`<div class="empty">
-      no sessions leaked a secret — turn off <span class="hl">leaks only</span>
+      no sessions leaked a secret — turn off <span class="hl">leaks only</span>${" "}
       to see all ${sessions.length} session${sessions.length === 1 ? "" : "s"}.
     </div>`;
   return html`
