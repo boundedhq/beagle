@@ -109,6 +109,14 @@ function App() {
         api.get("/api/feed").then(setCalls);
         api.get("/api/stats").then(setStats);
       }
+      if (ev === "leak") {
+        // Silent refresh: possible-tier findings never fire the loud alert
+        // frame, but the header count, leak tags, and session chips must not
+        // sit stale until a manual reload.
+        api.get("/api/leaks").then(setLeaks);
+        api.get("/api/feed").then(setCalls);
+        api.get("/api/stats").then(setStats);
+      }
     }
     return () => { stop = true; };
   }, []);
@@ -709,6 +717,11 @@ function Detail({ id, onSession }) {
   // timeline with a toggle the user has to discover.
   const hasStructure = messages.length > 0 || system != null;
   const showRaw = raw || !hasStructure;
+  // A leak can live OUTSIDE the readable content (a header, a protocol
+  // field): the readable view then shows no highlight anywhere. Say where it
+  // actually is instead of leaving the user hunting.
+  const readableText = [system ?? "", ...messages.map((m) => m.content), detail.responseText ?? ""].join("\n");
+  const leakHiddenInRaw = leaks.length > 0 && !showRaw && leaks.every((l) => !readableText.includes(l.value));
 
   return html`
     <div class="detail">
@@ -756,7 +769,7 @@ function Detail({ id, onSession }) {
       ${leaks.length > 0 &&
       html`<div class="leakbar">
         🔴 ${leaks.length} secret${leaks.length === 1 ? "" : "s"} sent in this call —
-        highlighted below:
+        ${leakHiddenInRaw ? "in the request's protocol fields, not the messages — open raw to see it highlighted:" : "highlighted below:"}
         ${leaks.map((l) => html`<span class="chip leak">${secretLabel(l.secretType)}</span>`)}
       </div>`}
       ${hasStructure &&

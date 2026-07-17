@@ -9,6 +9,31 @@ export interface ScanResult {
   findings: Finding[];
 }
 
+// Protocol identity fields carry expected high-entropy plumbing — opencode's
+// prompt_cache_key IS its session id (the value Beagle groups sessions by),
+// not a credential. The generic entropy detector fires on them because the
+// field NAME supplies its context keyword ("…key"). Drop possible-tier
+// findings that overlap such a field; structured detectors (a real AWS key
+// pasted anywhere, even inside one of these fields) still fire.
+const IDENTITY_FIELD_RE =
+  /"(?:prompt_cache_key|previous_response_id|conversation_id|session_id|safety_identifier|user)"\s*:\s*"(?:[^"\\]|\\.)*"/g;
+
+export function dropIdentityFieldNoise(bytes: Uint8Array, findings: Finding[]): Finding[] {
+  if (!findings.some((f) => f.tier === "possible")) return findings;
+  // Same decode as the scanner (engine.scan): spans index this exact string.
+  const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  const ranges: Array<[number, number]> = [];
+  IDENTITY_FIELD_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = IDENTITY_FIELD_RE.exec(text)) !== null) ranges.push([m.index, m.index + m[0].length]);
+  if (ranges.length === 0) return findings;
+  // Overlap, not containment: a generic match's span starts at its context
+  // keyword, which can sit just before the field's opening quote.
+  return findings.filter(
+    (f) => f.tier !== "possible" || !ranges.some(([s, e]) => f.start < e && f.end > s),
+  );
+}
+
 export interface ScanHostOptions {
   /** Rule file CONTENT (not a path): the caller owns loading/embedding, so
    *  the compiled binary needs no filesystem access for rules. */

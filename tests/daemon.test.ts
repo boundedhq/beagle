@@ -291,6 +291,25 @@ describe("Daemon end-to-end", () => {
     store.close();
   });
 
+  test("protocol identity fields (prompt_cache_key) never create leak events", async () => {
+    // The exact false positive from live traffic: opencode's own session id,
+    // high-entropy and preceded by "…key", flagged by the generic detector.
+    await sendThroughProxy(
+      daemon.proxyPort, "run-e2e",
+      JSON.stringify({
+        model: "m",
+        messages: [{ role: "user", content: "hello there" }],
+        prompt_cache_key: "ses_092219142ffe1QxlfF0u9eAL0B",
+      }),
+    );
+    await Bun.sleep(150);
+    expect(alerts.length).toBe(0);
+    const store = Store.openReadOnly(stateDir);
+    expect(listLeakEvents(store).length).toBe(0);          // no event, either tier
+    expect(listCalls(store, 5).some((c) => c.hasLeak)).toBe(false);
+    store.close();
+  });
+
   test("opencode /responses: prompt_cache_key groups the conversation; title-gen one-shots never cross-link", async () => {
     // A REAL /responses reply, with a response id: every turn must survive a
     // full recordResponse cycle (a resp_… id must not clobber the session's
