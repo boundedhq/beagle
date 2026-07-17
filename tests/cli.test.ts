@@ -120,10 +120,50 @@ describe("CLI commands (headless loop, R12)", () => {
     expect(out).toContain("AWS access key"); // structured tier: no "(possible)" marker
   });
 
-  test("show: accepts id prefix, prints summary and metadata", () => {
+  test("show: prints provenance, metadata, and the readable exchange", () => {
     const out = cmdShow(stateDir, callId.slice(0, 8));
-    expect(out).toContain("claude-sonnet-5");
-    expect(out).toContain("user asked to read files");
+    expect(out).toContain("claude-sonnet-5");           // model
+    expect(out).toContain("user asked to read files");  // summary
+    expect(out).toContain("observed on the wire");      // provenance (seed is wire)
+    expect(out).toContain("my password is hunter2");    // the actual message sent
+    expect(out).toContain("--raw for exact bytes");     // escape-hatch footer
+  });
+
+  test("show: flags the leak with a plain-English name and destination", () => {
+    const store = Store.open(stateDir);
+    const id = ulid();
+    const body = '{"messages":[{"role":"user","content":"key is AKIAZQ3DRSTUVWXY2345 ok"}]}';
+    const start = body.indexOf("AKIAZQ3DRSTUVWXY2345");
+    store.insertCall({
+      id, sessionId: "sL", runId: "rL", source: "wire", agent: "claude",
+      provider: "anthropic", model: "claude-sonnet-5", endpoint: "/v1/messages",
+      tsRequest: Date.now(), status: 200, scanState: "ok", captureState: "ok",
+      sessionTier: "prefix", requestBody: new TextEncoder().encode(body),
+      requestHeaders: null, responseBody: new TextEncoder().encode('{"content":"ok"}'),
+      responseHeaders: null, sseRaw: null, searchText: body,
+    });
+    store.upsertLeakEvent({
+      fingerprint: "fpL", sessionId: "sL", detector: "aws-access-key-id",
+      secretType: "aws-access-key-id", severity: "high", confidenceTier: "structured",
+      destination: "anthropic", callId: id, ts: Date.now(),
+      spanStart: start, spanEnd: start + "AKIAZQ3DRSTUVWXY2345".length,
+    });
+    store.close();
+    // Full id, not a prefix: this second call shares the seed's ULID timestamp
+    // prefix (both minted in the same ms), so an 8-char prefix is ambiguous.
+    const out = cmdShow(stateDir, id);
+    expect(out).toContain("🔴");
+    expect(out).toContain("secret sent to anthropic");
+    expect(out).toContain("AWS access key");        // plain name…
+    expect(out).not.toContain("aws-access-key-id"); // …not the detector tag
+  });
+
+  test("show: --raw dumps exact bytes; --full leaves nothing collapsed", () => {
+    const raw = cmdShow(stateDir, callId.slice(0, 8), { raw: true });
+    expect(raw).toContain("request (raw)");
+    expect(raw).toContain("my password is hunter2");
+    const full = cmdShow(stateDir, callId.slice(0, 8), { full: true });
+    expect(full).not.toContain("--full to show"); // system/history no longer collapsed
   });
 
   test("show: ambiguous or unknown prefix says so plainly", () => {

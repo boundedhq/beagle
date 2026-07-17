@@ -32,7 +32,9 @@ usage:
                                  (no argument: reads the term from stdin, so
                                  secrets stay out of your shell history)
   beagle leaks                   the leak log, grouped by session
-  beagle show <id-prefix>        one call, summarized
+  beagle show <id-prefix>        one call: leaks, provenance, what was sent
+                                 and received (--full: every message; --raw:
+                                 exact bytes)
   beagle purge [all|panic]       erase captured data
   beagle uninstall [--yes]       remove everything Beagle installed (unwatch
                                  all, stop the daemon, erase data, remove the
@@ -126,8 +128,9 @@ export async function run(argv: string[]): Promise<number> {
       console.log(cmdLeaks(stateDir));
       return 0;
     case "show": {
-      if (!rest[0]) { console.error("usage: beagle show <call-id-prefix>"); return 2; }
-      console.log(cmdShow(stateDir, rest[0]));
+      const id = rest.find((a) => !a.startsWith("-"));
+      if (!id) { console.error("usage: beagle show <call-id-prefix> [--full] [--raw]"); return 2; }
+      console.log(cmdShow(stateDir, id, { full: rest.includes("--full"), raw: rest.includes("--raw") }));
       return 0;
     }
     case "purge": {
