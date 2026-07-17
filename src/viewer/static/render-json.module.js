@@ -129,6 +129,41 @@ function parseForTree(content, leaks) {
   return { head: m ? m[1] : null, value };
 }
 
+// A streamed response is an SSE event stream — a sequence of `event:`/`data:`
+// blocks, NOT one JSON document — so parseForTree can't fold it. Split it into
+// {type, data} events so each event's data renders as its own foldable tree.
+// Returns null when the content isn't an SSE stream (no `data:` lines), so the
+// caller falls back to the single-doc / flat path.
+function parseSseEvents(content, leaks) {
+  if (!/^data:/m.test(content)) return null;
+  const events = [];
+  let type = null;
+  let data = [];
+  const flush = () => {
+    if (data.length) events.push({ type, data: data.join("\n") });
+    type = null;
+    data = [];
+  };
+  for (const line of content.split(/\r?\n/)) {
+    if (line.startsWith("event:")) type = line.slice(6).trim();
+    else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+    else if (line === "") flush(); // blank line terminates an event
+  }
+  flush();
+  if (!events.length) return null;
+  // R7 backstop: a detected value that is contiguous in the raw stream but not
+  // inside any single event's data can't be highlighted once we split by event
+  // — keep the flat, highlighted view instead. (A value fragmented across
+  // events was never contiguous in the flat text either, so this loses nothing
+  // the flat path would have shown.)
+  for (const l of leaks ?? []) {
+    if (l.value && content.includes(l.value) && !events.some((e) => e.data.includes(l.value))) {
+      return null;
+    }
+  }
+  return events;
+}
+
 function JsonNode({ k, v, leaks, depth }) {
   const isObj = v !== null && typeof v === "object";
   // Highlight the KEY too, not just values: a structured detector can match a
@@ -207,8 +242,17 @@ export function JsonBody({ content, leaks, threshold, hasLeak }) {
 // JsonBody starts every leak-bearing subtree expanded, and if a secret can't
 // survive the structural split it falls back to flat highlighted text.
 export function RawBody({ body, leaks }) {
+  // A streamed response is an SSE event stream, not one JSON doc — fold each
+  // event's data on its own; a single JSON body (or anything else) goes straight
+  // through JsonBody (tree or flat). Memoized for the same reason JsonBody is.
+  const events = useMemo(() => (body ? parseSseEvents(body, leaks) : null), [body, leaks]);
   if (!body) return html`<pre>(empty)</pre>`;
   return html`<div class="rawblock">
-    <${JsonBody} content=${body} leaks=${leaks} threshold=${1e9} />
+    ${events
+      ? events.map((ev, i) => html`<div class="sse-ev" key=${i}>
+          ${ev.type != null && html`<div class="sse-ev-type">${ev.type}</div>`}
+          <${JsonBody} content=${ev.data} leaks=${leaks} threshold=${1e9} />
+        </div>`)
+      : html`<${JsonBody} content=${body} leaks=${leaks} threshold=${1e9} />`}
   </div>`;
 }
