@@ -12,7 +12,7 @@ import { ProxyServer, type CapturedCall, type ScanContext } from "../core/proxy/
 import { RunRegistry, type RunRegistration } from "../core/proxy/registry";
 import { SessionResolver, type Resolution } from "../core/session/resolver";
 import { Store } from "../core/store/store";
-import { ScanHost } from "../adapters/scan-host";
+import { ScanHost, dropIdentityFieldNoise } from "../adapters/scan-host";
 import type { Finding } from "../core/scanner/engine";
 import { applyCaptureRedaction, redactValues, redactValuesInText } from "../transform/redact";
 import { scrubAuthHeaders } from "../core/normalize/normalize";
@@ -257,6 +257,10 @@ export class Daemon {
     this.pending.set(ctx.callId, entry);
 
     const result = await this.scanHost.scan(bytes, { authValue: ctx.authValue });
+    // Protocol identity fields (prompt_cache_key & co) are expected entropy,
+    // not credentials — drop the generic-detector noise before it reaches
+    // redaction or the alert engine.
+    result.findings = dropIdentityFieldNoise(bytes, result.findings);
     try {
       entry.findings = result.findings;
       if (result.state === "incomplete") {
@@ -280,6 +284,12 @@ export class Daemon {
       },
       result.findings,
     );
+    // Tell open dashboards a leak landed — WHATEVER the tier. The loud alert
+    // frame fires only for fresh structured events, so without this a
+    // possible-tier finding updates nothing and the header/feed sit stale
+    // until a manual reload (the sessions tab, fetching fresh on every click,
+    // would disagree with both).
+    if (result.findings.length > 0) this.viewer?.broadcast("leak", { callId: ctx.callId });
   }
 
   private async captureCall(call: CapturedCall): Promise<void> {
@@ -340,6 +350,9 @@ export class Daemon {
       this.config.redactOnCapture && call.response.bodyBytes?.byteLength
         ? await this.scanHost.scan(call.response.bodyBytes, {})
         : null;
+    // Responses echo protocol identity fields (a /responses reply repeats
+    // prompt_cache_key) — same noise filter before redaction masks them.
+    if (respScan) respScan.findings = dropIdentityFieldNoise(call.response.bodyBytes!, respScan.findings);
     const redaction = this.config.redactOnCapture
       ? applyCaptureRedaction({
           incomplete: scanState === "incomplete" || respScan?.state === "incomplete",
@@ -422,7 +435,10 @@ export class Daemon {
       captureState: call.meta.captureState,
       sessionTier: resolution.tier,
       source: call.source,
-      hasLeak: false, // the alert event corrects this if a leak lands
+      // Honest at broadcast time: with redact-on-capture (the default) the
+      // scan has already completed by here, so the findings are final. The
+      // "leak" frame refreshes the feed for any straggler orderings.
+      hasLeak: (stash?.findings.length ?? 0) > 0,
     });
   }
 
@@ -443,6 +459,8 @@ export class Daemon {
         messages: call.request.messages,
       });
       const scanResult = await this.scanHost.scan(call.request.bodyBytes, {});
+      // Same protocol-identity noise filter as the wire path.
+      scanResult.findings = dropIdentityFieldNoise(call.request.bodyBytes, scanResult.findings);
       // Keep session chaining state current, same as the wire path — so a
       // Mode B session without an explicit id still chains across turns.
       if (call.request.messages?.length || call.response.text) {
@@ -538,6 +556,9 @@ export class Daemon {
         },
         scanResult.findings,
       );
+      // Same silent leak frame as the wire path — possible-tier findings must
+      // refresh open dashboards too.
+      if (scanResult.findings.length > 0) this.viewer?.broadcast("leak", { callId: call.id });
       this.viewer?.broadcast("call", {
         id: call.id,
         sessionId: resolution.sessionId,
@@ -554,7 +575,7 @@ export class Daemon {
         captureState: "ok",
         sessionTier: resolution.tier,
         source: "otel",
-        hasLeak: false,
+        hasLeak: scanResult.findings.length > 0, // scan completed above — final
       });
     }
   }

@@ -9,6 +9,38 @@ export interface ScanResult {
   findings: Finding[];
 }
 
+// Protocol identity fields carry expected high-entropy plumbing — opencode's
+// prompt_cache_key IS its session id (the value Beagle groups sessions by),
+// not a credential. The generic entropy detector fires on it because the
+// field NAME supplies its context keyword ("…key"). Drop possible-tier
+// findings that overlap such a field; structured detectors (a real AWS key
+// pasted anywhere, even inside the field) still fire.
+//
+// Deliberately ONLY keyword-bearing field names: the generic rule cannot
+// anchor on names like previous_response_id or session_id (no keyword), so
+// listing them would never prevent a false positive — it would only suppress
+// real findings in pasted content that happens to be shaped like those
+// fields. Extend only when a new keyword-bearing protocol field is observed.
+// (Linear regex — disjoint alternatives, anchored on the literal name — safe
+// to run here in the daemon, outside the scan worker's ReDoS sandbox.)
+const IDENTITY_FIELD_RE = /"prompt_cache_key"\s*:\s*"(?:[^"\\]|\\.)*"/g;
+
+export function dropIdentityFieldNoise(bytes: Uint8Array, findings: Finding[]): Finding[] {
+  if (!findings.some((f) => f.tier === "possible")) return findings;
+  // Same decode as the scanner (engine.scan): spans index this exact string.
+  const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  const ranges: Array<[number, number]> = [];
+  IDENTITY_FIELD_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = IDENTITY_FIELD_RE.exec(text)) !== null) ranges.push([m.index, m.index + m[0].length]);
+  if (ranges.length === 0) return findings;
+  // Overlap, not containment: a generic match's span starts at its context
+  // keyword, which can sit just before the field's opening quote.
+  return findings.filter(
+    (f) => f.tier !== "possible" || !ranges.some(([s, e]) => f.start < e && f.end > s),
+  );
+}
+
 export interface ScanHostOptions {
   /** Rule file CONTENT (not a path): the caller owns loading/embedding, so
    *  the compiled binary needs no filesystem access for rules. */
