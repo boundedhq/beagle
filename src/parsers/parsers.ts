@@ -235,6 +235,12 @@ function extractActionsSse(format: Format, raw: string): ToolAction[] {
       for (const tc of ev.choices?.[0]?.delta?.tool_calls ?? []) {
         if (tc.function?.name) out.push(toolAction(tc.function.name, undefined));
       }
+    } else if (format === "openai-responses") {
+      // Tool calls ride output_item events; `.done` carries the COMPLETE
+      // arguments (`.added` is an empty shell — using it would double-count).
+      if (ev.type === "response.output_item.done" && ev.item?.type === "function_call") {
+        out.push(toolAction(ev.item.name, safeJson(ev.item.arguments)));
+      }
     }
   }
   return out;
@@ -254,6 +260,8 @@ function toolAction(name: unknown, input: unknown): ToolAction {
     (typeof inp.file_path === "string" && inp.file_path) ||
     (typeof inp.path === "string" && inp.path) ||
     (typeof inp.pattern === "string" && inp.pattern) ||
+    (typeof inp.url === "string" && inp.url) ||
+    (typeof inp.query === "string" && inp.query) ||
     undefined;
   return detail ? { tool, detail: String(detail) } : { tool };
 }

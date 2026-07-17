@@ -57,6 +57,75 @@ describe("listSessions", () => {
     store.close();
   });
 
+  test("the response echoed back as the next turn's assistant message is not re-shown", () => {
+    // Stateless APIs resend the previous RESPONSE as the next request's
+    // assistant message. The delta view must not read as a duplicate.
+    const store = Store.open(dir);
+    store.insertCall(call({
+      tsRequest: 1000,
+      requestBody: body([{ role: "user", content: "q1" }]),
+      responseBody: resp("answer one"),
+    }));
+    store.insertCall(call({
+      tsRequest: 2000,
+      requestBody: body([
+        { role: "user", content: "q1" },
+        { role: "assistant", content: "answer one" }, // exact echo of turn 1's response
+        { role: "user", content: "q2" },
+      ]),
+      responseBody: resp("answer two"),
+    }));
+    store.insertCall(call({
+      tsRequest: 3000,
+      requestBody: body([
+        { role: "user", content: "q1" },
+        { role: "assistant", content: "answer one" },
+        { role: "user", content: "q2" },
+        { role: "assistant", content: "answer two REWORDED" }, // NOT an exact echo
+        { role: "user", content: "q3" },
+      ]),
+      responseBody: resp("answer three"),
+    }));
+    const turns = buildSessionTurns(store, "sess-1").turns;
+    expect(turns[1]!.messages.map((m) => m.content)).toEqual(["q2"]); // echo dropped
+    // a reworded assistant message is NOT an echo — it must stay visible
+    expect(turns[2]!.messages.map((m) => m.content)).toEqual(["answer two REWORDED", "q3"]);
+    store.close();
+  });
+
+  test("an echo carrying a leak is NOT deduped — the secret stays highlightable (R7)", () => {
+    // A secret first appears in turn 1's RESPONSE (not a leak there — responses
+    // aren't request-scanned). Turn 2 echoes it back → now a leak. Dropping the
+    // echo would show "secret sent" with the value highlighted nowhere.
+    const SECRET = "AKIAZQ3DRSTUVWXY2345";
+    const echo = `here is the key ${SECRET}`;
+    const store = Store.open(dir);
+    store.insertCall(call({
+      tsRequest: 1000,
+      requestBody: body([{ role: "user", content: "q1" }]),
+      responseBody: resp(echo),
+    }));
+    const t2 = body([
+      { role: "user", content: "q1" },
+      { role: "assistant", content: echo },
+      { role: "user", content: "q2" },
+    ]);
+    const id2 = ulid();
+    const span = new TextDecoder().decode(t2).indexOf(SECRET);
+    store.insertCall(call({ id: id2, tsRequest: 2000, requestBody: t2, responseBody: resp("ok") }));
+    store.upsertLeakEvent({
+      fingerprint: "fp", sessionId: "sess-1", detector: "aws-access-key-id",
+      secretType: "aws-access-key-id", severity: "high", confidenceTier: "structured",
+      destination: "anthropic", callId: id2, ts: Date.now(),
+      spanStart: span, spanEnd: span + SECRET.length,
+    });
+    const turns = buildSessionTurns(store, "sess-1").turns;
+    // turn 2 keeps the echoed assistant message BECAUSE it holds the leak
+    expect(turns[1]!.messages.some((m) => m.content.includes(SECRET))).toBe(true);
+    expect(turns[1]!.leaks.some((l) => l.value === SECRET)).toBe(true);
+    store.close();
+  });
+
   test("utility: only sessions whose EVERY call is a one-shot get the flag", () => {
     const store = Store.open(dir);
     store.insertCall(call({ sessionId: "title-turn", oneShot: true }));
@@ -162,9 +231,10 @@ describe("buildSessionTurns — the conversation delta", () => {
     expect(v.turns.length).toBe(2);
     expect(v.turns[0]!.messages).toEqual([{ role: "user", content: "first question" }]);
     expect(v.turns[0]!.responseText).toBe("first answer");
-    // the repeated history must NOT replay — only the new tail
+    // the repeated history must NOT replay — only the new tail, and the
+    // assistant echo of turn 1's response (already read one card up) is
+    // deduped too: the turn shows just what the USER added.
     expect(v.turns[1]!.messages).toEqual([
-      { role: "assistant", content: "first answer" },
       { role: "user", content: "second question" },
     ]);
     expect(v.turns[1]!.responseText).toBe("second answer");

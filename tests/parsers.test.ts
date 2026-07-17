@@ -184,6 +184,20 @@ describe("OpenAI Responses", () => {
     expect(stored.oneShot).toBe(false);
   });
 
+  test("streamed tool calls extract as actions (output_item.done, not the empty .added shell)", () => {
+    const sse = [
+      'event: response.output_item.added',
+      'data: {"type":"response.output_item.added","item":{"type":"function_call","name":"webfetch","arguments":""}}',
+      '',
+      'event: response.output_item.done',
+      'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"webfetch","arguments":"{\\"url\\":\\"https://example.com\\"}"}}',
+      '',
+    ].join("\n");
+    const actions = extractActions("openai-responses", enc(sse));
+    expect(actions.length).toBe(1); // .done only — .added would double-count
+    expect(actions[0]!.tool).toBe("webfetch");
+  });
+
   test("response: id and output text", () => {
     const body = JSON.stringify({
       id: "resp_456",
