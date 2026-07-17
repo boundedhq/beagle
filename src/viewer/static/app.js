@@ -794,7 +794,11 @@ function Detail({ id, onSession }) {
     detail.responseText ?? "",
     ...responseCalls.map((c) => c.args ?? ""),
   ].join("\n");
-  const leakHiddenInRaw = leaks.length > 0 && !showRaw && leaks.every((l) => !readableText.includes(l.value));
+  // Per-value, not all-or-nothing (mirrors leakNotVisible): if ANY detected
+  // value is absent from the readable text, point at raw — one visible secret
+  // must not suppress the pointer for a second that lives only in the system
+  // prompt / a header / a protocol field.
+  const leakHiddenInRaw = leaks.length > 0 && !showRaw && leaks.some((l) => l.value && !readableText.includes(l.value));
   // Response-section highlighting: this call's leaks plus the NEXT request's
   // (where the response's content actually got scanned).
   const respHighlights = (detail.responseLeaks ?? []).length

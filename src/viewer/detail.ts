@@ -151,6 +151,27 @@ export function buildDetail(call: CallRecord, spans: LeakSpan[]): CallDetail {
   };
 }
 
+// Just the parsed request messages — same result as buildDetail(call).messages,
+// but without decoding/parsing the RESPONSE. The calls-detail delta walk-back
+// diffs against previous calls and needs only this; a full buildDetail per
+// walked-back call would re-parse each (100KB+) response for nothing.
+export function detailMessages(call: CallRecord): DisplayMessage[] {
+  const format = detectFormat(call.endpoint ?? "");
+  return (
+    (call.requestBody ? parseRequest(format, call.requestBody)?.messages : undefined) ??
+    call.displayMessages ??
+    []
+  );
+}
+
+// Just the request-side leaks — same result as buildDetail(call, spans).leaks,
+// without any response work. Used to surface the NEXT call's leaks on a detail
+// (R7 backward highlight) without building its whole CallDetail.
+export function detailLeaks(call: CallRecord, spans: LeakSpan[]): DetailLeak[] {
+  const requestRaw = call.requestBody ? new TextDecoder("utf-8", { fatal: false }).decode(call.requestBody) : "";
+  return extractLeaks(requestRaw, spans, call.redacted ?? false);
+}
+
 function extractLeaks(requestText: string, spans: LeakSpan[], redacted: boolean): DetailLeak[] {
   // A redacted body no longer holds the secret at the recorded offsets — the
   // placeholders ARE the markers, so highlight those instead. Driven by the

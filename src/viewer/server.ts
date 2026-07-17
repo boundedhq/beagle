@@ -6,7 +6,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { Store } from "../core/store/store";
 import { feedStats, listCalls, listLeakEvents } from "./feed-query";
-import { buildDetail, leakSpansFor } from "./detail";
+import { buildDetail, detailLeaks, detailMessages, leakSpansFor } from "./detail";
 import { buildSessionTurns, listSessions, wireDeltaIndex } from "./session-view";
 // Statics embedded at build time (ships-what's-in-repo, and the compiled
 // binary has no filesystem view of the repo).
@@ -259,7 +259,7 @@ export class ViewerServer {
           for (const { id } of prevIds) {
             const prev = store.getCall(id);
             if (!prev) continue;
-            const prevMessages = buildDetail(prev, []).messages;
+            const prevMessages = detailMessages(prev); // messages only — no response re-parse
             if (prevMessages.length > 0) {
               detail.newFrom = wireDeltaIndex(detail.messages, prevMessages);
               break;
@@ -276,7 +276,7 @@ export class ViewerServer {
           )[0];
           if (nextId) {
             const next = store.getCall(nextId.id);
-            if (next) detail.responseLeaks = buildDetail(next, leakSpansFor(store, next.id)).leaks;
+            if (next) detail.responseLeaks = detailLeaks(next, leakSpansFor(store, next.id)); // leaks only
           }
         }
         this.json(res, 200, detail);

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildDetail, type LeakSpan } from "../src/viewer/detail";
+import { buildDetail, detailLeaks, detailMessages, type LeakSpan } from "../src/viewer/detail";
 import type { CallRecord } from "../src/core/store/store";
 
 const enc = (s: string) => new TextEncoder().encode(s);
@@ -140,5 +140,30 @@ describe("buildDetail — leak values to highlight (UI fix 2)", () => {
     const spans: LeakSpan[] = [{ start, end: start + secret.length, secretType: "aws-access-key-id", tier: "structured" }];
     const d = buildDetail(call({ requestBody: enc(body) }), spans);
     expect(d.leaks.map((l) => l.value)).toEqual([secret]);
+  });
+});
+
+// The lightweight walk-back/next-call helpers must stay byte-identical to the
+// full buildDetail — they exist only to skip response re-parsing, never to
+// change the result.
+describe("detailMessages / detailLeaks agree with buildDetail", () => {
+  const secret = "AKIAZQ3DRSTUVWXY2345";
+  const reqBody = enc(`{"messages":[{"role":"user","content":"key ${secret}"},{"role":"assistant","content":"ok"}]}`);
+  const spanStart = new TextDecoder().decode(reqBody).indexOf(secret);
+  const spans: LeakSpan[] = [{ start: spanStart, end: spanStart + secret.length, secretType: "aws-access-key-id", tier: "structured" }];
+
+  test("detailMessages === buildDetail(...).messages (no response needed)", () => {
+    const c = call({ requestBody: reqBody, responseBody: enc('{"content":[{"type":"text","text":"ok"}]}') });
+    expect(detailMessages(c)).toEqual(buildDetail(c, []).messages);
+  });
+
+  test("detailMessages falls back to displayMessages for Mode B, like buildDetail", () => {
+    const c = call({ source: "otel", requestBody: enc("scan text"), displayMessages: [{ role: "user", content: "hi" }] });
+    expect(detailMessages(c)).toEqual(buildDetail(c, []).messages);
+  });
+
+  test("detailLeaks === buildDetail(..., spans).leaks", () => {
+    const c = call({ requestBody: reqBody });
+    expect(detailLeaks(c, spans)).toEqual(buildDetail(c, spans).leaks);
   });
 });
