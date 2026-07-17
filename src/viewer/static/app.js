@@ -306,9 +306,9 @@ function Row({ x, onToggle, onSession }) {
               "so this is a self-report and its alerts can lag a few seconds"}>self-reported</span>`}
       ${x.scanState !== "ok" && html`<span class="chip">scan incomplete</span>`}
       <span class="session">
-        <button class="session-link" title="open this session as a conversation"
+        <button class="session-link" title=${`${x.sessionId} — open this session as a conversation`}
           onClick=${(e) => { e.stopPropagation(); onSession(); }}>
-          ${x.sessionId.slice(0, 6)}<span class="go" aria-hidden="true"> ›</span>
+          ${x.sessionId.slice(0, 12)}<span class="go" aria-hidden="true"> ›</span>
         </button>
       </span>
     </div>
@@ -889,7 +889,7 @@ function SearchResults({ hits, term, onClear, onOpen }) {
             <a href="#" onClick=${(e) => { e.preventDefault(); onOpen(hit.callId); }}>
               ${hit.callId.slice(0, 8)}
             </a>
-            ${" "}${new Date(hit.tsRequest).toLocaleString()} · session ${hit.sessionId.slice(0, 8)}
+            ${" "}${new Date(hit.tsRequest).toLocaleString()} · session ${hit.sessionId.slice(0, 12)}
             · <mark>${term}</mark>
           </div>
         `,
