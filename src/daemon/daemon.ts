@@ -296,9 +296,13 @@ export class Daemon {
     if (!this.isRunning) return; // late delivery during shutdown — store may be closing
     if (this.skipped.delete(call.id)) return; // request-time skip is final
     const stash = this.pending.get(call.id);
-    // redact-on-capture (R11): await the scan verdict and substitute the raw
-    // secret BEFORE the first write, so no raw value ever lands in the WAL.
-    if (this.config.redactOnCapture && stash) {
+    // Await the scan verdict BEFORE the first write, unconditionally: with
+    // redact-on-capture it gates the body substitution (R11); without it the
+    // summary's findings-based scrub still needs final findings — a response
+    // that beats the scan would otherwise store a raw secret in the
+    // permanently-visible feed line. Capture is off the relay path, so the
+    // wait costs the agent nothing; the scan itself is deadline-bounded.
+    if (stash) {
       await stash.scanDone;
     }
     this.pending.delete(call.id);
@@ -846,10 +850,14 @@ export function buildSummary(
 function sentSuffix(messages?: DisplayMessage[]): string {
   if (!messages?.length) return "";
   const last = messages.at(-1)!;
-  if (last.role === "user") return ` — to "${firstLine(last.content, 40)}"`;
+  // The results check comes FIRST: Anthropic's protocol carries tool results
+  // inside user-ROLE messages (kind stamps them at parse) — quoting those as
+  // the user's ask would caption tool output as human words.
   let results = 0;
   for (let i = messages.length - 1; i >= 0 && messages[i]!.kind === "result"; i--) results++;
-  return results > 0 ? ` — after ${results} tool result${results === 1 ? "" : "s"}` : "";
+  if (results > 0) return ` — after ${results} tool result${results === 1 ? "" : "s"}`;
+  if (last.role === "user") return ` — to "${firstLine(last.content, 40)}"`;
+  return "";
 }
 
 // Map coding-agent tools to verbs and group repeats: "read 3 files, ran `npm test`".

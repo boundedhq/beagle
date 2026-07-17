@@ -101,6 +101,22 @@ describe("buildSummary — sent suffix", () => {
     expect(s).toBe("just this");
   });
 
+  test("an anthropic tool-result turn (results ride USER-role messages) is never quoted as the user's ask", () => {
+    // Anthropic's protocol: tool results arrive as {role:"user", content:
+    // [{type:"tool_result",…}]} — the parser stamps kind:"result". The suffix
+    // must say "after N tool results", not caption tool output as human words.
+    const s = buildSummary(
+      req([
+        { role: "user", content: "run the tests" },
+        { role: "assistant", content: "Running." },
+        { role: "user", content: "452 pass, 0 fail", kind: "result" },
+      ]),
+      "All green.",
+    );
+    expect(s).toBe("All green. — after 1 tool result");
+    expect(s).not.toContain('to "452 pass');
+  });
+
   test("a secret in the trailing user message is scrubbed before the suffix truncates", () => {
     const SECRET = "AKIAZQ3DRSTUVWXY2345";
     const s = buildSummary(

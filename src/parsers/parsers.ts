@@ -311,11 +311,24 @@ function toolAction(name: unknown, input: unknown, callId?: unknown, args?: unkn
   return out;
 }
 
-function toMessage(m: Record<string, unknown>): Message {
-  return {
+function toMessage(m: Record<string, unknown>): DisplayMessage {
+  const out: DisplayMessage = {
     role: String(m.role ?? "unknown"),
     content: flattenContent(m.content) ?? "",
   };
+  // Tool RESULTS hide inside role-messages on two formats: openai-chat sends
+  // them as role:"tool" turns, anthropic embeds tool_result blocks in USER
+  // messages. Label them so the sent-suffix never captions tool output as the
+  // human's ask (role/content stay untouched — display label only).
+  if (out.role === "tool") out.kind = "result";
+  else if (
+    out.role === "user" &&
+    Array.isArray(m.content) &&
+    (m.content as Array<Record<string, unknown>>).some((b) => b?.type === "tool_result")
+  ) {
+    out.kind = "result";
+  }
+  return out;
 }
 
 // Responses-API `input` items are not all role-messages: tool calls, tool

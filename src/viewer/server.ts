@@ -269,7 +269,7 @@ export class ViewerServer {
           // NEXT request — surface those leaks so the response section can
           // highlight them (display-only; the event stays on the next call).
           const nextId = store.queryAll<{ id: string }>(
-            `SELECT id FROM exchanges WHERE session_id = ?1
+            `SELECT id FROM exchanges WHERE session_id = ?1 AND source = 'wire'
                AND (ts_request > ?2 OR (ts_request = ?2 AND id > ?3))
              ORDER BY ts_request ASC, id ASC LIMIT 1`,
             [call.sessionId, call.tsRequest, call.id],

@@ -464,6 +464,48 @@ describe("buildSessionTurns — the conversation delta", () => {
     store.close();
   });
 
+  test("leak propagation skips an interposed Mode B row — the WIRE response card gets the highlight (R7)", () => {
+    const SECRET = "AKIAZQ3DRSTUVWXY2345";
+    const store = Store.open(dir);
+    const req1 = { input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "deploy" }] }] };
+    const resp1 = { output: [{ type: "function_call", call_id: "c1", name: "bash", arguments: `{"command":"x ${SECRET}"}` }] };
+    store.insertCall(call({
+      id: ulid(1000), tsRequest: 1000, endpoint: "/v1/responses",
+      requestBody: enc(JSON.stringify(req1)), responseBody: enc(JSON.stringify(resp1)),
+    }));
+    // A tool hook fires between response and next request → an otel row lands
+    // BETWEEN the two wire calls (the "mixed" session shape).
+    store.insertCall(call({
+      id: ulid(1500), tsRequest: 1500, source: "otel", endpoint: "otel:tool_output:bash",
+      requestBody: enc("hook output"), responseBody: null,
+      displayMessages: [{ role: "tool", content: "bash: hook output" }],
+    }));
+    const req2str = JSON.stringify({ input: [
+      ...req1.input,
+      { type: "function_call", call_id: "c1", name: "bash", arguments: `{"command":"x ${SECRET}"}` },
+      { type: "function_call_output", call_id: "c1", output: "ok" },
+    ] });
+    const id3 = ulid(2000);
+    store.insertCall(call({
+      id: id3, tsRequest: 2000, endpoint: "/v1/responses",
+      requestBody: enc(req2str), responseBody: enc(JSON.stringify({ output: [] })),
+    }));
+    const at = req2str.indexOf(SECRET);
+    store.upsertLeakEvent({
+      fingerprint: "fp", sessionId: "sess-1", detector: "aws-access-key-id",
+      secretType: "aws-access-key-id", severity: "high", confidenceTier: "structured",
+      destination: "openai", callId: id3, ts: 2000, spanStart: at, spanEnd: at + SECRET.length,
+    });
+    const turns = buildSessionTurns(store, "sess-1").turns;
+    // wire turn 0 (whose responseCalls card DISPLAYS the secret) gets the
+    // propagated leaks — not the interposed otel row.
+    expect(turns[0]!.source).toBe("wire");
+    expect(turns[0]!.responseLeaks.some((l) => l.value === SECRET)).toBe(true);
+    expect(turns[1]!.source).toBe("otel");
+    expect(turns[1]!.responseLeaks).toEqual([]);
+    store.close();
+  });
+
   test("turn carries the leak values to highlight", () => {
     const store = Store.open(dir);
     const secret = "AKIAZQ3DRSTUVWXY2345";

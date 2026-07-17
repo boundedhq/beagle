@@ -383,8 +383,13 @@ function Sessions({ onOpen, leaksOnly }) {
 // pass through. Already secret-scrubbed at capture, so nothing to sanitize.
 function sessionTitle(raw) {
   // Summaries may carry a "what the agent sent" suffix (— to "…" / — after N
-  // tool results) — feed context, not title material.
-  const t = (raw ?? "").replace(/ — (to ".*"|after \d+ tool results?)$/, "").trim();
+  // tool results) — feed context, not title material. Strip only the LAST
+  // occurrence (the greedy leading group pushes the match rightmost) and keep
+  // the quoted ask bounded/quote-free so a title that legitimately contains
+  // the pattern loses at most the real suffix, never its own text.
+  const t = (raw ?? "")
+    .replace(/^([\s\S]*) — (?:to "[^"]{0,80}"|after \d+ tool results?)$/, "$1")
+    .trim();
   if (t.startsWith("{")) {
     try {
       const o = JSON.parse(t);
@@ -536,10 +541,10 @@ function SessionTranscript({ sessionId, row, onBack, onPurged }) {
                 m=${{ role: "response", content: t.responseText }} />`}
               ${(t.responseCalls ?? []).length > 0 &&
               html`<${ResponseCalls} calls=${t.responseCalls} leaks=${respLeaks(t)} />`}
-              ${i === turns.length - 1 && (t.responseCalls ?? []).length > 0 &&
+              ${i === turns.length - 1 && !view.truncated && (t.responseCalls ?? []).length > 0 &&
               html`<div class="turn-note">results not captured yet (session ended or still running)</div>`}
               ${leakNotVisible(t) &&
-              html`<div class="turn-note warn">secret not visible in the readable cards — open ▸ details → raw</div>`}
+              html`<div class="turn-note warn">a detected secret is not visible in the readable cards — open ▸ details → raw</div>`}
               ${t.messages.length === 0 && !t.responseText && (t.responseCalls ?? []).length === 0 &&
               html`<div class="turn-empty">(no parsed content — open details for raw bytes)</div>`}
             </div>
@@ -570,9 +575,11 @@ function respLeaks(t) {
   return extra.length ? [...t.leaks, ...extra] : t.leaks;
 }
 
-// R7 backstop note: the turn is flagged but none of its renderable text
-// contains a leak value (secret in a header / protocol field / escaped form)
-// — say where to look instead of showing a flag with nothing marked.
+// R7 backstop note: the turn is flagged but SOME detected value appears in
+// none of its renderable text (secret in a header / protocol field / escaped
+// form) — say where to look instead of showing a flag with nothing marked.
+// Per-value, not all-or-nothing: one visible secret must not silence the
+// pointer for a second, invisible one.
 function leakNotVisible(t) {
   if (t.leaks.length === 0) return false;
   const text = [
@@ -580,7 +587,7 @@ function leakNotVisible(t) {
     t.responseText ?? "",
     ...(t.responseCalls ?? []).map((c) => c.args ?? ""),
   ].join("\n");
-  return t.leaks.every((l) => !l.value || !text.includes(l.value));
+  return t.leaks.some((l) => l.value && !text.includes(l.value));
 }
 
 // "3:42 PM" between turns; "Jul 15, 3:42 PM" with the date (first turn / day
@@ -665,10 +672,12 @@ function ToolCard({ role, content, leaks, hasLeak, tool, kind, detail, hint }) {
     : kind === "result"
       ? `${tool ?? "tool"} result`
       : (tool ?? match?.[1] ?? "tool");
-  // Strip the "Name: " prefix only when it IS the label we're showing (legacy
-  // rows, or enriched rows whose convention content repeats the tool name) —
-  // an enriched result's output that merely LOOKS prefixed stays verbatim.
-  const stripPrefix = match && (kind === undefined || match[1] === tool);
+  // Strip the "Name: " prefix only when it IS the label we're showing: legacy
+  // rows (the convention is all they have), or enriched CALL rows whose
+  // convention content repeats the tool name. Enriched RESULTS never strip —
+  // an output that merely LOOKS prefixed ("bash: command not found") is
+  // genuine content and stays verbatim.
+  const stripPrefix = match && (kind === undefined || (kind === "call" && match[1] === tool));
   const payload = stripPrefix ? content.slice(match[0].length) : content;
   const collapsible = !startOpen || hasLeak || content.length > 240;
   const glyph = isRequest ? "⇢" : kind === "result" ? "↳" : "⚙";

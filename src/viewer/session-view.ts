@@ -237,8 +237,16 @@ export function buildSessionTurns(store: Store, sessionId: string, cap = 200): S
   // echoed text) is only ever SCANNED on the next request — so the turn that
   // DISPLAYS that content (its response section) must highlight with the next
   // turn's leak values, or the first render site would show it unmarked.
-  for (let i = 1; i < turns.length; i++) {
-    if (turns[i]!.leaks.length > 0) turns[i - 1]!.responseLeaks = turns[i]!.leaks;
+  // Wire-to-wire, like the resent stamping above: a Mode B row interposed
+  // between two wire calls (tool hooks fire between response and next
+  // request) must not absorb the leaks meant for the wire response card.
+  let prevWireIdx = -1;
+  for (let i = 0; i < turns.length; i++) {
+    if (turns[i]!.source !== "wire") continue;
+    if (turns[i]!.leaks.length > 0 && prevWireIdx >= 0) {
+      turns[prevWireIdx]!.responseLeaks = turns[i]!.leaks;
+    }
+    prevWireIdx = i;
   }
   const utility =
     ids.length > 0 &&

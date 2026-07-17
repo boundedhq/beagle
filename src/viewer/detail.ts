@@ -4,7 +4,7 @@
 // highlight inline (UI fix 2, R7). Reuses the format parsers.
 import type { CallRecord, Store } from "../core/store/store";
 import {
-  detectFormat, extractActions, parseRequest, parseResponse,
+  detectFormat, extractActions, parseRequest, parseResponse, sanitizeTool,
   type DisplayMessage, type ToolAction,
 } from "../parsers/parsers";
 
@@ -133,11 +133,15 @@ export function buildDetail(call: CallRecord, spans: LeakSpan[]): CallDetail {
       parsedResp?.text ?? (call.source === "otel" && responseRaw ? responseRaw : null),
     // Mode B bodies are plain text — extractActions parses nothing there and
     // returns [], so the section simply doesn't render for self-reports.
-    responseCalls: call.responseBody
+    // The tool name becomes a card HEADER label — sanitize at this boundary
+    // (same rule every other header path applies); hostile names render as
+    // the generic "tool", their args still fully visible in the body.
+    responseCalls: (call.responseBody
       ? extractActions(format, call.responseBody)
       : call.sseRaw
         ? extractActions(format, call.sseRaw)
-        : [],
+        : []
+    ).map((a) => ({ ...a, tool: sanitizeTool(a.tool) ?? "tool" })),
     newFrom: null, // filled by the /api/call route (needs the previous call)
     responseLeaks: [], // filled by the route (needs the next call)
     requestRaw,
