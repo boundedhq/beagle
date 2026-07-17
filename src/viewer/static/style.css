@@ -347,12 +347,13 @@ button.linklike:hover { text-decoration: underline; }
 .detail .meta-sub .toks { font-variant-numeric: tabular-nums; }
 .detail .meta .k { color: var(--muted); }
 .detail .meta .warn { color: var(--leak); font-size: 12px; margin-top: 4px; }
-.detail .meta-tech { font-size: 11px; margin-top: 6px; } /* .folded supplies color/cursor/padding */
-.detail .meta-tech-body {
-  color: var(--muted); font-size: 11px; line-height: 1.7;
-  padding: 2px 0 2px 12px; border-left: 1px solid var(--border); margin-top: 2px;
+/* Collapsed history control: reads at content size and sits on the same
+   left rhythm as the message cards it stands in for. */
+.detail .history-fold {
+  font-size: var(--content); margin: 6px 0; padding: 6px 10px;
+  border-left: 2px dashed var(--border);
 }
-.detail .meta-tech-body .k { color: var(--muted); }
+.detail .history-fold:hover { color: var(--accent); border-left-color: var(--accent); }
 .detail .msg { margin: 6px 0; padding: 6px 10px; border-left: 2px solid var(--border); }
 .detail .msg .role { color: var(--accent); font-size: 12px; }
 .detail .msg.assistant .role, .detail .msg.response .role { color: var(--ok); }

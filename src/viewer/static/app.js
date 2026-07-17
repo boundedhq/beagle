@@ -700,7 +700,6 @@ function Detail({ id, onSession }) {
   const [detail, setDetail] = useState(null);
   const [raw, setRaw] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [techOpen, setTechOpen] = useState(false);
   useEffect(() => { api.get(`/api/call/${id}`).then(setDetail); }, [id]);
   if (!detail) return html`<div class="detail">loading…</div>`;
   if (detail.error) return html`<div class="detail">${detail.error}</div>`;
@@ -757,21 +756,13 @@ function Detail({ id, onSession }) {
           ${(detail.tokensIn != null || detail.tokensOut != null) &&
           html`<span aria-hidden="true">·</span>
             <span class="toks" title="input → output tokens">${tok(detail.tokensIn)} → ${tok(detail.tokensOut)} tokens</span>`}
+          <span aria-hidden="true">·</span>
+          <span class="k">call</span> <${CopyChip} value=${detail.id} />
         </div>
         ${detail.captureState !== "ok" &&
         html`<div class="warn">⚠ capture truncated — the stored bytes are incomplete</div>`}
         ${detail.scanState !== "ok" &&
         html`<div class="warn">⚠ scan incomplete — this body was not fully verified, not marked clean</div>`}
-        <div class="folded meta-tech" onClick=${() => setTechOpen(!techOpen)}>
-          ${techOpen ? "▾" : "▸"} technical
-        </div>
-        ${techOpen &&
-        html`<div class="meta-tech-body">
-          <div><span class="k">call</span> <${CopyChip} value=${detail.id} /></div>
-          <div><span class="k">grouping tier</span> ${detail.sessionTier}</div>
-          ${detail.endpoint && html`<div><span class="k">endpoint</span> ${detail.endpoint}</div>`}
-          <div><span class="k">size</span> ${kb(detail.bytesReq)} sent · ${kb(detail.bytesResp)} received</div>
-        </div>`}
       </div>
       ${leaks.length > 0 &&
       html`<div class="leakbar">
@@ -803,12 +794,16 @@ function Detail({ id, onSession }) {
           `
         : html`
             ${system != null &&
-            html`<${Chip} label=${`system · ${system.length} chars`} body=${system} />`}
-            ${older.length > 0 &&
-            html`<div class="folded" onClick=${() => setHistoryOpen(!historyOpen)}>
-              ${historyOpen ? "▾" : "▸"} ${older.length} earlier message${older.length === 1 ? "" : "s"}
-            </div>`}
-            ${historyOpen && older.map((m) => html`<${Msg} m=${m} leaks=${leaks} />`)}
+            html`<${Chip} label=${`system prompt · ${system.length} chars`} body=${system} />`}
+            ${older.length > 0 && older.length <= 3
+              ? older.map((m) => html`<${Msg} m=${m} leaks=${leaks} />`)
+              : html`
+                  ${older.length > 3 &&
+                  html`<div class="folded history-fold" onClick=${() => setHistoryOpen(!historyOpen)}>
+                    ${historyOpen ? "▾ hide" : "▸ show"} the ${older.length} earlier messages
+                  </div>`}
+                  ${historyOpen && older.map((m) => html`<${Msg} m=${m} leaks=${leaks} />`)}
+                `}
             ${newest.map((m) => html`<${Msg} m=${m} leaks=${leaks} />`)}
             ${detail.responseText != null &&
             html`<${Msg} m=${{ role: "response", content: detail.responseText }} leaks=${leaks} />`}
@@ -920,10 +915,6 @@ function groupedBy(tier) {
   }
 }
 
-function kb(n) {
-  if (n == null) return "?";
-  return n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`;
-}
 const tok = (n) => (n == null ? "?" : n.toLocaleString());
 
 // Pretty-print a captured body for the raw view. First try the whole body as
