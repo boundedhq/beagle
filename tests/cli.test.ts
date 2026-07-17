@@ -96,6 +96,7 @@ describe("CLI commands (headless loop, R12)", () => {
     expect(out).toContain("claude-code");         // agent attribution
     expect(out).toContain("user asked to read files"); // the session's title
     expect(out).toContain("beagle ui --session"); // the next step is spelled out
+    expect(out).toContain(`call ${callId}`); // FULL call id — 8-char ULID prefixes collide
   });
 
   test("leaks: unwraps Claude Code's {\"title\":…} opening summary", () => {
@@ -179,9 +180,32 @@ describe("CLI commands (headless loop, R12)", () => {
     expect(full).not.toContain("--full to show"); // system/history no longer collapsed
   });
 
-  test("show: ambiguous or unknown prefix says so plainly", () => {
+  test("show: an unknown id explains deletion/retention, not a bare miss", () => {
     const out = cmdShow(stateDir, "ZZZZZZZZ");
     expect(out.toLowerCase()).toContain("no call");
+    expect(out).toContain("deleted with its session");
+    expect(out).toContain("beagle leaks"); // where the surviving record lives
+  });
+
+  test("show: an ambiguous prefix lists the candidate ids instead of a miss", () => {
+    // Two calls sharing an 8-char prefix — what a same-millisecond ULID burst
+    // produces (and what made `show <id from beagle leaks>` look broken).
+    const store = Store.open(stateDir);
+    for (const id of ["01AMBIGUOUS0000000000000A", "01AMBIGUOUS0000000000000B"]) {
+      store.insertCall({
+        id, sessionId: "sA", runId: "rA", source: "wire", agent: "claude",
+        provider: "anthropic", endpoint: "/v1/messages", tsRequest: Date.now(),
+        scanState: "ok", captureState: "ok", sessionTier: "prefix",
+        requestBody: null, requestHeaders: null, responseBody: null,
+        responseHeaders: null, sseRaw: null, searchText: "",
+      });
+    }
+    store.close();
+    const out = cmdShow(stateDir, "01AMBIGU");
+    expect(out).toContain("2 calls match");
+    expect(out).toContain("01AMBIGUOUS0000000000000A");
+    expect(out).toContain("01AMBIGUOUS0000000000000B");
+    expect(out).toContain("use more of the id");
   });
 
   test("show: traffic-derived text is stripped of terminal escapes", () => {

@@ -289,9 +289,11 @@ export function cmdLeaks(stateDir: string): string {
     lines.push("", `  ${title} — ${agent} · session ${clean(sessionId)}`);
     for (const e of group) {
       const tier = e.confidenceTier === "structured" ? "" : " (possible)";
+      // Full call id: ULIDs minted in the same millisecond share their first
+      // 8 chars, so a short prefix can be ambiguous to `beagle show`.
       lines.push(
         `      ${fmtWhen(e.firstTs)}   ${secretName(clean(e.secretType))}${tier} → ${clean(e.destination)}` +
-          `   ×${e.occurrences}${e.firstCall ? `   call ${e.firstCall.slice(0, 8)}` : ""}`,
+          `   ×${e.occurrences}${e.firstCall ? `   call ${clean(e.firstCall)}` : ""}`,
       );
     }
   }
@@ -333,13 +335,39 @@ function groupedByPhrase(tier: string): string {
 
 export interface ShowOptions { full?: boolean; raw?: boolean }
 
+const likePrefix = (p: string) => p.replace(/[\\%_]/g, (c) => `\\${c}`) + "%";
+
 export function cmdShow(stateDir: string, idPrefix: string, opts: ShowOptions = {}): string {
   const store = openStore(stateDir);
   if (isStoreError(store)) return store.error;
-  const call = store?.getCall(idPrefix) ?? null;
-  if (!store || !call) {
-    store?.close();
-    return `no call matches '${idPrefix}' (prefix may be ambiguous or unknown).`;
+  if (!store) return `no call matches '${clean(idPrefix)}' — nothing captured yet.`;
+  // Resolve the prefix ourselves so each miss gets an honest, specific answer.
+  // ULIDs minted in the same millisecond share their first 8 characters, so a
+  // short prefix (from a burst of calls) can legitimately match several.
+  const matches = store.queryAll<{ id: string }>(
+    `SELECT id FROM exchanges WHERE id LIKE ? ESCAPE '\\' ORDER BY id LIMIT 11`,
+    [likePrefix(idPrefix)],
+  );
+  if (matches.length === 0) {
+    store.close();
+    return (
+      `no call matches '${clean(idPrefix)}' — it may have been deleted with its session,\n` +
+      `or aged out by retention (leak records outlive calls; they stay in \`beagle leaks\`).`
+    );
+  }
+  if (matches.length > 1) {
+    store.close();
+    const shown = matches.slice(0, 10);
+    return [
+      `${matches.length > 10 ? "10+" : matches.length} calls match '${clean(idPrefix)}' — use more of the id:`,
+      ...shown.map((m) => `  ${m.id}`),
+      ...(matches.length > 10 ? ["  …"] : []),
+    ].join("\n");
+  }
+  const call = store.getCall(matches[0]!.id);
+  if (!call) {
+    store.close();
+    return `no call matches '${clean(idPrefix)}'.`;
   }
   const spans = leakSpansFor(store, call.id);
   // Leak EVENTS, not spans: a span-less occurrence (v1-era row) must still
