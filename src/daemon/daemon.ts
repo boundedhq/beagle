@@ -815,7 +815,14 @@ function summarizeActions(actions: ToolAction[]): string {
     const v = verb(a.tool);
     if (v === "ran" && a.detail) parts.push(`ran \`${firstLine(a.detail, 40)}\``);
     else if (v === "read" && a.detail) files.push(a.detail.split("/").pop() ?? a.detail);
-    else if (a.detail) parts.push(`${v} \`${a.detail.split("/").pop() ?? a.detail}\``);
+    else if (a.detail) {
+      // URLs keep their head (host says more than a trailing path segment);
+      // paths keep their tail (the filename).
+      const label = a.detail.includes("://")
+        ? firstLine(a.detail, 40)
+        : (a.detail.split("/").pop() || a.detail);
+      parts.push(`${v} \`${label}\``);
+    }
     else parts.push(v);
   }
   if (files.length === 1) parts.unshift(`read ${files[0]}`);

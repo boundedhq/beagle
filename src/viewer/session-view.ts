@@ -136,6 +136,7 @@ export function buildSessionTurns(store: Store, sessionId: string, cap = 200): S
   const turns: SessionTurn[] = [];
   let system: string | null = null;
   let prevWire: Message[] = [];
+  let prevResponseText: string | null = null;
   for (const { id } of ids.slice(0, cap)) {
     const call = store.getCall(id);
     if (!call) continue;
@@ -159,11 +160,22 @@ export function buildSessionTurns(store: Store, sessionId: string, cap = 200): S
       } else if (messages.length > 0) {
         messages = messages.slice(-1);
       }
+      // Stateless APIs echo the previous RESPONSE back as the next request's
+      // assistant message — new to the wire history, but the reader just read
+      // it one card up. Drop the leading echo (exact match only; anything
+      // reworded stays visible). The raw view keeps every byte.
+      if (
+        messages.length > 0 && prevResponseText !== null &&
+        messages[0]!.role === "assistant" && messages[0]!.content === prevResponseText
+      ) {
+        messages = messages.slice(1);
+      }
       // Only advance the baseline on a turn that actually parsed. A truncated /
       // unparseable wire body yields 0 messages; clobbering prevWire with [] would
       // make the NEXT turn re-show its whole history as new (the repetition this
       // delta exists to kill). Keep the last good history as the diff base.
       if (d.messages.length > 0) prevWire = d.messages;
+      prevResponseText = d.responseText ?? prevResponseText;
     }
     turns.push({
       id: d.id,

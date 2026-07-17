@@ -57,6 +57,42 @@ describe("listSessions", () => {
     store.close();
   });
 
+  test("the response echoed back as the next turn's assistant message is not re-shown", () => {
+    // Stateless APIs resend the previous RESPONSE as the next request's
+    // assistant message. The delta view must not read as a duplicate.
+    const store = Store.open(dir);
+    store.insertCall(call({
+      tsRequest: 1000,
+      requestBody: body([{ role: "user", content: "q1" }]),
+      responseBody: resp("answer one"),
+    }));
+    store.insertCall(call({
+      tsRequest: 2000,
+      requestBody: body([
+        { role: "user", content: "q1" },
+        { role: "assistant", content: "answer one" }, // exact echo of turn 1's response
+        { role: "user", content: "q2" },
+      ]),
+      responseBody: resp("answer two"),
+    }));
+    store.insertCall(call({
+      tsRequest: 3000,
+      requestBody: body([
+        { role: "user", content: "q1" },
+        { role: "assistant", content: "answer one" },
+        { role: "user", content: "q2" },
+        { role: "assistant", content: "answer two REWORDED" }, // NOT an exact echo
+        { role: "user", content: "q3" },
+      ]),
+      responseBody: resp("answer three"),
+    }));
+    const turns = buildSessionTurns(store, "sess-1").turns;
+    expect(turns[1]!.messages.map((m) => m.content)).toEqual(["q2"]); // echo dropped
+    // a reworded assistant message is NOT an echo — it must stay visible
+    expect(turns[2]!.messages.map((m) => m.content)).toEqual(["answer two REWORDED", "q3"]);
+    store.close();
+  });
+
   test("utility: only sessions whose EVERY call is a one-shot get the flag", () => {
     const store = Store.open(dir);
     store.insertCall(call({ sessionId: "title-turn", oneShot: true }));
@@ -162,9 +198,10 @@ describe("buildSessionTurns — the conversation delta", () => {
     expect(v.turns.length).toBe(2);
     expect(v.turns[0]!.messages).toEqual([{ role: "user", content: "first question" }]);
     expect(v.turns[0]!.responseText).toBe("first answer");
-    // the repeated history must NOT replay — only the new tail
+    // the repeated history must NOT replay — only the new tail, and the
+    // assistant echo of turn 1's response (already read one card up) is
+    // deduped too: the turn shows just what the USER added.
     expect(v.turns[1]!.messages).toEqual([
-      { role: "assistant", content: "first answer" },
       { role: "user", content: "second question" },
     ]);
     expect(v.turns[1]!.responseText).toBe("second answer");
