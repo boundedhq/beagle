@@ -360,7 +360,9 @@ export function cmdShow(stateDir: string, idPrefix: string, opts: ShowOptions = 
     const shown = matches.slice(0, 10);
     return [
       `${matches.length > 10 ? "10+" : matches.length} calls match '${clean(idPrefix)}' — use more of the id:`,
-      ...shown.map((m) => `  ${m.id}`),
+      // clean() even these: ids are beagle-minted ULIDs today, but everything
+      // printed from the store goes through the §6.10 boundary, no exceptions.
+      ...shown.map((m) => `  ${clean(m.id)}`),
       ...(matches.length > 10 ? ["  …"] : []),
     ].join("\n");
   }
