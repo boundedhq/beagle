@@ -113,6 +113,20 @@ describe("OpenAI Responses", () => {
     expect(p.oneShot).toBe(false); // it HAS identity — not a stateless one-shot
   });
 
+  test("request: previous_response_id (server-issued) outranks the client cache key", () => {
+    // A chaining client keeps its known-good identity; the client-chosen key
+    // must never shadow it (a per-USER key would merge every conversation).
+    const p = parseRequest("openai-responses", enc(JSON.stringify({
+      model: "gpt-5",
+      previous_response_id: "resp_9",
+      prompt_cache_key: "user_static_key",
+      input: [{ role: "user", content: [{ type: "input_text", text: "next" }] }],
+    })))!;
+    expect(p.convId).toBeUndefined();
+    expect(p.prevResponseId).toBe("resp_9");
+    expect(p.oneShot).toBe(false);
+  });
+
   test("request: store:false with no identity is a stateless one-shot (title-gen)", () => {
     const body = JSON.stringify({
       model: "gpt-5",

@@ -292,10 +292,18 @@ describe("Daemon end-to-end", () => {
   });
 
   test("opencode /responses: prompt_cache_key groups the conversation; title-gen one-shots never cross-link", async () => {
+    // A REAL /responses reply, with a response id: every turn must survive a
+    // full recordResponse cycle (a resp_… id must not clobber the session's
+    // cache-key identity — conv_id is a single column).
+    const ocUpstream = await fakeUpstream(JSON.stringify({
+      id: "resp_upstream_1",
+      output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }));
     await controlRequest(daemon.socketPath, {
       cmd: "register-run",
       args: { id: "run-oc", agent: "opencode", provider: "openai",
-        upstream: `http://127.0.0.1:${upstream.port}`, authLocation: "authorization" },
+        upstream: `http://127.0.0.1:${ocUpstream.port}`, authLocation: "authorization" },
     });
     // opencode's title-generation turn: store:false, no cache key, and the
     // SAME instructions + opening message in every conversation — the shape
@@ -324,6 +332,7 @@ describe("Daemon end-to-end", () => {
     const store = Store.openReadOnly(stateDir);
     const oc = listCalls(store, 20).filter((c) => c.agent === "opencode").reverse(); // oldest first
     store.close();
+    ocUpstream.server.close();
     expect(oc.length).toBe(5);
     const [t1, a1, t2, b1, a2] = oc;
     expect(a2!.sessionId).toBe(a1!.sessionId);     // the cache key groups conversation A…

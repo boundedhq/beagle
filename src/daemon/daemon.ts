@@ -314,7 +314,12 @@ export class Daemon {
       this.resolver.recordResponse({
         sessionId: resolution.sessionId,
         messages: history.length > 0 ? history : undefined,
-        responseId: respParsed.responseId,
+        // A cache-keyed conversation's identity IS the client's key (stored as
+        // the session's conv_id at create). conv_id is a single column, so a
+        // response id must not overwrite it — the next call looks up the KEY,
+        // and a clobbered conv_id would fracture the conversation into one
+        // session per turn. Chained clients (no key) record ids as before.
+        responseId: parsed?.convId ? undefined : respParsed.responseId,
       });
     }
 

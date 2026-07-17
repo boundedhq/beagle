@@ -61,7 +61,11 @@ export function parseRequest(format: Format, bytes: Uint8Array): ParsedRequest |
       // routing works by shared prompt prefix), and clients use it that way —
       // opencode sends "ses_<its session id>" on every conversational call.
       // That is a deterministic session identity, far stronger than history
-      // heuristics.
+      // heuristics. Precedence: a request that chains with previous_response_id
+      // (server-issued ground truth) keeps that as its identity — the CLIENT-
+      // chosen cache key only steps in when there is no chain, so a client
+      // that keyed its cache per-user rather than per-conversation could never
+      // shadow correct chaining and merge its conversations.
       const cacheKey =
         typeof body.prompt_cache_key === "string" && body.prompt_cache_key !== ""
           ? body.prompt_cache_key
@@ -70,7 +74,7 @@ export function parseRequest(format: Format, bytes: Uint8Array): ParsedRequest |
         model: body.model,
         system: flattenContent(body.instructions),
         messages,
-        convId: cacheKey,
+        convId: body.previous_response_id ? undefined : cacheKey,
         prevResponseId: body.previous_response_id,
         // store:false with no conversation identity at all is an explicitly
         // stateless one-shot — opencode's title-generation turn. Its system
