@@ -700,7 +700,6 @@ function Detail({ id, onSession }) {
   const [detail, setDetail] = useState(null);
   const [raw, setRaw] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [techOpen, setTechOpen] = useState(false);
   useEffect(() => { api.get(`/api/call/${id}`).then(setDetail); }, [id]);
   if (!detail) return html`<div class="detail">loading…</div>`;
   if (detail.error) return html`<div class="detail">${detail.error}</div>`;
@@ -720,14 +719,21 @@ function Detail({ id, onSession }) {
   const leaks = detail.leaks ?? [];
   const older = messages.slice(0, -1);
   const newest = messages.slice(-1);
+  // An earlier message that holds a leak must never sit behind the collapsed
+  // fold — R7: detected secrets are ALWAYS visibly highlighted. When one does,
+  // show the whole history inline (correctness beats brevity here).
+  const leakInOlder = older.some((m) => leaks.some((l) => l.value && String(m.content ?? "").includes(l.value)));
+  const showOlderInline = older.length <= 3 || leakInOlder;
   // Nothing structured → raw is the only honest view; don't show an empty
   // timeline with a toggle the user has to discover.
   const hasStructure = messages.length > 0 || system != null;
   const showRaw = raw || !hasStructure;
-  // A leak can live OUTSIDE the readable content (a header, a protocol
-  // field): the readable view then shows no highlight anywhere. Say where it
-  // actually is instead of leaving the user hunting.
-  const readableText = [system ?? "", ...messages.map((m) => m.content), detail.responseText ?? ""].join("\n");
+  // What the readable view actually HIGHLIGHTS inline: the messages (earlier
+  // ones holding a leak are force-shown, above) and the response. NOT the
+  // system prompt — it sits in a collapsed, un-highlighted chip — and NOT
+  // anything only in a header or protocol field. If the secret lives only in
+  // those, the readable view shows no highlight, so point the user at raw.
+  const readableText = [...messages.map((m) => m.content), detail.responseText ?? ""].join("\n");
   const leakHiddenInRaw = leaks.length > 0 && !showRaw && leaks.every((l) => !readableText.includes(l.value));
 
   return html`
@@ -747,6 +753,12 @@ function Detail({ id, onSession }) {
           html`<span class="err">error ${detail.status}</span>`}
         </div>
         <div class="meta-sub">
+          <span class="k">call</span> <${CopyChip} value=${detail.id} />
+          ${(detail.tokensIn != null || detail.tokensOut != null) &&
+          html`<span aria-hidden="true">·</span>
+            <span class="toks" title="input → output tokens">${tok(detail.tokensIn)} → ${tok(detail.tokensOut)} tokens</span>`}
+        </div>
+        <div class="meta-sub">
           <span class="k">session</span> <${CopyChip} value=${detail.sessionId} />
           <span aria-hidden="true">·</span>
           <span class="k">grouped by</span> <span>${groupedBy(detail.sessionTier)}</span>
@@ -754,29 +766,16 @@ function Detail({ id, onSession }) {
           html`<span aria-hidden="true">·</span>
             <button class="linklike"
               onClick=${() => onSession(detail.sessionId)}>view session →</button>`}
-          ${(detail.tokensIn != null || detail.tokensOut != null) &&
-          html`<span aria-hidden="true">·</span>
-            <span class="toks" title="input → output tokens">${tok(detail.tokensIn)} → ${tok(detail.tokensOut)} tokens</span>`}
         </div>
         ${detail.captureState !== "ok" &&
         html`<div class="warn">⚠ capture truncated — the stored bytes are incomplete</div>`}
         ${detail.scanState !== "ok" &&
         html`<div class="warn">⚠ scan incomplete — this body was not fully verified, not marked clean</div>`}
-        <div class="folded meta-tech" onClick=${() => setTechOpen(!techOpen)}>
-          ${techOpen ? "▾" : "▸"} technical
-        </div>
-        ${techOpen &&
-        html`<div class="meta-tech-body">
-          <div><span class="k">call</span> <${CopyChip} value=${detail.id} /></div>
-          <div><span class="k">grouping tier</span> ${detail.sessionTier}</div>
-          ${detail.endpoint && html`<div><span class="k">endpoint</span> ${detail.endpoint}</div>`}
-          <div><span class="k">size</span> ${kb(detail.bytesReq)} sent · ${kb(detail.bytesResp)} received</div>
-        </div>`}
       </div>
       ${leaks.length > 0 &&
       html`<div class="leakbar">
         🔴 ${leaks.length} secret${leaks.length === 1 ? "" : "s"} sent in this call —
-        ${leakHiddenInRaw ? "in the request's protocol fields, not the messages — open raw to see it highlighted:" : "highlighted below:"}
+        ${leakHiddenInRaw ? "not in the readable messages (it's in a header, the system prompt, or a protocol field) — open raw to see it highlighted:" : "highlighted below:"}
         ${leaks.map((l) => html`<span class="chip leak">${secretLabel(l.secretType)}</span>`)}
       </div>`}
       ${hasStructure &&
@@ -803,12 +802,16 @@ function Detail({ id, onSession }) {
           `
         : html`
             ${system != null &&
-            html`<${Chip} label=${`system · ${system.length} chars`} body=${system} />`}
-            ${older.length > 0 &&
-            html`<div class="folded" onClick=${() => setHistoryOpen(!historyOpen)}>
-              ${historyOpen ? "▾" : "▸"} ${older.length} earlier message${older.length === 1 ? "" : "s"}
-            </div>`}
-            ${historyOpen && older.map((m) => html`<${Msg} m=${m} leaks=${leaks} />`)}
+            html`<${Chip} label="system prompt" body=${system} />`}
+            ${older.length > 0 && showOlderInline
+              ? older.map((m) => html`<${Msg} m=${m} leaks=${leaks} />`)
+              : html`
+                  ${older.length > 3 &&
+                  html`<div class="folded history-fold" onClick=${() => setHistoryOpen(!historyOpen)}>
+                    ${historyOpen ? "▾ hide" : "▸ show"} the ${older.length} earlier messages
+                  </div>`}
+                  ${historyOpen && older.map((m) => html`<${Msg} m=${m} leaks=${leaks} />`)}
+                `}
             ${newest.map((m) => html`<${Msg} m=${m} leaks=${leaks} />`)}
             ${detail.responseText != null &&
             html`<${Msg} m=${{ role: "response", content: detail.responseText }} leaks=${leaks} />`}
@@ -920,10 +923,6 @@ function groupedBy(tier) {
   }
 }
 
-function kb(n) {
-  if (n == null) return "?";
-  return n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`;
-}
 const tok = (n) => (n == null ? "?" : n.toLocaleString());
 
 // Pretty-print a captured body for the raw view. First try the whole body as
