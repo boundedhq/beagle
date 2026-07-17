@@ -64,6 +64,41 @@ export function listSessions(store: Store, limit: number): SessionRow[] {
     }));
 }
 
+export interface SessionHeadline { title?: string; agent?: string }
+
+// Title + agent for a SET of sessions in one query — the leaks CLI groups its
+// log by session and needs a headline per group (one query, not N). Same
+// sentinel-skipping title pick as listSessions. Sessions with a leak event but
+// no surviving exchanges (retention aged the calls out, 7d, before the event,
+// 90d) simply don't appear in the map — the caller falls back to a placeholder.
+export function sessionHeadlines(store: Store, sessionIds: string[]): Map<string, SessionHeadline> {
+  const out = new Map<string, SessionHeadline>();
+  if (sessionIds.length === 0) return out;
+  const placeholders = sessionIds.map(() => "?").join(",");
+  const rows = store.queryAll<Record<string, unknown>>(
+    `SELECT e.session_id AS sid,
+       (SELECT t.summary FROM exchanges t
+          WHERE t.session_id = e.session_id
+            AND t.summary IS NOT NULL AND t.summary != ''
+            AND t.summary NOT IN ('(no message content)', 'unparsed call (raw view available)')
+          ORDER BY t.ts_request ASC, t.id ASC LIMIT 1) AS title,
+       (SELECT a.agent FROM exchanges a
+          WHERE a.session_id = e.session_id AND a.agent IS NOT NULL
+          ORDER BY a.ts_request ASC LIMIT 1) AS agent
+     FROM exchanges e
+     WHERE e.session_id IN (${placeholders})
+     GROUP BY e.session_id`,
+    sessionIds,
+  );
+  for (const r of rows) {
+    out.set(r.sid as string, {
+      title: (r.title as string) ?? undefined,
+      agent: (r.agent as string) ?? undefined,
+    });
+  }
+  return out;
+}
+
 export interface SessionTurn {
   id: string; // call id — the transcript links each turn back to its call
   tsRequest: number;

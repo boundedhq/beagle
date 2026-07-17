@@ -13,6 +13,8 @@ import { claudeAuthMode, codexAuthMode, detectAgents, knownExtraLocations, pathD
 import { watchAgent, unwatchAgent, type WatchEnv, type WatchModeRequest } from "../install/watch";
 import { ChangeManifest } from "../install/manifest";
 import { listLeakEvents } from "../viewer/feed-query";
+import { sessionHeadlines } from "../viewer/session-view";
+import { secretName } from "../notifier/alert-copy";
 import { buildCodexOtelArgs, buildCodexOtelEnv, buildHookSettings, buildOtelEnv, mergeHookIntoSettings } from "../parsers/otlp-map";
 import { buildExtensionRedirect, buildRedirectConfig, readFirstConfig, writeRedirectConfig, writeRedirectExtension } from "../install/config-redirect";
 import { AGENTS, buildRunEnv, runBaseUrl } from "./agents";
@@ -224,21 +226,80 @@ export function cmdSearch(stateDir: string, term: string): string {
   return lines.join("\n");
 }
 
+// Local, compact time ("Jul 13, 4:31 PM") — the leak log is read by a human
+// deciding what to do next, not by a log parser; ISO-UTC belongs in exports.
+function fmtWhen(ts: number): string {
+  return new Date(ts).toLocaleString(undefined, {
+    month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+  });
+}
+
+// A session's display title from its opening summary — same unwrap as the
+// dashboard's sessionTitle() in app.js (duplicated: the buildless viewer
+// can't share modules with the CLI). Claude Code's first call is a
+// title-generation turn whose summary is literally {"title":"…"}.
+function unwrapTitle(raw: string | undefined): string {
+  const t = (raw ?? "").trim();
+  if (t.startsWith("{")) {
+    try {
+      const o = JSON.parse(t) as { title?: unknown };
+      if (o && typeof o.title === "string") return o.title.trim();
+    } catch { /* not a JSON title wrapper — use as-is */ }
+  }
+  return t;
+}
+
 export function cmdLeaks(stateDir: string): string {
   const store = openStore(stateDir);
   if (isStoreError(store)) return store.error;
   if (!store) return "no leaks recorded.";
   const events = listLeakEvents(store);
-  store.close();
-  if (events.length === 0) return "no leaks recorded.";
-  const lines = [`${events.length} leak event${events.length === 1 ? "" : "s"}:`];
-  for (const e of events) {
-    const tier = e.confidenceTier === "structured" ? "" : " (possible)";
-    lines.push(
-      `  ${new Date(e.firstTs).toISOString()}  ${clean(e.secretType)}${tier} → ${clean(e.destination)}` +
-        `  ×${e.occurrences}${e.firstCall ? `  first: ${e.firstCall.slice(0, 8)}` : ""}`,
-    );
+  if (events.length === 0) {
+    store.close();
+    return "no leaks recorded.";
   }
+
+  // Group by session: one conversation is one incident to a human, and the
+  // session is the unit the dashboard (and its per-session delete) works in.
+  const bySession = new Map<string, typeof events>();
+  for (const e of events) {
+    const g = bySession.get(e.sessionId) ?? [];
+    g.push(e);
+    bySession.set(e.sessionId, g);
+  }
+  const groups = [...bySession.entries()].sort(
+    (a, b) => Math.max(...b[1].map((e) => e.lastTs)) - Math.max(...a[1].map((e) => e.lastTs)),
+  );
+
+  // One query for every group's headline, not one per session.
+  const headlines = sessionHeadlines(store, groups.map(([sid]) => sid));
+
+  const lines = [
+    `${events.length} leak event${events.length === 1 ? "" : "s"} across ` +
+      `${groups.length} session${groups.length === 1 ? "" : "s"} — newest first:`,
+  ];
+  for (const [sessionId, group] of groups) {
+    const head = headlines.get(sessionId) ?? {};
+    const full = clean(unwrapTitle(head.title));
+    // Cap the headline: stored summaries can run a sentence long, and the
+    // title only needs to identify the conversation.
+    const title = (full.length > 64 ? full.slice(0, 63) + "…" : full) || "(untitled session)";
+    const agent = head.agent ? clean(head.agent) : "unknown agent";
+    lines.push("", `  ${title} — ${agent} · session ${clean(sessionId)}`);
+    for (const e of group) {
+      const tier = e.confidenceTier === "structured" ? "" : " (possible)";
+      lines.push(
+        `      ${fmtWhen(e.firstTs)}   ${secretName(clean(e.secretType))}${tier} → ${clean(e.destination)}` +
+          `   ×${e.occurrences}${e.firstCall ? `   call ${e.firstCall.slice(0, 8)}` : ""}`,
+      );
+    }
+  }
+  store.close();
+  lines.push(
+    "",
+    "open a session in the dashboard: beagle ui --session <id>",
+    "inspect one call here in the terminal: beagle show <call-id>",
+  );
   return lines.join("\n");
 }
 
@@ -673,12 +734,15 @@ export async function cmdConfig(stateDir: string, args: string[]): Promise<strin
   return "config updated.";
 }
 
-export async function cmdUi(stateDir: string): Promise<string> {
+export async function cmdUi(stateDir: string, sessionId?: string): Promise<string> {
   const daemon = await ensureDaemon(stateDir); // R1: the dashboard is always one command away
   if (!daemon) return "could not start the beagle daemon — check `beagle status`.";
   const r = await controlRequest(daemon.socketPath, { cmd: "ui" });
   if (!r.ok) return `could not start the viewer: ${r.error}`;
-  const url = (r.data as { url: string }).url;
+  let url = (r.data as { url: string }).url;
+  // Deep link straight to one session's transcript (`beagle leaks` prints
+  // this). The id rides the #fragment — it never reaches the server or logs.
+  if (sessionId) url += `#s=${encodeURIComponent(sessionId)}`;
   // Best-effort open; the URL is printed either way.
   try {
     Bun.spawn([process.platform === "darwin" ? "open" : "xdg-open", url], {

@@ -31,7 +31,7 @@ usage:
   beagle search [string]         was this ever sent? definitive answer
                                  (no argument: reads the term from stdin, so
                                  secrets stay out of your shell history)
-  beagle leaks                   the leak log
+  beagle leaks                   the leak log, grouped by session
   beagle show <id-prefix>        one call, summarized
   beagle purge [all|panic]       erase captured data
   beagle uninstall [--yes]       remove everything Beagle installed (unwatch
@@ -39,7 +39,8 @@ usage:
                                  state dir) — the binary you remove yourself
   beagle config [...]            view/set redact-on-capture, exclusions,
                                  run-mode <agent> <wire|telemetry|auto>
-  beagle ui                      open the dashboard (fresh one-time link)
+  beagle ui [--session <id>]     open the dashboard (fresh one-time link);
+                                 --session lands on that session's transcript
   beagle daemon                  run the daemon in the foreground
   beagle help                    this text
 `;
@@ -138,7 +139,12 @@ export async function run(argv: string[]): Promise<number> {
       return 0;
     case "ui": {
       const { cmdUi } = await import("./commands");
-      console.log(await cmdUi(stateDir));
+      const si = rest.indexOf("--session");
+      if (si !== -1 && !rest[si + 1]) {
+        console.error("usage: beagle ui [--session <id>]");
+        return 2;
+      }
+      console.log(await cmdUi(stateDir, si !== -1 ? rest[si + 1] : undefined));
       return 0;
     }
     case "config":

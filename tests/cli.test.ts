@@ -86,10 +86,38 @@ describe("CLI commands (headless loop, R12)", () => {
     expect(run.exitCode).toBe(0);
   });
 
-  test("leaks: lists events with type/destination/occurrences", () => {
+  test("leaks: groups by session with a headline and plain-English names", () => {
     const out = cmdLeaks(stateDir);
-    expect(out).toContain("generic-api-key");
+    expect(out).toContain("API key");             // plain name for humans…
+    expect(out).not.toContain("generic-api-key"); // …not the detector tag
+    expect(out).toContain("(possible)");          // confidence tier survives
     expect(out).toContain("anthropic");
+    expect(out).toContain("session s1");          // grouped by session, full id
+    expect(out).toContain("claude-code");         // agent attribution
+    expect(out).toContain("user asked to read files"); // the session's title
+    expect(out).toContain("beagle ui --session"); // the next step is spelled out
+  });
+
+  test("leaks: unwraps Claude Code's {\"title\":…} opening summary", () => {
+    const store = Store.open(stateDir);
+    const id = ulid();
+    store.insertCall({
+      id, sessionId: "s2", runId: "r2", source: "wire", agent: "claude",
+      provider: "anthropic", endpoint: "/v1/messages", tsRequest: Date.now(),
+      summary: '{"title": "Fix login bug"}', scanState: "ok", captureState: "ok",
+      sessionTier: "prefix", requestBody: null, requestHeaders: null,
+      responseBody: null, responseHeaders: null, sseRaw: null, searchText: "",
+    });
+    store.upsertLeakEvent({
+      fingerprint: "fp2", sessionId: "s2", detector: "aws-access-key-id",
+      secretType: "aws-access-key-id", severity: "high", confidenceTier: "structured",
+      destination: "anthropic", callId: id, ts: Date.now(),
+    });
+    store.close();
+    const out = cmdLeaks(stateDir);
+    expect(out).toContain("Fix login bug — claude · session s2");
+    expect(out).not.toContain('{"title"');
+    expect(out).toContain("AWS access key"); // structured tier: no "(possible)" marker
   });
 
   test("show: accepts id prefix, prints summary and metadata", () => {
