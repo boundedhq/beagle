@@ -72,10 +72,10 @@ function slowUpstream(): Promise<{
   );
 }
 
-function sendThroughProxy(port: number, runId: string, body: string): Promise<string> {
+function sendThroughProxy(port: number, runId: string, body: string, path = "/v1/messages"): Promise<string> {
   return new Promise((resolve, reject) => {
     const raw =
-      `POST /run/${runId}/v1/messages HTTP/1.1\r\nHost: x\r\n` +
+      `POST /run/${runId}${path} HTTP/1.1\r\nHost: x\r\n` +
       `x-api-key: sk-ant-realkey000000000000000000\r\ncontent-type: application/json\r\n` +
       `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
     const sock = connect(port, "127.0.0.1", () => sock.write(raw));
@@ -289,6 +289,48 @@ describe("Daemon end-to-end", () => {
     expect(events.length).toBe(1);
     expect(events[0]!.destination).toBe("anthropic");
     store.close();
+  });
+
+  test("opencode /responses: prompt_cache_key groups the conversation; title-gen one-shots never cross-link", async () => {
+    await controlRequest(daemon.socketPath, {
+      cmd: "register-run",
+      args: { id: "run-oc", agent: "opencode", provider: "openai",
+        upstream: `http://127.0.0.1:${upstream.port}`, authLocation: "authorization" },
+    });
+    // opencode's title-generation turn: store:false, no cache key, and the
+    // SAME instructions + opening message in every conversation — the shape
+    // that used to fuzzy-link into the oldest look-alike session.
+    const titleGen = (firstPrompt: string) => JSON.stringify({
+      model: "gpt-5", store: false, instructions: "You are a title generator. Output only a title.",
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "Generate a title for this conversation:\n" }] },
+        { role: "user", content: [{ type: "input_text", text: firstPrompt }] },
+      ],
+    });
+    // A conversational call: opencode pins its own session id as the cache key.
+    const convo = (key: string, text: string) => JSON.stringify({
+      model: "gpt-5", prompt_cache_key: key, instructions: "You are opencode.",
+      input: [{ role: "user", content: [{ type: "input_text", text }] }],
+    });
+    await sendThroughProxy(daemon.proxyPort, "run-oc", titleGen("first convo opening"), "/v1/responses");
+    await sendThroughProxy(daemon.proxyPort, "run-oc", convo("ses_A", "first convo opening"), "/v1/responses");
+    await sendThroughProxy(daemon.proxyPort, "run-oc", titleGen("second convo opening"), "/v1/responses");
+    await sendThroughProxy(daemon.proxyPort, "run-oc", convo("ses_B", "second convo opening"), "/v1/responses");
+    // Disjoint follow-up — no shared history prefix at all; the cache key
+    // alone must pin it to conversation A.
+    await sendThroughProxy(daemon.proxyPort, "run-oc", convo("ses_A", "totally different follow-up"), "/v1/responses");
+    await Bun.sleep(150);
+
+    const store = Store.openReadOnly(stateDir);
+    const oc = listCalls(store, 20).filter((c) => c.agent === "opencode").reverse(); // oldest first
+    store.close();
+    expect(oc.length).toBe(5);
+    const [t1, a1, t2, b1, a2] = oc;
+    expect(a2!.sessionId).toBe(a1!.sessionId);     // the cache key groups conversation A…
+    expect(a2!.sessionTier).toBe("conv-id");       // …deterministically, not by heuristic
+    expect(b1!.sessionId).not.toBe(a1!.sessionId); // B is its own conversation
+    expect(t2!.sessionId).not.toBe(t1!.sessionId); // identical title-gens never merge…
+    expect(t2!.sessionId).not.toBe(b1!.sessionId); // …and don't glue onto a conversation
   });
 
   test("multi-turn conversation stays one session; re-sent secret alerts once", async () => {

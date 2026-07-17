@@ -242,7 +242,11 @@ export class Daemon {
       convId: parsed?.convId,
       prevResponseId: parsed?.prevResponseId,
       messages: parsed?.messages,
-      systemPrompt: parsed?.system,
+      // The resolver uses systemPrompt only for the fuzzy compaction-link.
+      // A stateless one-shot (title-gen: identical system + opening message in
+      // EVERY conversation) must not fuzzy-link, or each one glues itself onto
+      // the oldest look-alike session — withhold the fuzzy signal.
+      systemPrompt: parsed?.oneShot ? undefined : parsed?.system,
     });
     let resolveScan!: () => void;
     const scanDone = new Promise<void>((r) => (resolveScan = r));
@@ -298,7 +302,9 @@ export class Daemon {
       stash?.resolution ??
       this.resolver.resolve({
         agent: call.agent, provider: call.provider, runId: call.runId,
-        ts: call.meta.tsRequest, messages: parsed?.messages, systemPrompt: parsed?.system,
+        ts: call.meta.tsRequest, messages: parsed?.messages,
+        // Same one-shot fuzzy suppression as the primary resolve site above.
+        systemPrompt: parsed?.oneShot ? undefined : parsed?.system,
       });
     if (respParsed?.text || respParsed?.responseId) {
       const history: Message[] = [
