@@ -262,6 +262,7 @@ function toolAction(name: unknown, input: unknown): ToolAction {
     (typeof inp.pattern === "string" && inp.pattern) ||
     (typeof inp.url === "string" && inp.url) ||
     (typeof inp.query === "string" && inp.query) ||
+    (typeof inp.name === "string" && inp.name) || // e.g. skill {"name":"…"}
     undefined;
   return detail ? { tool, detail: String(detail) } : { tool };
 }
