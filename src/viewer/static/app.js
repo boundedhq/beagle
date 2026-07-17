@@ -593,7 +593,7 @@ function TMsg({ m, leaks }) {
     <div class=${hasLeak ? "mcard has-leak" : "mcard"}>
       <div class="mc-head"><span class=${`mc-name ${m.role}`}>${m.role}</span></div>
       <div class="mc-body">
-        <${ClampedText} content=${prettyContent(content, leaks)} leaks=${leaks}
+        <${JsonBody} content=${content} leaks=${leaks}
           threshold=${m.role === "user" ? 1500 : 2500} hasLeak=${hasLeak} />
       </div>
     </div>
@@ -634,6 +634,88 @@ function prettyContent(text, leaks) {
   // result now contains a value iff `text` did.
   for (const v of values) if (text.includes(v) && !out.includes(v)) return text;
   return out;
+}
+
+// ---- foldable JSON tree ----------------------------------------------------
+// Readable bodies that ARE one JSON document render as a devtools-style tree:
+// objects/arrays fold, primitives read cleanly. §6.8 holds — every key and
+// value is interpolated as a text node, never markup. R7 holds twice over:
+// a subtree holding a detected secret starts expanded, and if any secret
+// would not survive structural splitting (it must sit whole inside one string
+// leaf to be highlightable), the ENTIRE body falls back to flat highlighted
+// text. Mixed prose+JSON and non-JSON content use the flat path unchanged.
+
+// Parse a body for tree display: a whole-content JSON doc, optionally behind
+// the "Name: {…}" convention the mappers write. Returns null → use flat path.
+function parseForTree(content, leaks) {
+  if (content.length > 50_000) return null; // don't build 10k DOM nodes
+  const m = content.match(/^([A-Za-z_][\w.-]{0,40}):\s*([\s\S]*)$/);
+  const raw = (m ? m[2] : content).trim();
+  if (!raw.startsWith("{") && !raw.startsWith("[")) return null;
+  let value;
+  try { value = JSON.parse(raw); } catch { return null; }
+  if (value === null || typeof value !== "object") return null;
+  // R7 backstop: every detected value present in the body must be wholly
+  // visible inside a single string leaf, or the tree cannot highlight it.
+  const strings = [];
+  (function walk(v) {
+    if (typeof v === "string") strings.push(v);
+    else if (Array.isArray(v)) v.forEach(walk);
+    else if (v && typeof v === "object") {
+      for (const [k, x] of Object.entries(v)) { strings.push(k); walk(x); }
+    }
+  })(value);
+  for (const l of leaks ?? []) {
+    if (l.value && content.includes(l.value) && !strings.some((s) => s.includes(l.value))) {
+      return null;
+    }
+  }
+  return { head: m ? m[1] : null, value };
+}
+
+function JsonNode({ k, v, leaks, depth }) {
+  const isObj = v !== null && typeof v === "object";
+  const key = k !== undefined && html`<span class="jt-k">${String(k)}</span><span class="jt-p">: </span>`;
+  if (!isObj) {
+    return html`<div class="jt-row">
+      ${key}${typeof v === "string"
+        ? html`<span class="jt-p">"</span><span class="jt-s"><${Highlighted} text=${v} leaks=${leaks} /></span><span class="jt-p">"</span>`
+        : html`<span class="jt-v">${JSON.stringify(v)}</span>`}
+    </div>`;
+  }
+  const entries = Array.isArray(v) ? v.map((x, i) => [i, x]) : Object.entries(v);
+  const json = JSON.stringify(v);
+  // A subtree carrying a secret must not start folded (R7).
+  const holdsLeak = (leaks ?? []).some((l) => l.value && json.includes(l.value));
+  const [open, setOpen] = useState(holdsLeak || depth === 0 || json.length <= 160);
+  const [o, c] = Array.isArray(v) ? ["[", "]"] : ["{", "}"];
+  if (entries.length === 0) return html`<div class="jt-row">${key}<span class="jt-p">${o}${c}</span></div>`;
+  return html`<div>
+    <div class="jt-row jt-toggle" onClick=${() => setOpen(!open)}>
+      <span class="jt-chev" aria-hidden="true">${open ? "▾" : "▸"}</span>
+      ${key}<span class="jt-p">${o}</span>
+      ${!open && html`<span class="jt-preview"> ${entries.length} ${Array.isArray(v) ? "items" : "keys"} </span><span class="jt-p">${c}</span>`}
+    </div>
+    ${open && html`
+      <div class="jt-kids">
+        ${entries.map(([ck, cv]) => html`<${JsonNode} key=${String(ck)} k=${ck} v=${cv} leaks=${leaks} depth=${depth + 1} />`)}
+      </div>
+      <div class="jt-row"><span class="jt-p">${c}</span></div>`}
+  </div>`;
+}
+
+// The one entry point every readable body goes through: tree when the content
+// is a single JSON document, today's flat highlighted text otherwise.
+function JsonBody({ content, leaks, threshold, hasLeak }) {
+  const tree = parseForTree(content, leaks);
+  if (!tree) {
+    return html`<${ClampedText} content=${prettyContent(content, leaks)} leaks=${leaks}
+      threshold=${threshold ?? 2500} hasLeak=${hasLeak} />`;
+  }
+  return html`<div class="jt">
+    ${tree.head != null && html`<div class="jt-head">${tree.head}</div>`}
+    <${JsonNode} v=${tree.value} leaks=${leaks} depth=${0} />
+  </div>`;
 }
 
 // Long-content guard: a CSS max-height clamp with a fade + expander. The text
@@ -682,7 +764,7 @@ function ToolCard({ role, content, leaks, hasLeak }) {
       </div>
       ${open &&
       html`<div class="mc-body scroll">
-        <${Highlighted} text=${prettyContent(payload, leaks)} leaks=${leaks} />
+        <${JsonBody} content=${payload} leaks=${leaks} threshold=${1e9} hasLeak=${hasLeak} />
       </div>`}
     </div>
   `;
@@ -878,7 +960,7 @@ function Msg({ m, leaks }) {
   return html`
     <div class=${"msg " + m.role}>
       <div class="role">${m.role}</div>
-      <div><${Highlighted} text=${prettyContent(content, leaks)} leaks=${leaks} /></div>
+      <div><${JsonBody} content=${content} leaks=${leaks} threshold=${1e9} /></div>
     </div>
   `;
 }
