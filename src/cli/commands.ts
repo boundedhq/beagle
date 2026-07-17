@@ -318,6 +318,19 @@ function clip(s: string, max = 4000): string {
   return s.length <= max ? s : `${s.slice(0, max)} …(+${s.length - max} more chars)`;
 }
 
+// How this call was grouped into its session, in plain words — mirrors
+// groupedBy() in the dashboard (app.js) so both surfaces say the same thing.
+function groupedByPhrase(tier: string): string {
+  switch (tier) {
+    case "conv-id": return "the provider's conversation id";
+    case "prefix": return "matching message history";
+    case "compaction-link": return "history matched across a compaction (medium confidence)";
+    case "run": return "the same run, no history match (lower confidence)";
+    case "time-gap": return "recent activity — a best guess (low confidence)";
+    default: return tier;
+  }
+}
+
 export interface ShowOptions { full?: boolean; raw?: boolean }
 
 export function cmdShow(stateDir: string, idPrefix: string, opts: ShowOptions = {}): string {
@@ -332,16 +345,28 @@ export function cmdShow(stateDir: string, idPrefix: string, opts: ShowOptions = 
   store.close();
   const d = buildDetail(call, spans);
 
-  const prov = call.source === "wire"
-    ? "✓ observed on the wire"
-    : "self-reported (the agent's own report, not wire-verified)";
+  // Same words as the dashboard's detail view: "✓ observed" / "self-reported"
+  // provenance, errors only when they are errors, "grouped by" in plain
+  // English. Endpoint/size/tier live behind --full, like the ▸ technical fold;
+  // the run id is shown nowhere (nothing a user can do takes one).
+  const prov = call.source === "wire" ? "✓ observed" : "self-reported";
+  const err = call.status != null && call.status >= 400 ? ` · error ${call.status}` : "";
+  const toks = call.tokensIn != null || call.tokensOut != null
+    ? ` · ${call.tokensIn ?? "?"} → ${call.tokensOut ?? "?"} tokens`
+    : "";
   const lines = [
-    `call ${call.id}   ${prov}`,
-    `  ${clean(call.agent ?? "?")} → ${clean(call.provider ?? "?")}${call.model ? `/${clean(call.model)}` : ""}  ${clean(call.endpoint ?? "")}`,
-    `  ${fmtWhen(call.tsRequest)} · status ${call.status ?? "?"} · ${call.tokensIn ?? "?"}→${call.tokensOut ?? "?"} tokens · ${fmtBytes(call.bytesReq)}→${fmtBytes(call.bytesResp)}`,
-    `  session ${call.sessionId.slice(0, 8)}… · run ${clean(call.runId).slice(0, 8)} · keyed by ${clean(call.sessionTier)}`,
+    `call ${call.id}   ${prov}${err}`,
+    `  ${clean(call.agent ?? "?")} → ${clean(call.provider ?? "?")}${call.model ? ` · ${clean(call.model)}` : ""}`,
+    `  ${fmtWhen(call.tsRequest)}${toks}`,
+    `  session ${clean(call.sessionId)} · grouped by ${groupedByPhrase(clean(call.sessionTier))}`,
   ];
   if (call.redacted) lines.push("  secrets masked in storage (redact-on-capture)");
+  if (opts.full) {
+    lines.push(
+      `  technical: ${clean(call.endpoint ?? "?")} · ${fmtBytes(call.bytesReq)} sent · ` +
+        `${fmtBytes(call.bytesResp)} received · grouping tier ${clean(call.sessionTier)}`,
+    );
+  }
 
   // The headline for a security tool: did this call leak, and what.
   if (d.leaks.length > 0) {
@@ -384,11 +409,12 @@ export function cmdShow(stateDir: string, idPrefix: string, opts: ShowOptions = 
       : "    (no readable response captured — --raw for the exact bytes)");
   }
 
+  // Same wording as the dashboard's warnings.
   if (call.scanState !== "ok") {
-    lines.push("", "  ⚠ scan timed out — treated as unverified, not clean");
+    lines.push("", "  ⚠ scan incomplete — this body was not fully verified, not marked clean");
   }
   if (call.captureState !== "ok") {
-    lines.push("  ⚠ capture truncated — the stream to the agent was complete; the stored copy is not");
+    lines.push("  ⚠ capture truncated — the stored bytes are incomplete");
   }
   if (!opts.raw && !opts.full) {
     // Full session id here — the dashboard deep link matches it exactly.

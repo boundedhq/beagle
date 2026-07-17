@@ -120,13 +120,18 @@ describe("CLI commands (headless loop, R12)", () => {
     expect(out).toContain("AWS access key"); // structured tier: no "(possible)" marker
   });
 
-  test("show: prints provenance, metadata, and the readable exchange", () => {
+  test("show: speaks the dashboard's language and drops internals", () => {
     const out = cmdShow(stateDir, callId.slice(0, 8));
     expect(out).toContain("claude-sonnet-5");           // model
     expect(out).toContain("user asked to read files");  // summary
-    expect(out).toContain("observed on the wire");      // provenance (seed is wire)
+    expect(out).toContain("✓ observed");                // provenance, dashboard wording
+    expect(out).toContain("grouped by matching message history"); // tier in plain words
+    expect(out).toContain("session s1");                // full session id (deep-linkable)
     expect(out).toContain("my password is hunter2");    // the actual message sent
     expect(out).toContain("--raw for exact bytes");     // escape-hatch footer
+    expect(out).not.toContain("run r1");                // internals the user can't use…
+    expect(out).not.toContain("keyed by");              // …and jargon are gone
+    expect(out).not.toContain("status 200");            // errors only when errors
   });
 
   test("show: flags the leak with a plain-English name and destination", () => {
