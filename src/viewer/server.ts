@@ -12,6 +12,7 @@ import { buildSessionTurns, listSessions } from "./session-view";
 // binary has no filesystem view of the repo).
 import indexHtmlRaw from "./static/index.html" with { type: "text" };
 import appJs from "./static/app.js" with { type: "text" };
+import renderJsonJs from "./static/render-json.module.js" with { type: "text" };
 // bun-types types *.html imports as HTMLBundle; with { type: "text" } the
 // runtime value is a plain string.
 const indexHtml = indexHtmlRaw as unknown as string;
@@ -42,6 +43,7 @@ export interface ViewerOptions {
 const STATIC_FILES: Record<string, { body: string; type: string }> = {
   "/": { body: indexHtml, type: "text/html; charset=utf-8" },
   "/app.js": { body: appJs, type: "text/javascript; charset=utf-8" },
+  "/render-json.module.js": { body: renderJsonJs, type: "text/javascript; charset=utf-8" },
   "/style.css": { body: styleCss, type: "text/css; charset=utf-8" },
   "/vendor/preact.module.js": { body: preactJs, type: "text/javascript" },
   "/vendor/preact-hooks.module.js": { body: preactHooksJs, type: "text/javascript" },
