@@ -11,10 +11,18 @@ export interface Db {
 }
 
 export function openDb(path: string, opts: { readonly?: boolean } = {}): Db {
+  // "Read-only" is enforced with PRAGMA query_only, not the OS-level readonly
+  // flag: a WAL database whose -shm/-wal sidecars are gone (the daemon's clean
+  // exit removes them) cannot start a read transaction on a readonly handle —
+  // SQLite needs to recreate the sidecars, and bun:sqlite surfaces that as
+  // SQLITE_CANTOPEN. That broke every daemon-down CLI read (R12 promises
+  // reads work daemon-down). A read-write handle with query_only=ON can
+  // recreate the sidecars but rejects every write at the SQL layer.
   const db = new Database(path, {
-    readonly: opts.readonly ?? false,
-    create: !opts.readonly,
+    readwrite: true,
+    create: !opts.readonly, // readers must never create a missing store
   });
+  if (opts.readonly) db.exec("PRAGMA query_only=ON");
   return {
     exec: (sql) => db.exec(sql),
     run: (sql, params = []) => {
