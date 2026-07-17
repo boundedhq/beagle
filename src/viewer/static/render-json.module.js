@@ -5,7 +5,7 @@
 // or clamp ever hides one. Everything that shows a stored body goes through
 // JsonBody (readable) or RawBody (raw); those are the only exports.
 import { h } from "preact";
-import { useState } from "preact/hooks";
+import { useMemo, useState } from "preact/hooks";
 import htm from "htm";
 
 const html = htm.bind(h);
@@ -97,7 +97,14 @@ function prettyContent(text, leaks) {
 // Parse a body for tree display: a whole-content JSON doc, optionally behind
 // the "Name: {…}" convention the mappers write. Returns null → use flat path.
 function parseForTree(content, leaks) {
-  if (content.length > 50_000) return null; // don't build 10k DOM nodes
+  // Cap tree-building at 1MB, not lower: real agent requests routinely run
+  // 100KB+ (the whole conversation rides every turn), and those are exactly
+  // the bodies that need folding most. Big trees are safe because JsonNode
+  // builds children only while OPEN — a collapsed subtree is zero DOM — so
+  // the initial render is just the expanded spine; the linear costs here
+  // (JSON.parse + the R7 string walk) are trivial at this scale. Only a
+  // pathological multi-MB body falls back to flat text.
+  if (content.length > 1_000_000) return null;
   const m = content.match(/^([A-Za-z_][\w.-]{0,40}):\s*([\s\S]*)$/);
   const raw = (m ? m[2] : content).trim();
   if (!raw.startsWith("{") && !raw.startsWith("[")) return null;
@@ -177,7 +184,11 @@ function ClampedText({ content, leaks, threshold, hasLeak }) {
 // The one entry point every readable body goes through: tree when the content
 // is a single JSON document, today's flat highlighted text otherwise.
 export function JsonBody({ content, leaks, threshold, hasLeak }) {
-  const tree = parseForTree(content, leaks);
+  // Memoized: with the 1MB cap a parse is no longer trivially cheap, and every
+  // SSE-driven refresh re-renders the whole transcript (and every JsonBody in
+  // it). content/leaks come from stable fetched view state, so this only
+  // recomputes when the body actually changes.
+  const tree = useMemo(() => parseForTree(content, leaks), [content, leaks]);
   if (!tree) {
     return html`<${ClampedText} content=${prettyContent(content, leaks)} leaks=${leaks}
       threshold=${threshold ?? 2500} hasLeak=${hasLeak} />`;
