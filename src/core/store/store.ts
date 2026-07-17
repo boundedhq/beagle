@@ -38,6 +38,7 @@ export interface CallRecord {
   captureState: "ok" | "truncated";
   sessionTier: string;
   redacted?: boolean; // true when redact-on-capture rewrote the stored body
+  oneShot?: boolean; // stateless utility turn (e.g. title-gen) — no conversation identity
   requestBody: Uint8Array | null;
   requestHeaders: Array<[string, string]> | null;
   responseBody: Uint8Array | null;
@@ -110,7 +111,11 @@ export class Store {
       // Cheap integrity probe: a corrupt header/page fails here, not mid-write.
       store.db.get("SELECT count(*) AS n FROM sqlite_master");
       return store;
-    } catch {
+    } catch (e) {
+      // A version mismatch is NOT corruption: quarantining here would silently
+      // shelve the entire capture history whenever an older binary opens a
+      // newer store (e.g. a rollback after a schema bump). Surface it instead.
+      if (e instanceof StoreVersionError) throw e;
       quarantineCorruptDb(stateDir);
       return Store.open(stateDir);
     }
@@ -158,13 +163,13 @@ export class Store {
       this.db.run(
         `INSERT INTO exchanges (id, session_id, run_id, source, agent, provider, model,
            endpoint, ts_request, ts_response, status, tokens_in, tokens_out,
-           bytes_req, bytes_resp, summary, scan_state, capture_state, session_tier, redacted)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           bytes_req, bytes_resp, summary, scan_state, capture_state, session_tier, redacted, one_shot)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [call.id, call.sessionId, call.runId, call.source, call.agent ?? null, call.provider ?? null,
          call.model ?? null, call.endpoint ?? null, call.tsRequest, call.tsResponse ?? null,
          call.status ?? null, call.tokensIn ?? null, call.tokensOut ?? null, call.bytesReq ?? null,
          call.bytesResp ?? null, call.summary ?? null, call.scanState, call.captureState, call.sessionTier,
-         call.redacted ? 1 : null],
+         call.redacted ? 1 : null, call.oneShot ? 1 : null],
       );
       this.db.run(
         `INSERT INTO payloads (exchange_id, request_body, request_headers,
@@ -438,6 +443,7 @@ function migrate(db: Db, from: number): void {
     add("exchanges", "redacted INTEGER");
   }
   if (from < 3) add("payloads", "display_messages TEXT");
+  if (from < 4) add("exchanges", "one_shot INTEGER");
 }
 
 function escapeLike(s: string): string {
@@ -466,6 +472,7 @@ function rowToCall(r: Record<string, unknown>): CallRecord {
     captureState: r.capture_state as "ok" | "truncated",
     sessionTier: r.session_tier as string,
     redacted: Boolean(r.redacted),
+    oneShot: Boolean(r.one_shot),
     requestBody: (r.request_body as Uint8Array) ?? null,
     requestHeaders: r.request_headers ? JSON.parse(r.request_headers as string) : null,
     responseBody: (r.response_body as Uint8Array) ?? null,

@@ -287,6 +287,11 @@ export class ViewerServer {
     try {
       return Store.openReadOnly(this.opts.stateDir);
     } catch {
+      // Known blind spot, accepted: a StoreVersionError here renders as an
+      // empty store (200 []), not the clean version message the CLI gives.
+      // Unreachable in the shipped topology — the viewer only runs inside the
+      // daemon, which migrates the store before the viewer exists — so the
+      // null keeps transient open races from 500ing a live dashboard.
       return null;
     }
   }

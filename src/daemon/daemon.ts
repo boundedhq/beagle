@@ -410,6 +410,9 @@ export class Daemon {
       captureState: call.meta.captureState,
       sessionTier: resolution.tier,
       redacted: redaction?.redacted ?? false,
+      // Persist the parser's one-shot verdict: the sessions list badges a
+      // session as a utility turn from DATA, never by sniffing content later.
+      oneShot: parsed?.oneShot ?? false,
       requestBody,
       requestHeaders: call.request.headers ?? null,
       responseBody,

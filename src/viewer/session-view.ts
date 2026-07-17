@@ -22,6 +22,7 @@ export interface SessionRow {
   leaks: number; // leak events pinned to this session
   source: string; // 'wire' | 'otel' | 'mixed'
   title?: string; // earliest meaningful call summary — reads like a conversation title
+  utility: boolean; // every call is a stateless one-shot (e.g. a title-generation turn)
 }
 
 // The browse tab: one row per session, newest activity first. Display query,
@@ -35,6 +36,9 @@ export function listSessions(store: Store, limit: number): SessionRow[] {
                  AND m.model IS NOT NULL ORDER BY m.ts_request DESC LIMIT 1) AS model,
               MIN(e.ts_request) AS first_ts, MAX(e.ts_request) AS last_ts,
               COUNT(*) AS calls,
+              -- Every call a stateless one-shot → the session is a utility
+              -- turn (e.g. opencode's title generation), badged in the list.
+              MIN(COALESCE(e.one_shot, 0)) AS utility,
               COUNT(DISTINCT e.source) AS n_sources, MAX(e.source) AS one_source,
               (SELECT COUNT(*) FROM leak_events le WHERE le.session_id = e.session_id) AS leaks,
               -- The session's opening summary as a title. Skip buildSummary's
@@ -61,6 +65,7 @@ export function listSessions(store: Store, limit: number): SessionRow[] {
       leaks: (r.leaks as number) ?? 0,
       source: (r.n_sources as number) > 1 ? "mixed" : ((r.one_source as string) ?? "wire"),
       title: (r.title as string) ?? undefined,
+      utility: Boolean(r.utility),
     }));
 }
 
@@ -115,6 +120,9 @@ export interface SessionView {
   system: string | null; // shown once, from the first call that carries one
   turns: SessionTurn[];
   truncated: boolean; // true when the session has more calls than the cap
+  // Served with the transcript so the badge doesn't depend on HOW the user
+  // navigated here (sessions tab, feed row, call detail, deep link).
+  utility: boolean; // every call is a stateless one-shot
 }
 
 // One session as a conversation. Reuses buildDetail per call so the transcript
@@ -168,7 +176,15 @@ export function buildSessionTurns(store: Store, sessionId: string, cap = 200): S
       leaks: d.leaks,
     });
   }
-  return { sessionId, system, turns, truncated };
+  const utility =
+    ids.length > 0 &&
+    Boolean(
+      store.queryAll<{ u: number }>(
+        `SELECT MIN(COALESCE(one_shot, 0)) AS u FROM exchanges WHERE session_id = ?`,
+        [sessionId],
+      )[0]?.u,
+    );
+  return { sessionId, system, turns, truncated, utility };
 }
 
 // Cheap prefix check: same roles + same content lengths. Full string compares

@@ -7,6 +7,7 @@ import { Daemon, type EmittedAlert } from "../src/daemon/daemon";
 import { controlRequest } from "../src/daemon/control";
 import { Store } from "../src/core/store/store";
 import { listCalls, listLeakEvents } from "../src/viewer/feed-query";
+import { listSessions } from "../src/viewer/session-view";
 import { createServer, type Server } from "node:net";
 
 // fake upstream that replies with a fixed Anthropic-ish JSON body
@@ -350,6 +351,7 @@ describe("Daemon end-to-end", () => {
 
     const store = Store.openReadOnly(stateDir);
     const oc = listCalls(store, 20).filter((c) => c.agent === "opencode").reverse(); // oldest first
+    const utilityById = new Map(listSessions(store, 50).map((s) => [s.sessionId, s.utility]));
     store.close();
     ocUpstream.server.close();
     expect(oc.length).toBe(5);
@@ -359,6 +361,12 @@ describe("Daemon end-to-end", () => {
     expect(b1!.sessionId).not.toBe(a1!.sessionId); // B is its own conversation
     expect(t2!.sessionId).not.toBe(t1!.sessionId); // identical title-gens never merge…
     expect(t2!.sessionId).not.toBe(b1!.sessionId); // …and don't glue onto a conversation
+    // …and the sessions list knows which is which: title turns badge as
+    // utility sessions, real conversations never do.
+    expect(utilityById.get(t1!.sessionId)).toBe(true);
+    expect(utilityById.get(t2!.sessionId)).toBe(true);
+    expect(utilityById.get(a1!.sessionId)).toBe(false);
+    expect(utilityById.get(b1!.sessionId)).toBe(false);
   });
 
   test("multi-turn conversation stays one session; re-sent secret alerts once", async () => {

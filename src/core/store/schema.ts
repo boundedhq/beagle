@@ -1,6 +1,6 @@
 // Schema from design §4. Version stamped in PRAGMA user_version; every
 // reader checks it before querying (two binaries share this file).
-export const SCHEMA_VERSION = 3; // v3: payloads.display_messages (Mode B structure)
+export const SCHEMA_VERSION = 4; // v4: exchanges.one_shot (stateless utility turns)
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS exchanges (
@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS exchanges (
   scan_state    TEXT NOT NULL DEFAULT 'ok',
   capture_state TEXT NOT NULL DEFAULT 'ok',
   session_tier  TEXT NOT NULL,
-  redacted      INTEGER -- 1 when redact-on-capture rewrote the body (viewer highlight)
+  redacted      INTEGER, -- 1 when redact-on-capture rewrote the body (viewer highlight)
+  one_shot      INTEGER -- 1: stateless utility turn (e.g. title-gen), no conversation identity
 );
 CREATE INDEX IF NOT EXISTS ix_exch_session ON exchanges(session_id);
 CREATE INDEX IF NOT EXISTS ix_exch_ts ON exchanges(ts_request);
