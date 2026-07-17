@@ -241,8 +241,8 @@ describe("extractActions (tool-aware summaries, UI fix 3)", () => {
     });
     const actions = extractActions("anthropic-messages", enc(body));
     expect(actions).toEqual([
-      { tool: "Read", detail: "src/server.ts" },
-      { tool: "Bash", detail: "npm test" },
+      { tool: "Read", detail: "src/server.ts", args: '{"file_path":"src/server.ts"}' },
+      { tool: "Bash", detail: "npm test", args: '{"command":"npm test"}' },
     ]);
   });
 
@@ -258,7 +258,7 @@ describe("extractActions (tool-aware summaries, UI fix 3)", () => {
       choices: [{ message: { tool_calls: [{ function: { name: "run_shell", arguments: '{"command":"ls -la"}' } }] } }],
     });
     const actions = extractActions("openai-chat", enc(body));
-    expect(actions[0]).toEqual({ tool: "run_shell", detail: "ls -la" });
+    expect(actions[0]).toEqual({ tool: "run_shell", detail: "ls -la", args: '{"command":"ls -la"}' });
   });
 
   test("plain text response has no actions", () => {

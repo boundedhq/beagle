@@ -7,7 +7,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { Store } from "../core/store/store";
 import { feedStats, listCalls, listLeakEvents } from "./feed-query";
 import { buildDetail, leakSpansFor } from "./detail";
-import { buildSessionTurns, listSessions } from "./session-view";
+import { buildSessionTurns, listSessions, wireDeltaIndex } from "./session-view";
 // Statics embedded at build time (ships-what's-in-repo, and the compiled
 // binary has no filesystem view of the repo).
 import indexHtmlRaw from "./static/index.html" with { type: "text" };
@@ -244,7 +244,42 @@ export class ViewerServer {
         if (!call) return this.json(res, 404, { error: "no such call" });
         // Reassemble the response, structure the request, and recover the
         // secret strings to highlight (detail.ts, UI fixes 1 + 2).
-        this.json(res, 200, buildDetail(call, leakSpansFor(store, call.id)));
+        const detail = buildDetail(call, leakSpansFor(store, call.id));
+        if (call.source === "wire") {
+          // Where does NEW content start? Diff against the nearest previous
+          // wire call that parses (≤5 back — beyond that, no truthful claim,
+          // newFrom stays null and the view makes no context/new split).
+          // Same ordering as buildSessionTurns so both surfaces agree.
+          const prevIds = store.queryAll<{ id: string }>(
+            `SELECT id FROM exchanges WHERE session_id = ?1 AND source = 'wire'
+               AND (ts_request < ?2 OR (ts_request = ?2 AND id < ?3))
+             ORDER BY ts_request DESC, id DESC LIMIT 5`,
+            [call.sessionId, call.tsRequest, call.id],
+          );
+          for (const { id } of prevIds) {
+            const prev = store.getCall(id);
+            if (!prev) continue;
+            const prevMessages = buildDetail(prev, []).messages;
+            if (prevMessages.length > 0) {
+              detail.newFrom = wireDeltaIndex(detail.messages, prevMessages);
+              break;
+            }
+          }
+          // The response's content (tool args, echoed text) is scanned on the
+          // NEXT request — surface those leaks so the response section can
+          // highlight them (display-only; the event stays on the next call).
+          const nextId = store.queryAll<{ id: string }>(
+            `SELECT id FROM exchanges WHERE session_id = ?1
+               AND (ts_request > ?2 OR (ts_request = ?2 AND id > ?3))
+             ORDER BY ts_request ASC, id ASC LIMIT 1`,
+            [call.sessionId, call.tsRequest, call.id],
+          )[0];
+          if (nextId) {
+            const next = store.getCall(nextId.id);
+            if (next) detail.responseLeaks = buildDetail(next, leakSpansFor(store, next.id)).leaks;
+          }
+        }
+        this.json(res, 200, detail);
       } else if (path === "/api/search" && req.method === "POST") {
         deferredClose = true;
         void this.readJson(req).then((body) => {

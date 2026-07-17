@@ -3,8 +3,10 @@
 // (UI fix 1), structured request messages, and the exact secret strings to
 // highlight inline (UI fix 2, R7). Reuses the format parsers.
 import type { CallRecord, Store } from "../core/store/store";
-import { detectFormat, parseRequest, parseResponse } from "../parsers/parsers";
-import type { Message } from "../core/call";
+import {
+  detectFormat, extractActions, parseRequest, parseResponse,
+  type DisplayMessage, type ToolAction,
+} from "../parsers/parsers";
 
 export interface LeakSpan {
   start: number;
@@ -69,8 +71,18 @@ export interface CallDetail {
   captureState: string;
   source: string;
   system: string | null;
-  messages: Message[];
+  messages: DisplayMessage[];
   responseText: string | null; // reassembled (SSE or JSON), null if unparseable
+  /** Tool calls the model made in THIS response — "what was sent back" beyond
+   *  text. Display-only: response bytes are not request-scanned (R7 note). */
+  responseCalls: ToolAction[];
+  /** Index into messages where this request's NEW content starts (server-side
+   *  diff vs the previous wire call), or null when no truthful claim exists
+   *  (first call, purged/unparseable predecessors, rewritten history, Mode B). */
+  newFrom: number | null;
+  /** Leaks detected on the NEXT request — where a secret inside this
+   *  response's tool calls actually gets scanned. Display highlighting only. */
+  responseLeaks: DetailLeak[];
   requestRaw: string;
   responseRaw: string;
   sseRaw: string | null;
@@ -119,6 +131,15 @@ export function buildDetail(call: CallRecord, spans: LeakSpan[]): CallDetail {
     messages: parsedReq?.messages ?? call.displayMessages ?? [],
     responseText:
       parsedResp?.text ?? (call.source === "otel" && responseRaw ? responseRaw : null),
+    // Mode B bodies are plain text — extractActions parses nothing there and
+    // returns [], so the section simply doesn't render for self-reports.
+    responseCalls: call.responseBody
+      ? extractActions(format, call.responseBody)
+      : call.sseRaw
+        ? extractActions(format, call.sseRaw)
+        : [],
+    newFrom: null, // filled by the /api/call route (needs the previous call)
+    responseLeaks: [], // filled by the route (needs the next call)
     requestRaw,
     responseRaw,
     sseRaw,

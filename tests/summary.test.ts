@@ -49,3 +49,67 @@ describe("buildSummary", () => {
     expect(buildSummary(req([{ role: "tool", content: "x" }]), "the model's answer")).toBe("the model's answer");
   });
 });
+
+// The two-sided line (turn-clarity): lead = what came back (unchanged rules),
+// suffix = what the agent sent, judged from the request's TRAILING messages
+// only — the daemon has no previous-call diff to lean on.
+describe("buildSummary — sent suffix", () => {
+  test("actions lead + trailing user message → — to \"…\"", () => {
+    const s = buildSummary(
+      req([
+        { role: "assistant", content: "old answer" },
+        { role: "user", content: "now run the tests" },
+      ]),
+      undefined,
+      [{ tool: "bash", detail: "bun test" }],
+    );
+    expect(s).toBe('ran `bun test` — to "now run the tests"');
+  });
+
+  test("actions lead + trailing tool results → — after N tool results", () => {
+    const s = buildSummary(
+      req([
+        { role: "user", content: "q" },
+        { role: "tool", content: "bash: {}", kind: "call" },
+        { role: "tool", content: "out1", kind: "result" },
+        { role: "tool", content: "out2", kind: "result" },
+      ]),
+      undefined,
+      [{ tool: "webfetch", detail: "https://x.test/readme" }],
+    );
+    expect(s).toBe("fetched `https://x.test/readme` — after 2 tool results");
+  });
+
+  test("response-text lead gets the suffix too", () => {
+    const s = buildSummary(
+      req([{ role: "user", content: "what's 2+2?" }]),
+      "4.",
+    );
+    expect(s).toBe('4. — to "what\'s 2+2?"');
+  });
+
+  test("a one-shot keeps its bare summary — sessionTitle's JSON unwrap depends on it", () => {
+    const s = buildSummary(
+      { messages: [{ role: "user", content: "name this chat" }], oneShot: true },
+      '{"title":"Calendar access"}',
+    );
+    expect(s).toBe('{"title":"Calendar access"}');
+  });
+
+  test("the user-message fallback lead never doubles itself with a suffix", () => {
+    const s = buildSummary(req([{ role: "user", content: "just this" }]));
+    expect(s).toBe("just this");
+  });
+
+  test("a secret in the trailing user message is scrubbed before the suffix truncates", () => {
+    const SECRET = "AKIAZQ3DRSTUVWXY2345";
+    const s = buildSummary(
+      req([{ role: "user", content: `use key ${SECRET} for deploy` }]),
+      "Deploying.",
+      undefined,
+      [{ value: SECRET, type: "aws-access-key-id" }],
+    );
+    expect(s).not.toContain(SECRET);
+    expect(s).toContain("[REDACTED:aws-access-key-id:");
+  });
+});
