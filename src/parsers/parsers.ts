@@ -271,15 +271,24 @@ function toMessage(m: Record<string, unknown>): Message {
 // they are, in the "Name: payload" convention the viewer's tool cards parse.
 function responsesItem(item: Record<string, unknown>): Message | null {
   if (item.type === "function_call") {
-    return { role: "tool", content: `${String(item.name ?? "tool")}: ${String(item.arguments ?? "")}` };
+    return { role: "tool", content: `${String(item.name ?? "tool")}: ${asText(item.arguments)}` };
   }
   if (item.type === "function_call_output") {
-    return { role: "tool", content: flattenContent(item.output) ?? String(item.output ?? "") };
+    return { role: "tool", content: flattenContent(item.output) ?? asText(item.output) };
   }
   // Encrypted model-internal state — unreadable by design. The raw view
   // carries the exact bytes; the readable projection skips the ciphertext.
   if (item.type === "reasoning") return null;
   return toMessage(item);
+}
+
+// Tool arguments/output are strings in the API, but Beagle observes untrusted
+// third-party clients — a non-string must serialize to real text, never
+// "[object Object]", or a secret inside it drops out of `beagle search`
+// (the "was this ever sent?" answer must stay definitive). Leak DETECTION is
+// unaffected either way — the scanner reads the raw bytes.
+function asText(v: unknown): string {
+  return typeof v === "string" ? v : v == null ? "" : JSON.stringify(v);
 }
 
 function flattenContent(content: unknown): string | undefined {

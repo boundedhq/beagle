@@ -119,6 +119,23 @@ describe("OpenAI Responses", () => {
     expect(p.messages.some((m) => m.role === "unknown")).toBe(false);
   });
 
+  test("request: a non-string tool argument/output serializes to searchable text, not [object Object]", () => {
+    // A non-conformant client sends arguments/output as objects. searchText is
+    // built from parsed message content, so a secret inside must survive as
+    // real text — else `beagle search` would falsely answer "never sent".
+    const body = JSON.stringify({
+      model: "gpt-5",
+      input: [
+        { type: "function_call", name: "deploy", arguments: { token: "sk-secret-XYZ" } },
+        { type: "function_call_output", output: { result: "used sk-secret-XYZ" } },
+      ],
+    });
+    const p = parseRequest("openai-responses", enc(body))!;
+    expect(p.messages[0]!.content).toContain("sk-secret-XYZ");
+    expect(p.messages[1]!.content).toContain("sk-secret-XYZ");
+    expect(p.messages.some((m) => m.content.includes("[object Object]"))).toBe(false);
+  });
+
   test("request: prompt_cache_key is the conversation identity", () => {
     // opencode sends its own session id as prompt_cache_key on every
     // conversational call — a deterministic session signal.
