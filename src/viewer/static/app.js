@@ -675,7 +675,11 @@ function parseForTree(content, leaks) {
 
 function JsonNode({ k, v, leaks, depth }) {
   const isObj = v !== null && typeof v === "object";
-  const key = k !== undefined && html`<span class="jt-k">${String(k)}</span><span class="jt-p">: </span>`;
+  // Highlight the KEY too, not just values: a structured detector can match a
+  // secret sitting in a key position (e.g. {"AKIA…": …}), and parseForTree
+  // counts keys as highlightable — so they must actually carry the mark (R7).
+  const key = k !== undefined &&
+    html`<span class="jt-k"><${Highlighted} text=${String(k)} leaks=${leaks} /></span><span class="jt-p">: </span>`;
   if (!isObj) {
     return html`<div class="jt-row">
       ${key}${typeof v === "string"
