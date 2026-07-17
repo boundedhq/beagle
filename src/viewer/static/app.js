@@ -719,14 +719,21 @@ function Detail({ id, onSession }) {
   const leaks = detail.leaks ?? [];
   const older = messages.slice(0, -1);
   const newest = messages.slice(-1);
+  // An earlier message that holds a leak must never sit behind the collapsed
+  // fold — R7: detected secrets are ALWAYS visibly highlighted. When one does,
+  // show the whole history inline (correctness beats brevity here).
+  const leakInOlder = older.some((m) => leaks.some((l) => l.value && String(m.content ?? "").includes(l.value)));
+  const showOlderInline = older.length <= 3 || leakInOlder;
   // Nothing structured → raw is the only honest view; don't show an empty
   // timeline with a toggle the user has to discover.
   const hasStructure = messages.length > 0 || system != null;
   const showRaw = raw || !hasStructure;
-  // A leak can live OUTSIDE the readable content (a header, a protocol
-  // field): the readable view then shows no highlight anywhere. Say where it
-  // actually is instead of leaving the user hunting.
-  const readableText = [system ?? "", ...messages.map((m) => m.content), detail.responseText ?? ""].join("\n");
+  // What the readable view actually HIGHLIGHTS inline: the messages (earlier
+  // ones holding a leak are force-shown, above) and the response. NOT the
+  // system prompt — it sits in a collapsed, un-highlighted chip — and NOT
+  // anything only in a header or protocol field. If the secret lives only in
+  // those, the readable view shows no highlight, so point the user at raw.
+  const readableText = [...messages.map((m) => m.content), detail.responseText ?? ""].join("\n");
   const leakHiddenInRaw = leaks.length > 0 && !showRaw && leaks.every((l) => !readableText.includes(l.value));
 
   return html`
@@ -768,7 +775,7 @@ function Detail({ id, onSession }) {
       ${leaks.length > 0 &&
       html`<div class="leakbar">
         🔴 ${leaks.length} secret${leaks.length === 1 ? "" : "s"} sent in this call —
-        ${leakHiddenInRaw ? "in the request's protocol fields, not the messages — open raw to see it highlighted:" : "highlighted below:"}
+        ${leakHiddenInRaw ? "not in the readable messages (it's in a header, the system prompt, or a protocol field) — open raw to see it highlighted:" : "highlighted below:"}
         ${leaks.map((l) => html`<span class="chip leak">${secretLabel(l.secretType)}</span>`)}
       </div>`}
       ${hasStructure &&
@@ -796,7 +803,7 @@ function Detail({ id, onSession }) {
         : html`
             ${system != null &&
             html`<${Chip} label="system prompt" body=${system} />`}
-            ${older.length > 0 && older.length <= 3
+            ${older.length > 0 && showOlderInline
               ? older.map((m) => html`<${Msg} m=${m} leaks=${leaks} />`)
               : html`
                   ${older.length > 3 &&
