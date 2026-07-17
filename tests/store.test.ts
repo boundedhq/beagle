@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store, SCHEMA_VERSION, StoreVersionError } from "../src/core/store/store";
@@ -80,6 +80,22 @@ describe("Store lifecycle", () => {
     store.close();
     expect(() => Store.openReadOnly(dir)).toThrow(StoreVersionError);
     expect(() => Store.openReadOnly(dir)).toThrow(/restart the daemon/i);
+  });
+
+  test("read-only open works after the WAL sidecars are gone (daemon-down reads, R12)", () => {
+    // A cleanly-exited daemon checkpoints and removes -wal/-shm. The CLI's
+    // read commands must still open the store — and still reject writes.
+    const store = Store.open(dir);
+    store.insertCall(fakeCall());
+    store.close();
+    rmSync(join(dir, "beagle.db-wal"), { force: true });
+    rmSync(join(dir, "beagle.db-shm"), { force: true });
+    const ro = Store.openReadOnly(dir);
+    expect(ro.queryAll<{ c: number }>("SELECT COUNT(*) AS c FROM exchanges")[0]?.c).toBe(1);
+    expect(() => ro.purge({ kind: "all" })).toThrow(/readonly|read-only/i);
+    ro.close();
+    // and a reader must never create a missing store
+    expect(() => Store.openReadOnly(join(dir, "nope"))).toThrow();
   });
 
   test("migrates an older store forward in place, preserving captured data", () => {
