@@ -163,6 +163,14 @@ describe("CLI commands (headless loop, R12)", () => {
     expect(out).not.toContain("aws-access-key-id"); // …not the detector tag
   });
 
+  test("show: a span-less leak event (v1-era row) still flags the call", () => {
+    // The seed's leak event carries no highlight spans — the 🔴 line is driven
+    // by leak EVENTS, so a call that leaked must never read as clean.
+    const out = cmdShow(stateDir, callId.slice(0, 8));
+    expect(out).toContain("🔴 1 secret sent to anthropic");
+    expect(out).toContain("API key (possible)");
+  });
+
   test("show: --raw dumps exact bytes; --full leaves nothing collapsed", () => {
     const raw = cmdShow(stateDir, callId.slice(0, 8), { raw: true });
     expect(raw).toContain("request (raw)");

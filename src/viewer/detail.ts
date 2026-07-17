@@ -30,6 +30,20 @@ export function leakSpansFor(store: Store, callId: string): LeakSpan[] {
     }));
 }
 
+// Whether/what this call leaked, from the leak EVENTS — the authoritative
+// answer, independent of highlight spans (a v1-era occurrence has NULL spans;
+// its call still leaked and must never read as clean). Non-core display query.
+export function leakTypesFor(store: Store, callId: string): Array<{ secretType: string; tier: string }> {
+  return store
+    .queryAll<Record<string, unknown>>(
+      `SELECT DISTINCT le.secret_type AS t, le.confidence_tier AS tier
+       FROM leak_occurrences lo JOIN leak_events le ON le.id = lo.event_id
+       WHERE lo.exchange_id = ?`,
+      [callId],
+    )
+    .map((r) => ({ secretType: r.t as string, tier: r.tier as string }));
+}
+
 export interface DetailLeak {
   value: string; // the exact string to highlight wherever it appears
   secretType: string;

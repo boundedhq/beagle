@@ -14,7 +14,7 @@ import { watchAgent, unwatchAgent, type WatchEnv, type WatchModeRequest } from "
 import { ChangeManifest } from "../install/manifest";
 import { listLeakEvents } from "../viewer/feed-query";
 import { sessionHeadlines } from "../viewer/session-view";
-import { buildDetail, leakSpansFor } from "../viewer/detail";
+import { buildDetail, leakSpansFor, leakTypesFor } from "../viewer/detail";
 import { secretName } from "../notifier/alert-copy";
 import { buildCodexOtelArgs, buildCodexOtelEnv, buildHookSettings, buildOtelEnv, mergeHookIntoSettings } from "../parsers/otlp-map";
 import { buildExtensionRedirect, buildRedirectConfig, readFirstConfig, writeRedirectConfig, writeRedirectExtension } from "../install/config-redirect";
@@ -342,6 +342,9 @@ export function cmdShow(stateDir: string, idPrefix: string, opts: ShowOptions = 
     return `no call matches '${idPrefix}' (prefix may be ambiguous or unknown).`;
   }
   const spans = leakSpansFor(store, call.id);
+  // Leak EVENTS, not spans: a span-less occurrence (v1-era row) must still
+  // flag — this line must never read "clean" for a call that leaked.
+  const leakTypes = leakTypesFor(store, call.id);
   store.close();
   const d = buildDetail(call, spans);
 
@@ -369,15 +372,18 @@ export function cmdShow(stateDir: string, idPrefix: string, opts: ShowOptions = 
   }
 
   // The headline for a security tool: did this call leak, and what.
-  if (d.leaks.length > 0) {
+  if (leakTypes.length > 0) {
     const tiers = new Map<string, string>();
-    for (const l of d.leaks) {
+    for (const l of leakTypes) {
       if (!tiers.has(l.secretType) || l.tier === "structured") tiers.set(l.secretType, l.tier);
     }
-    const names = [...tiers].map(([t, tier]) => secretName(t) + (tier === "structured" ? "" : " (possible)"));
+    // clean() the rendered names too — §6.10 applies to every printed string.
+    const names = [...tiers].map(
+      ([t, tier]) => clean(secretName(t)) + (tier === "structured" ? "" : " (possible)"),
+    );
     lines.push(
       "",
-      `  🔴 ${d.leaks.length} secret${d.leaks.length === 1 ? "" : "s"} sent to ${clean(call.provider ?? "?")}: ${names.join(", ")}`,
+      `  🔴 ${names.length} secret${names.length === 1 ? "" : "s"} sent to ${clean(call.provider ?? "?")}: ${names.join(", ")}`,
     );
   }
   lines.push("", `  summary: ${clean(call.summary ?? "—")}`);
