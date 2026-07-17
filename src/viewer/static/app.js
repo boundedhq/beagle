@@ -782,6 +782,20 @@ function spanLabel(first, last) {
   return `${(s / 3600).toFixed(1)} h`;
 }
 
+// The raw view's request/response body: the exact captured bytes, folded as a
+// JSON tree when the body is one document (the common case — a wire request or
+// response IS one), flat verbatim text otherwise. The same JsonBody every
+// readable body uses ("all JSON folds"), but with clamping off (threshold 1e9)
+// so the raw view never tucks anything behind a "show all". R7 rides along:
+// JsonBody starts every leak-bearing subtree expanded, and if a secret can't
+// survive the structural split it falls back to flat highlighted text.
+function RawBody({ body, leaks }) {
+  if (!body) return html`<pre>(empty)</pre>`;
+  return html`<div class="rawblock">
+    <${JsonBody} content=${body} leaks=${leaks} threshold=${1e9} />
+  </div>`;
+}
+
 function Detail({ id, onSession }) {
   const [detail, setDetail] = useState(null);
   const [raw, setRaw] = useState(false);
@@ -880,9 +894,9 @@ function Detail({ id, onSession }) {
       ${showRaw
         ? html`
             <h4 class="req">request</h4>
-            <pre><${Highlighted} text=${pretty(detail.requestRaw, leaks)} leaks=${leaks} /></pre>
+            <${RawBody} body=${detail.requestRaw} leaks=${leaks} />
             <h4 class="resp">response</h4>
-            <pre>${pretty(detail.responseRaw)}</pre>
+            <${RawBody} body=${detail.responseRaw} leaks=${leaks} />
             ${detail.sseRaw &&
             html`<h4>raw stream (as received)</h4><pre>${detail.sseRaw}</pre>`}
           `
@@ -1012,23 +1026,6 @@ function groupedBy(tier) {
 }
 
 const tok = (n) => (n == null ? "?" : n.toLocaleString());
-
-// Pretty-print a captured body for the raw view. First try the whole body as
-// one JSON document (a wire request/response is one). If that fails, fall back
-// to line-by-line — Mode B bodies are `Tool\n{input}\n{output}`, several JSON
-// docs on their own lines, not one. Leak-guarded: a reformat that would drop
-// an inline secret highlight is rejected in favor of the raw text (string
-// values are atomic across a JSON round-trip, so this practically never trips,
-// but never gamble a highlight on cosmetics).
-function pretty(s, leaks) {
-  if (!s) return "(empty)";
-  const vals = (leaks ?? []).map((l) => l.value).filter(Boolean);
-  try {
-    const whole = JSON.stringify(JSON.parse(s), null, 2);
-    if (vals.every((v) => !s.includes(v) || whole.includes(v))) return whole;
-  } catch { /* not a single JSON document — try line by line */ }
-  return prettyContent(s, leaks);
-}
 
 // ---- mount ----
 bootstrap().then((ok) => {
