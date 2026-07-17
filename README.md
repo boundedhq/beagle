@@ -207,6 +207,46 @@ bun install && bun run build     # → dist/beagle
 (A Homebrew formula lives in `packaging/beagle.rb` for a future tap; npm already
 covers macOS and Linux, so the tap isn't wired into releases yet.)
 
+## Update
+
+Beagle never checks for updates on its own — the only outbound traffic on
+your machine is your agents' own calls, and an update check would break that
+promise. Updating is the same channel you installed with:
+
+```sh
+# npm
+npm install -g @boundedhq/beagle@latest
+
+# install script — re-run it; it fetches the latest release and verifies the checksum
+curl -fsSL https://raw.githubusercontent.com/boundedhq/beagle/main/packaging/install.sh | sh
+
+# from source
+git pull && bun run build        # → dist/beagle (a symlink to it picks this up)
+```
+
+**Then restart the daemon** — the new binary on disk doesn't change the
+daemon already running from the old one. Beagle won't restart it behind your
+back (it may be mid-capture for another agent), but every command tells you
+when it's stale:
+
+```
+beagle ▲ the running daemon is v0.1.0 but this beagle is v0.2.0 — it won't
+have this version's fixes until restarted.
+  Restart it: kill <pid> && beagle status
+```
+
+- **Plain use:** `kill <pid>` (from the warning, or `beagle status`) — the
+  next `beagle run` / `beagle ui` starts a fresh daemon on the new binary.
+- **Service-installed** (graduated `watch`): `kill <pid>` is enough by
+  itself — launchd/systemd respawns the daemon immediately from the updated
+  binary path.
+
+If the update changed the store schema, the new daemon migrates it in place
+on startup (additive, data-preserving). Read commands against a
+not-yet-migrated store refuse in plain language and say which side to
+restart — never a stack trace. `beagle --version` prints the binary on disk;
+`beagle status` shows whether a daemon is running and its pid.
+
 ## Uninstall
 
 Beagle must leave no trace — that's part of the trust contract. One command
