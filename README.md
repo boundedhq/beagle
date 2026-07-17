@@ -226,13 +226,12 @@ git pull && bun run build        # → dist/beagle (a symlink to it picks this u
 
 **Then restart the daemon** — the new binary on disk doesn't change the
 daemon already running from the old one. Beagle won't restart it behind your
-back (it may be mid-capture for another agent), but every command tells you
-when it's stale:
+back (it may be mid-capture for another agent), but `beagle run` and
+`beagle ui` tell you when it's stale:
 
 ```
-beagle ▲ the running daemon is v0.1.0 but this beagle is v0.2.0 — it won't
-have this version's fixes until restarted.
-  Restart it: kill <pid> && beagle status
+beagle ▲ the running daemon is v0.1.0 but this beagle is v0.2.0 — it won't have this version's fixes until restarted.
+  Restart it: kill <pid> && beagle status   (a plain 'beagle run' will start a fresh one)
 ```
 
 - **Plain use:** `kill <pid>` (from the warning, or `beagle status`) — the
