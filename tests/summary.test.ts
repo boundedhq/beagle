@@ -53,8 +53,8 @@ describe("buildSummary", () => {
 // The two-sided line (turn-clarity): lead = what came back (unchanged rules),
 // suffix = what the agent sent, judged from the request's TRAILING messages
 // only — the daemon has no previous-call diff to lean on.
-describe("buildSummary — sent suffix", () => {
-  test("actions lead + trailing user message → — to \"…\"", () => {
+describe("buildSummary — wire-order sent half", () => {
+  test("trailing user message leads: \"ask\" → actions", () => {
     const s = buildSummary(
       req([
         { role: "assistant", content: "old answer" },
@@ -63,10 +63,10 @@ describe("buildSummary — sent suffix", () => {
       undefined,
       [{ tool: "bash", detail: "bun test" }],
     );
-    expect(s).toBe('ran `bun test` — to "now run the tests"');
+    expect(s).toBe('"now run the tests" → ran `bun test`');
   });
 
-  test("actions lead + trailing tool results → — after N tool results", () => {
+  test("trailing tool results lead: N results → actions", () => {
     const s = buildSummary(
       req([
         { role: "user", content: "q" },
@@ -77,15 +77,15 @@ describe("buildSummary — sent suffix", () => {
       undefined,
       [{ tool: "webfetch", detail: "https://x.test/readme" }],
     );
-    expect(s).toBe("fetched `https://x.test/readme` — after 2 tool results");
+    expect(s).toBe("2 tool results → fetched `https://x.test/readme`");
   });
 
-  test("response-text lead gets the suffix too", () => {
+  test("response-text turns read ask → reply", () => {
     const s = buildSummary(
       req([{ role: "user", content: "what's 2+2?" }]),
       "4.",
     );
-    expect(s).toBe('4. — to "what\'s 2+2?"');
+    expect(s).toBe('"what\'s 2+2?" → 4.');
   });
 
   test("a one-shot keeps its bare summary — sessionTitle's JSON unwrap depends on it", () => {
@@ -113,8 +113,57 @@ describe("buildSummary — sent suffix", () => {
       ]),
       "All green.",
     );
-    expect(s).toBe("All green. — after 1 tool result");
-    expect(s).not.toContain('to "452 pass');
+    expect(s).toBe("1 tool result → All green.");
+    expect(s).not.toContain('"452 pass');
+  });
+
+  test("the sent half names the tool when the trailing results agree on one", () => {
+    const s = buildSummary(
+      req([
+        { role: "user", content: "q" },
+        { role: "tool", content: "out1", kind: "result", tool: "webfetch" },
+        { role: "tool", content: "out2", kind: "result", tool: "webfetch" },
+      ]),
+      undefined,
+      [{ tool: "grep", detail: "opencode" }],
+    );
+    expect(s).toBe("2 webfetch results → searched `opencode`");
+  });
+
+  test("mixed-tool trailing results fall back to the generic name", () => {
+    const s = buildSummary(
+      req([
+        { role: "tool", content: "a", kind: "result", tool: "bash" },
+        { role: "tool", content: "b", kind: "result", tool: "webfetch" },
+      ]),
+      "Done.",
+    );
+    expect(s).toBe("2 tool results → Done.");
+  });
+
+  test("with a sent half, the response budgets to 2 actions and shows the overflow as +N", () => {
+    const s = buildSummary(
+      req([{ role: "tool", content: "r", kind: "result", tool: "bash" }]),
+      undefined,
+      [
+        { tool: "webfetch", detail: "https://a.test/x" },
+        { tool: "webfetch", detail: "https://b.test/y" },
+        { tool: "webfetch", detail: "https://c.test/z" },
+      ],
+    );
+    expect(s).toBe("1 bash result → fetched `https://a.test/x`, fetched `https://b.test/y` +1");
+  });
+
+  test("without a sent half, 3 actions show and deeper overflow is +N, never silent", () => {
+    const s = buildSummary(
+      req([{ role: "user", content: "go" }, { role: "assistant", content: "x" }]),
+      undefined,
+      [
+        { tool: "bash", detail: "a" }, { tool: "bash", detail: "b" },
+        { tool: "bash", detail: "c" }, { tool: "bash", detail: "d" },
+      ],
+    );
+    expect(s).toBe("ran `a`, ran `b`, ran `c` +1");
   });
 
   test("a secret in the trailing user message is scrubbed before the suffix truncates", () => {

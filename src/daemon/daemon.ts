@@ -803,10 +803,11 @@ function findingValues(
     .filter((v) => v.value !== "");
 }
 
-// A plain-English "what happened" line (R7). Leads with the assistant's
-// actions (tool calls) or reply — never the raw user message, which for a
-// leak turn would echo the secret into the always-visible feed — then adds
-// what the agent SENT as a short suffix, so one line covers both directions.
+// A plain-English "what happened" line (R7), in wire order: what the request
+// sent (short, bounded) → what came back (actions or reply). The scrub below
+// runs unconditionally with the scan findings, so a detected secret in the
+// quoted ask never reaches the feed; the quote is capped at 40 chars either
+// way. One line, both directions, same reading order as the ⇢/⇠ views.
 export function buildSummary(
   parsed: ParsedRequest | null,
   responseText?: string,
@@ -823,17 +824,21 @@ export function buildSummary(
     actions = actions?.map((a) => (a.detail ? { ...a, detail: scrub(a.detail) } : a));
     if (parsed) parsed = { ...parsed, messages: parsed.messages.map((m) => ({ ...m, content: scrub(m.content) })) };
   }
-  const lead =
+  // Wire order: what the request sent, then what came back — the same
+  // reading direction as every ⇢/⇠ surface. The sent half leads because it
+  // is short and BOUNDED (a 40-char quoted ask or "N x results"), so the
+  // response keeps the rest of the line; the response half still budgets
+  // (2 actions / 80 chars) when both render. Skipped for one-shots — their
+  // summaries feed sessionTitle's JSON unwrap untouched.
+  const sent = parsed?.oneShot ? "" : sentPart(parsed?.messages);
+  const got =
     actions && actions.length > 0
-      ? summarizeActions(actions)
+      ? summarizeActions(actions, sent !== "")
       : responseText
-        ? firstLine(responseText, 100)
+        ? firstLine(responseText, sent ? 80 : 100)
         : null;
-  if (lead !== null) {
-    // What the agent sent, from the request's trailing run: a user message,
-    // or the tool results answering the previous response. Skipped for
-    // one-shots — their summaries feed sessionTitle's JSON unwrap untouched.
-    return `${lead}${parsed?.oneShot ? "" : sentSuffix(parsed?.messages)}`;
+  if (got !== null) {
+    return sent ? `${sent} → ${got}` : got;
   }
   if (!parsed) return "unparsed call (raw view available)";
   if (parsed.messages.length === 0) return "(no message content)";
@@ -847,21 +852,32 @@ export function buildSummary(
 // The request's newest content, judged from its trailing messages only (the
 // daemon has no previous-call diff): a trailing user message, or a trailing
 // run of tool results. Content is already scrubbed by the caller.
-function sentSuffix(messages?: DisplayMessage[]): string {
+// The request's newest content as the summary's LEADING half: a trailing run
+// of tool results ("3 webfetch results") or the trailing user ask (quoted,
+// capped at 40). The results check comes FIRST: Anthropic's protocol carries
+// tool results inside user-ROLE messages (kind stamps them at parse) —
+// quoting those as the user's ask would caption tool output as human words.
+// Tool names are parse-sanitized identifiers, so the title/splitter regexes
+// can recognize the shape. Content is already scrubbed by the caller.
+function sentPart(messages?: DisplayMessage[]): string {
   if (!messages?.length) return "";
   const last = messages.at(-1)!;
-  // The results check comes FIRST: Anthropic's protocol carries tool results
-  // inside user-ROLE messages (kind stamps them at parse) — quoting those as
-  // the user's ask would caption tool output as human words.
   let results = 0;
-  for (let i = messages.length - 1; i >= 0 && messages[i]!.kind === "result"; i--) results++;
-  if (results > 0) return ` — after ${results} tool result${results === 1 ? "" : "s"}`;
-  if (last.role === "user") return ` — to "${firstLine(last.content, 40)}"`;
+  const tools = new Set<string>();
+  for (let i = messages.length - 1; i >= 0 && messages[i]!.kind === "result"; i--) {
+    results++;
+    tools.add(messages[i]!.tool ?? "tool");
+  }
+  if (results > 0) {
+    const name = tools.size === 1 ? [...tools][0]! : "tool";
+    return `${results} ${name} result${results === 1 ? "" : "s"}`;
+  }
+  if (last.role === "user") return `"${firstLine(last.content, 40)}"`;
   return "";
 }
 
 // Map coding-agent tools to verbs and group repeats: "read 3 files, ran `npm test`".
-function summarizeActions(actions: ToolAction[]): string {
+function summarizeActions(actions: ToolAction[], compact = false): string {
   const verb = (t: string): string => {
     const l = t.toLowerCase();
     if (l.includes("bash") || l.includes("shell") || l.includes("exec")) return "ran";
@@ -889,7 +905,13 @@ function summarizeActions(actions: ToolAction[]): string {
   }
   if (files.length === 1) parts.unshift(`read ${files[0]}`);
   else if (files.length > 1) parts.unshift(`read ${files.length} files`);
-  return parts.slice(0, 3).join(", ") || `${actions.length} tool calls`;
+  // No silent caps: overflow shows as "+N". Compact mode (a sent-suffix will
+  // follow) budgets the lead to 2 actions so both halves fit one feed line.
+  const cap = compact ? 2 : 3;
+  const shown = parts.slice(0, cap).join(", ");
+  const extra = parts.length - Math.min(parts.length, cap);
+  if (!shown) return `${actions.length} tool calls`;
+  return extra > 0 ? `${shown} +${extra}` : shown;
 }
 
 function firstLine(s: string, max: number): string {

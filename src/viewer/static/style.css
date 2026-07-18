@@ -245,6 +245,9 @@ main { flex: 1; padding: 8px 16px; }
 .row .agent { color: var(--accent); flex: 0 0 100px; overflow: hidden; text-overflow: ellipsis; }
 .row .model { color: var(--muted); flex: 0 0 130px; overflow: hidden; text-overflow: ellipsis; }
 .row .summary { flex: 1 1 auto; min-width: 120px; overflow: hidden; text-overflow: ellipsis; }
+/* The summary's "what the agent sent" suffix (— to "…" / — after N x results)
+   renders muted, so the row reads two-toned: got-back bright, sent quiet. */
+.sum-suffix { color: var(--muted); }
 /* 12 id chars: a ULID's first 10 encode the millisecond, so sessions minted
    together are identical at 6-8 chars — two extra random chars disambiguate
    (the title-generation turn lands in the same instant its conversation
@@ -371,12 +374,12 @@ button.linklike:hover { text-decoration: underline; }
 }
 /* Section labels above each raw block — same typography as the transcript's
    .mc-name labels, colored the same way (request accent, response ok). */
+/* Only the raw stream's label still uses an h4 — request/response sections
+   carry the same ⇢/⇠ .dir-label the transcript uses (one vocabulary). */
 .detail h4 {
   font-family: var(--sans); font-size: 10.5px; text-transform: uppercase;
   letter-spacing: 0.07em; font-weight: 600; color: var(--muted); margin: 16px 0 6px;
 }
-.detail h4.req { color: var(--accent); }
-.detail h4.resp { color: var(--ok); }
 /* The readable ⇄ raw switch: a segmented control so it reads as two views,
    not a lone button (users didn't notice it toggled anything). */
 .viewswitch { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 14px 0 12px; }
