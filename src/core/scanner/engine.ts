@@ -48,7 +48,9 @@ export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): 
   for (const { spec, re } of compiled.rules) {
     // Keyword prescan: rules with no anchor keyword in the body never run
     // their regex — the lever that keeps scan time flat as rules grow.
-    if (!spec.keywords.some((k) => lower.includes(k))) continue;
+    // An empty keyword list opts out: some secret shapes (telegram tokens,
+    // anchor-free entropy rules) have no anchor substring to prescan for.
+    if (spec.keywords.length > 0 && !spec.keywords.some((k) => lower.includes(k))) continue;
     re.lastIndex = 0;
     let ruleFindings = 0;
     let m: RegExpExecArray | null;
@@ -61,6 +63,18 @@ export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): 
       if (STOPWORDS.some((w) => secretLower.includes(w))) continue;
       if (spec.entropy !== undefined && shannonEntropy(secret) < spec.entropy) continue;
       if (spec.validators?.includes("luhn") && !luhnValid(secret)) continue;
+      // base64-secret validator: the blob only counts if it DECODES to
+      // something a structured rule recognizes — base64 of anything else stays
+      // silent, which is what keeps this rule viable on agent traffic full of
+      // benign base64. Validator-bearing rules are excluded from the probe, so
+      // it can't recurse and the base64 rule's own in-flight cursor is never
+      // touched; probed regexes need no lastIndex restore because this loop
+      // resets lastIndex before every rule's scan.
+      if (spec.validators?.includes("base64-secret")) {
+        const decoded = Buffer.from(secret, "base64").toString("utf8");
+        if (decoded.length < 8 || !compiled.rules.some(({ spec: s, re: r }) =>
+          s.tier === "structured" && !s.validators?.length && ((r.lastIndex = 0), r.test(decoded)))) continue;
+      }
       const start = m.index;
       ruleFindings++;
       findings.push({
