@@ -5,10 +5,29 @@ import type { Message } from "../core/call";
 
 export type Format = "anthropic-messages" | "openai-chat" | "openai-responses" | "unknown";
 
+/** A Message enriched for DISPLAY (non-core, viewer-only semantics). content
+ *  stays byte-for-byte what it always was — these fields only label it, so
+ *  history diffing, search text, and summaries are untouched. */
+export interface DisplayMessage extends Message {
+  tool?: string; // sanitized tool name, or undefined when unknown/hostile
+  kind?: "call" | "result";
+  callId?: string;
+  detail?: string; // the originating call's short detail (a result's hover text)
+  /** Stamped by session-view on wire fc-echoes the previous response already
+   *  showed — the transcript folds these instead of repeating them. */
+  resent?: true;
+}
+
+// A tool name is display-critical (it becomes a card header): accept only
+// names that look like identifiers; anything else renders unlabeled.
+export function sanitizeTool(name: unknown): string | undefined {
+  return typeof name === "string" && /^[A-Za-z_][\w.-]{0,40}$/.test(name) ? name : undefined;
+}
+
 export interface ParsedRequest {
   model?: string;
   system?: string;
-  messages: Message[];
+  messages: DisplayMessage[];
   convId?: string;
   prevResponseId?: string;
   /** Explicitly stateless one-shot (store:false, no conversation identity) —
@@ -53,10 +72,25 @@ export function parseRequest(format: Format, bytes: Uint8Array): ParsedRequest |
     }
     if (format === "openai-responses") {
       const input = body.input;
-      const messages: Message[] =
+      // Two passes: outputs reference their call by call_id only, so first
+      // collect every call's name (+ short detail), then map — a result card
+      // can then say WHICH tool produced it and what it was asked to do, even
+      // though the output item itself names neither.
+      const nameByCallId = new Map<string, ToolAction>();
+      if (Array.isArray(input)) {
+        for (const item of input) {
+          const t = sanitizeTool(item?.name);
+          if (item?.type === "function_call" && typeof item.call_id === "string" && t) {
+            nameByCallId.set(item.call_id, toolAction(t, safeJson(item.arguments)));
+          }
+        }
+      }
+      const messages: DisplayMessage[] =
         typeof input === "string"
           ? [{ role: "user", content: input }]
-          : (input ?? []).map(responsesItem).filter((m: Message | null): m is Message => m !== null);
+          : (input ?? [])
+              .map((i: Record<string, unknown>) => responsesItem(i, nameByCallId))
+              .filter((m: DisplayMessage | null): m is DisplayMessage => m !== null);
       // prompt_cache_key is a per-CONVERSATION affinity key by design (cache
       // routing works by shared prompt prefix), and clients use it that way —
       // opencode sends "ses_<its session id>" on every conversational call.
@@ -187,7 +221,9 @@ function parseSse(format: Format, raw: string): ParsedResponse | null {
 
 export interface ToolAction {
   tool: string;
-  detail?: string; // e.g. the shell command or a file path
+  detail?: string; // e.g. the shell command or a file path (clamped at 200)
+  callId?: string; // pairs a call with its result in the NEXT request
+  args?: string; // full raw arguments (JSON text) for the display card body
 }
 
 // Extract the tool calls the assistant made in its response, for a plain-English
@@ -204,15 +240,19 @@ export function extractActions(format: Format, bytes: Uint8Array): ToolAction[] 
     const out: ToolAction[] = [];
     if (format === "anthropic-messages") {
       for (const b of body.content ?? []) {
-        if (b?.type === "tool_use") out.push(toolAction(b.name, b.input));
+        if (b?.type === "tool_use") {
+          out.push(toolAction(b.name, b.input, b.id, JSON.stringify(b.input ?? {})));
+        }
       }
     } else if (format === "openai-chat") {
       for (const tc of body.choices?.[0]?.message?.tool_calls ?? []) {
-        out.push(toolAction(tc.function?.name, safeJson(tc.function?.arguments)));
+        out.push(toolAction(tc.function?.name, safeJson(tc.function?.arguments), tc.id, tc.function?.arguments));
       }
     } else if (format === "openai-responses") {
       for (const item of body.output ?? []) {
-        if (item?.type === "function_call") out.push(toolAction(item.name, safeJson(item.arguments)));
+        if (item?.type === "function_call") {
+          out.push(toolAction(item.name, safeJson(item.arguments), item.call_id, item.arguments));
+        }
       }
     }
     return out;
@@ -230,16 +270,16 @@ function extractActionsSse(format: Format, raw: string): ToolAction[] {
     let ev: Record<string, any>;
     try { ev = JSON.parse(payload); } catch { continue; }
     if (format === "anthropic-messages" && ev.type === "content_block_start" && ev.content_block?.type === "tool_use") {
-      out.push(toolAction(ev.content_block.name, ev.content_block.input));
+      out.push(toolAction(ev.content_block.name, ev.content_block.input, ev.content_block.id));
     } else if (format === "openai-chat") {
       for (const tc of ev.choices?.[0]?.delta?.tool_calls ?? []) {
-        if (tc.function?.name) out.push(toolAction(tc.function.name, undefined));
+        if (tc.function?.name) out.push(toolAction(tc.function.name, undefined, tc.id));
       }
     } else if (format === "openai-responses") {
       // Tool calls ride output_item events; `.done` carries the COMPLETE
       // arguments (`.added` is an empty shell — using it would double-count).
       if (ev.type === "response.output_item.done" && ev.item?.type === "function_call") {
-        out.push(toolAction(ev.item.name, safeJson(ev.item.arguments)));
+        out.push(toolAction(ev.item.name, safeJson(ev.item.arguments), ev.item.call_id, ev.item.arguments));
       }
     }
   }
@@ -251,7 +291,7 @@ function safeJson(s: unknown): Record<string, unknown> | undefined {
   try { return JSON.parse(s); } catch { return undefined; }
 }
 
-function toolAction(name: unknown, input: unknown): ToolAction {
+function toolAction(name: unknown, input: unknown, callId?: unknown, args?: unknown): ToolAction {
   const tool = String(name ?? "tool");
   const inp = (input ?? {}) as Record<string, unknown>;
   // Pull a short, useful detail for the common coding-agent tools.
@@ -264,30 +304,75 @@ function toolAction(name: unknown, input: unknown): ToolAction {
     (typeof inp.query === "string" && inp.query) ||
     (typeof inp.name === "string" && inp.name) || // e.g. skill {"name":"…"}
     undefined;
-  return detail ? { tool, detail: String(detail) } : { tool };
+  const out: ToolAction = { tool };
+  if (detail) out.detail = String(detail).slice(0, 200); // header text — keep it bounded
+  if (typeof callId === "string") out.callId = callId;
+  if (typeof args === "string") out.args = args;
+  return out;
 }
 
-function toMessage(m: Record<string, unknown>): Message {
-  return {
+function toMessage(m: Record<string, unknown>): DisplayMessage {
+  const out: DisplayMessage = {
     role: String(m.role ?? "unknown"),
     content: flattenContent(m.content) ?? "",
   };
+  // Tool RESULTS hide inside role-messages on two formats: openai-chat sends
+  // them as role:"tool" turns, anthropic embeds tool_result blocks in USER
+  // messages. Label them so the sent-suffix never captions tool output as the
+  // human's ask (role/content stay untouched — display label only).
+  if (out.role === "tool") out.kind = "result";
+  else if (
+    out.role === "user" &&
+    Array.isArray(m.content) &&
+    (m.content as Array<Record<string, unknown>>).some((b) => b?.type === "tool_result")
+  ) {
+    out.kind = "result";
+  }
+  return out;
 }
 
 // Responses-API `input` items are not all role-messages: tool calls, tool
 // outputs, and encrypted reasoning ride the same array as TYPED items with no
 // role — which used to render as a wall of "unknown" cards. Label them what
-// they are, in the "Name: payload" convention the viewer's tool cards parse.
-function responsesItem(item: Record<string, unknown>): Message | null {
+// they are: content keeps the existing conventions BYTE-FOR-BYTE (history
+// diffing and search depend on it); the display fields carry the labels.
+function responsesItem(
+  item: Record<string, unknown>,
+  nameByCallId: Map<string, ToolAction>,
+): DisplayMessage | null {
+  const callId = typeof item.call_id === "string" ? item.call_id : undefined;
   if (item.type === "function_call") {
-    return { role: "tool", content: `${String(item.name ?? "tool")}: ${asText(item.arguments)}` };
+    return {
+      role: "tool", content: `${String(item.name ?? "tool")}: ${asText(item.arguments)}`,
+      tool: sanitizeTool(item.name), kind: "call", callId,
+    };
   }
   if (item.type === "function_call_output") {
-    return { role: "tool", content: flattenContent(item.output) ?? asText(item.output) };
+    const origin = callId ? nameByCallId.get(callId) : undefined;
+    return {
+      role: "tool", content: flattenContent(item.output) ?? asText(item.output),
+      tool: origin?.tool, kind: "result", callId, detail: origin?.detail,
+    };
   }
   // Encrypted model-internal state — unreadable by design. The raw view
   // carries the exact bytes; the readable projection skips the ciphertext.
   if (item.type === "reasoning") return null;
+  // Built-in typed calls (web_search_call, computer_call, …) and their
+  // outputs: same generic labeling so they don't read as "unknown" cards.
+  if (typeof item.type === "string" && item.type.endsWith("_call_output")) {
+    return {
+      role: "tool", content: flattenContent(item.output) ?? asText(item.output ?? item),
+      tool: sanitizeTool(item.type.slice(0, -"_call_output".length)), kind: "result",
+      callId: callId ?? (typeof item.id === "string" ? item.id : undefined),
+    };
+  }
+  if (typeof item.type === "string" && item.type.endsWith("_call")) {
+    return {
+      role: "tool", content: asText(item.arguments ?? item.action ?? item.input ?? item),
+      tool: sanitizeTool(item.type.slice(0, -"_call".length)), kind: "call",
+      callId: callId ?? (typeof item.id === "string" ? item.id : undefined),
+    };
+  }
   return toMessage(item);
 }
 

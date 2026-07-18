@@ -18,7 +18,7 @@ import { applyCaptureRedaction, redactValues, redactValuesInText } from "../tran
 import { scrubAuthHeaders } from "../core/normalize/normalize";
 import { Notifier, type AlertMessage } from "../notifier/notifier";
 import { buildAlertMessage } from "../notifier/alert-copy";
-import { detectFormat, extractActions, parseRequest, parseResponse, type Format, type ParsedRequest, type ToolAction } from "../parsers/parsers";
+import { detectFormat, extractActions, parseRequest, parseResponse, type DisplayMessage, type Format, type ParsedRequest, type ToolAction } from "../parsers/parsers";
 import { startControlServer, type ControlRequest, type ControlResponse } from "./control";
 import { ViewerServer } from "../viewer/server";
 import { OtlpReceiver } from "../core/otlp/receiver";
@@ -296,9 +296,13 @@ export class Daemon {
     if (!this.isRunning) return; // late delivery during shutdown — store may be closing
     if (this.skipped.delete(call.id)) return; // request-time skip is final
     const stash = this.pending.get(call.id);
-    // redact-on-capture (R11): await the scan verdict and substitute the raw
-    // secret BEFORE the first write, so no raw value ever lands in the WAL.
-    if (this.config.redactOnCapture && stash) {
+    // Await the scan verdict BEFORE the first write, unconditionally: with
+    // redact-on-capture it gates the body substitution (R11); without it the
+    // summary's findings-based scrub still needs final findings — a response
+    // that beats the scan would otherwise store a raw secret in the
+    // permanently-visible feed line. Capture is off the relay path, so the
+    // wait costs the agent nothing; the scan itself is deadline-bounded.
+    if (stash) {
       await stash.scanDone;
     }
     this.pending.delete(call.id);
@@ -387,7 +391,16 @@ export class Daemon {
     }
     const summary = redaction?.heldOut
       ? "[REDACTION INCOMPLETE: content withheld]"
-      : buildSummary(parsed, respParsed?.text, respActions, redaction?.values ?? []);
+      : buildSummary(parsed, respParsed?.text, respActions, [
+          // Scrub from the scan findings even with redact-on-capture OFF: the
+          // summary is always-visible feed text, so it must never depend on
+          // the redaction setting to keep a secret out.
+          ...(redaction?.values ?? []),
+          ...findingValues(
+            call.request.bodyBytes ? new TextDecoder().decode(call.request.bodyBytes) : "",
+            stash?.findings,
+          ),
+        ]);
 
     this.store.insertCall({
       id: call.id,
@@ -508,7 +521,15 @@ export class Daemon {
             { model: call.model, messages: call.request.messages ?? [] } as ParsedRequest,
             call.response.text,
             undefined,
-            redaction?.values ?? [],
+            [
+              // Same rationale as the wire path: findings scrub the summary
+              // regardless of the redact-on-capture setting.
+              ...(redaction?.values ?? []),
+              ...findingValues(
+                call.request.bodyBytes ? new TextDecoder().decode(call.request.bodyBytes) : "",
+                scanResult.findings,
+              ),
+            ],
           );
       const scanState = redaction?.heldOut ? "incomplete" : scanResult.state;
       // Persist the self-report's structure: Mode B bodies are scan text, not
@@ -517,6 +538,7 @@ export class Daemon {
       const displayMessages = redaction?.heldOut
         ? null
         : (call.request.messages ?? []).map((m) => ({
+            ...m, // keep display labels (tool/kind) — only the content is scrubbed
             role: m.role,
             content: redaction ? redactValuesInText(String(m.content), redaction.values) : String(m.content),
           }));
@@ -768,9 +790,23 @@ async function aliveDaemon(stateDir: string): Promise<{ pid: number } | null> {
   }
 }
 
-// A plain-English "what the turn did" line (R7). Leads with the assistant's
+// Secret values recovered from the scan findings (string offsets into the
+// scanned text) — the summary scrubs with these even when redact-on-capture
+// is off, because the feed line is always visible.
+function findingValues(
+  text: string,
+  findings?: Array<{ start: number; end: number; secretType: string }>,
+): Array<{ value: string; type: string }> {
+  if (!findings?.length || !text) return [];
+  return findings
+    .map((f) => ({ value: text.slice(f.start, f.end), type: f.secretType }))
+    .filter((v) => v.value !== "");
+}
+
+// A plain-English "what happened" line (R7). Leads with the assistant's
 // actions (tool calls) or reply — never the raw user message, which for a
-// leak turn would echo the secret into the always-visible feed.
+// leak turn would echo the secret into the always-visible feed — then adds
+// what the agent SENT as a short suffix, so one line covers both directions.
 export function buildSummary(
   parsed: ParsedRequest | null,
   responseText?: string,
@@ -787,8 +823,18 @@ export function buildSummary(
     actions = actions?.map((a) => (a.detail ? { ...a, detail: scrub(a.detail) } : a));
     if (parsed) parsed = { ...parsed, messages: parsed.messages.map((m) => ({ ...m, content: scrub(m.content) })) };
   }
-  if (actions && actions.length > 0) return summarizeActions(actions);
-  if (responseText) return firstLine(responseText, 100);
+  const lead =
+    actions && actions.length > 0
+      ? summarizeActions(actions)
+      : responseText
+        ? firstLine(responseText, 100)
+        : null;
+  if (lead !== null) {
+    // What the agent sent, from the request's trailing run: a user message,
+    // or the tool results answering the previous response. Skipped for
+    // one-shots — their summaries feed sessionTitle's JSON unwrap untouched.
+    return `${lead}${parsed?.oneShot ? "" : sentSuffix(parsed?.messages)}`;
+  }
   if (!parsed) return "unparsed call (raw view available)";
   if (parsed.messages.length === 0) return "(no message content)";
   // Prefer the last user message; else summarize the last message of ANY role.
@@ -796,6 +842,22 @@ export function buildSummary(
   // their content should show ("ToolSearch: …"), not a bare "N messages" count.
   const pick = [...parsed.messages].reverse().find((m) => m.role === "user") ?? parsed.messages.at(-1)!;
   return firstLine(pick.content, 100);
+}
+
+// The request's newest content, judged from its trailing messages only (the
+// daemon has no previous-call diff): a trailing user message, or a trailing
+// run of tool results. Content is already scrubbed by the caller.
+function sentSuffix(messages?: DisplayMessage[]): string {
+  if (!messages?.length) return "";
+  const last = messages.at(-1)!;
+  // The results check comes FIRST: Anthropic's protocol carries tool results
+  // inside user-ROLE messages (kind stamps them at parse) — quoting those as
+  // the user's ask would caption tool output as human words.
+  let results = 0;
+  for (let i = messages.length - 1; i >= 0 && messages[i]!.kind === "result"; i--) results++;
+  if (results > 0) return ` — after ${results} tool result${results === 1 ? "" : "s"}`;
+  if (last.role === "user") return ` — to "${firstLine(last.content, 40)}"`;
+  return "";
 }
 
 // Map coding-agent tools to verbs and group repeats: "read 3 files, ran `npm test`".

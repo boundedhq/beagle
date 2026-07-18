@@ -3,8 +3,10 @@
 // (UI fix 1), structured request messages, and the exact secret strings to
 // highlight inline (UI fix 2, R7). Reuses the format parsers.
 import type { CallRecord, Store } from "../core/store/store";
-import { detectFormat, parseRequest, parseResponse } from "../parsers/parsers";
-import type { Message } from "../core/call";
+import {
+  detectFormat, extractActions, parseRequest, parseResponse, sanitizeTool,
+  type DisplayMessage, type ToolAction,
+} from "../parsers/parsers";
 
 export interface LeakSpan {
   start: number;
@@ -69,8 +71,18 @@ export interface CallDetail {
   captureState: string;
   source: string;
   system: string | null;
-  messages: Message[];
+  messages: DisplayMessage[];
   responseText: string | null; // reassembled (SSE or JSON), null if unparseable
+  /** Tool calls the model made in THIS response — "what was sent back" beyond
+   *  text. Display-only: response bytes are not request-scanned (R7 note). */
+  responseCalls: ToolAction[];
+  /** Index into messages where this request's NEW content starts (server-side
+   *  diff vs the previous wire call), or null when no truthful claim exists
+   *  (first call, purged/unparseable predecessors, rewritten history, Mode B). */
+  newFrom: number | null;
+  /** Leaks detected on the NEXT request — where a secret inside this
+   *  response's tool calls actually gets scanned. Display highlighting only. */
+  responseLeaks: DetailLeak[];
   requestRaw: string;
   responseRaw: string;
   sseRaw: string | null;
@@ -119,11 +131,45 @@ export function buildDetail(call: CallRecord, spans: LeakSpan[]): CallDetail {
     messages: parsedReq?.messages ?? call.displayMessages ?? [],
     responseText:
       parsedResp?.text ?? (call.source === "otel" && responseRaw ? responseRaw : null),
+    // Mode B bodies are plain text — extractActions parses nothing there and
+    // returns [], so the section simply doesn't render for self-reports.
+    // The tool name becomes a card HEADER label — sanitize at this boundary
+    // (same rule every other header path applies); hostile names render as
+    // the generic "tool", their args still fully visible in the body.
+    responseCalls: (call.responseBody
+      ? extractActions(format, call.responseBody)
+      : call.sseRaw
+        ? extractActions(format, call.sseRaw)
+        : []
+    ).map((a) => ({ ...a, tool: sanitizeTool(a.tool) ?? "tool" })),
+    newFrom: null, // filled by the /api/call route (needs the previous call)
+    responseLeaks: [], // filled by the route (needs the next call)
     requestRaw,
     responseRaw,
     sseRaw,
     leaks: extractLeaks(requestRaw, spans, call.redacted ?? false),
   };
+}
+
+// Just the parsed request messages — same result as buildDetail(call).messages,
+// but without decoding/parsing the RESPONSE. The calls-detail delta walk-back
+// diffs against previous calls and needs only this; a full buildDetail per
+// walked-back call would re-parse each (100KB+) response for nothing.
+export function detailMessages(call: CallRecord): DisplayMessage[] {
+  const format = detectFormat(call.endpoint ?? "");
+  return (
+    (call.requestBody ? parseRequest(format, call.requestBody)?.messages : undefined) ??
+    call.displayMessages ??
+    []
+  );
+}
+
+// Just the request-side leaks — same result as buildDetail(call, spans).leaks,
+// without any response work. Used to surface the NEXT call's leaks on a detail
+// (R7 backward highlight) without building its whole CallDetail.
+export function detailLeaks(call: CallRecord, spans: LeakSpan[]): DetailLeak[] {
+  const requestRaw = call.requestBody ? new TextDecoder("utf-8", { fatal: false }).decode(call.requestBody) : "";
+  return extractLeaks(requestRaw, spans, call.redacted ?? false);
 }
 
 function extractLeaks(requestText: string, spans: LeakSpan[], redacted: boolean): DetailLeak[] {

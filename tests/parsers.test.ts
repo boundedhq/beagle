@@ -230,6 +230,46 @@ describe("malformed input degrades to null, never throws (R3)", () => {
   });
 });
 
+describe("display labels (turn clarity)", () => {
+  test("anthropic tool_result blocks stamp kind:'result' on their user-role carrier (content untouched)", () => {
+    const body = JSON.stringify({
+      messages: [
+        { role: "user", content: "run it" },
+        { role: "assistant", content: [{ type: "text", text: "ok" }] },
+        { role: "user", content: [{ type: "tool_result", content: "452 pass" }] },
+      ],
+    });
+    const parsed = parseRequest("anthropic-messages", enc(body))!;
+    expect(parsed.messages[0]!.kind).toBeUndefined();
+    expect(parsed.messages[2]).toMatchObject({ role: "user", content: "452 pass", kind: "result" });
+  });
+
+  test("openai-chat role:'tool' messages stamp kind:'result'", () => {
+    const body = JSON.stringify({
+      messages: [
+        { role: "user", content: "q" },
+        { role: "tool", content: "the output" },
+      ],
+    });
+    const parsed = parseRequest("openai-chat", enc(body))!;
+    expect(parsed.messages[1]).toMatchObject({ role: "tool", kind: "result" });
+  });
+
+  test("openai-responses outputs learn their tool name + detail via the call_id map", () => {
+    const body = JSON.stringify({
+      input: [
+        { type: "function_call", call_id: "c9", name: "bash", arguments: '{"command":"ls"}' },
+        { type: "function_call_output", call_id: "c9", output: "file.txt" },
+      ],
+    });
+    const parsed = parseRequest("openai-responses", enc(body))!;
+    expect(parsed.messages[0]).toMatchObject({ kind: "call", tool: "bash", callId: "c9" });
+    expect(parsed.messages[1]).toMatchObject({
+      kind: "result", tool: "bash", callId: "c9", detail: "ls", content: "file.txt",
+    });
+  });
+});
+
 describe("extractActions (tool-aware summaries, UI fix 3)", () => {
   test("Anthropic tool_use blocks in a JSON response", () => {
     const body = JSON.stringify({
@@ -241,8 +281,8 @@ describe("extractActions (tool-aware summaries, UI fix 3)", () => {
     });
     const actions = extractActions("anthropic-messages", enc(body));
     expect(actions).toEqual([
-      { tool: "Read", detail: "src/server.ts" },
-      { tool: "Bash", detail: "npm test" },
+      { tool: "Read", detail: "src/server.ts", args: '{"file_path":"src/server.ts"}' },
+      { tool: "Bash", detail: "npm test", args: '{"command":"npm test"}' },
     ]);
   });
 
@@ -258,7 +298,7 @@ describe("extractActions (tool-aware summaries, UI fix 3)", () => {
       choices: [{ message: { tool_calls: [{ function: { name: "run_shell", arguments: '{"command":"ls -la"}' } }] } }],
     });
     const actions = extractActions("openai-chat", enc(body));
-    expect(actions[0]).toEqual({ tool: "run_shell", detail: "ls -la" });
+    expect(actions[0]).toEqual({ tool: "run_shell", detail: "ls -la", args: '{"command":"ls -la"}' });
   });
 
   test("plain text response has no actions", () => {

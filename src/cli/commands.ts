@@ -235,12 +235,16 @@ function fmtWhen(ts: number): string {
   });
 }
 
-// A session's display title from its opening summary — same unwrap as the
+// A session's display title from its opening summary — same transform as the
 // dashboard's sessionTitle() in app.js (duplicated: the buildless viewer
-// can't share modules with the CLI). Claude Code's first call is a
+// can't share modules with the CLI, so keep the two in step). First strip the
+// "what the agent sent" suffix buildSummary appends (— to "…" / — after N tool
+// results) — feed/CLI context, not a title — then unwrap Claude Code's
 // title-generation turn whose summary is literally {"title":"…"}.
 function unwrapTitle(raw: string | undefined): string {
-  const t = (raw ?? "").trim();
+  const t = (raw ?? "")
+    .replace(/^([\s\S]*) — (?:to "[^"]{0,80}"|after \d+ tool results?)$/, "$1")
+    .trim();
   if (t.startsWith("{")) {
     try {
       const o = JSON.parse(t) as { title?: unknown };

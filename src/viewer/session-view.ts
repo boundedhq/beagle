@@ -10,6 +10,13 @@
 import type { Store } from "../core/store/store";
 import { buildDetail, leakSpansFor, type DetailLeak } from "./detail";
 import type { Message } from "../core/call";
+import { sanitizeTool, type DisplayMessage, type ToolAction } from "../parsers/parsers";
+
+// Summaries that are placeholders, not content — skipped when picking a
+// session title (shared by both title subqueries below). Static strings only:
+// they are inlined into SQL.
+const SENTINEL_SUMMARIES = ["(no message content)", "unparsed call (raw view available)"] as const;
+const SENTINEL_SQL = SENTINEL_SUMMARIES.map((s) => `'${s}'`).join(", ");
 
 export interface SessionRow {
   sessionId: string;
@@ -48,7 +55,7 @@ export function listSessions(store: Store, limit: number): SessionRow[] {
               (SELECT t.summary FROM exchanges t
                  WHERE t.session_id = e.session_id
                    AND t.summary IS NOT NULL AND t.summary != ''
-                   AND t.summary NOT IN ('(no message content)', 'unparsed call (raw view available)')
+                   AND t.summary NOT IN (${SENTINEL_SQL})
                  ORDER BY t.ts_request ASC, t.id ASC LIMIT 1) AS title
        FROM exchanges e GROUP BY e.session_id
        ORDER BY last_ts DESC LIMIT ?`,
@@ -85,7 +92,7 @@ export function sessionHeadlines(store: Store, sessionIds: string[]): Map<string
        (SELECT t.summary FROM exchanges t
           WHERE t.session_id = e.session_id
             AND t.summary IS NOT NULL AND t.summary != ''
-            AND t.summary NOT IN ('(no message content)', 'unparsed call (raw view available)')
+            AND t.summary NOT IN (${SENTINEL_SQL})
           ORDER BY t.ts_request ASC, t.id ASC LIMIT 1) AS title,
        (SELECT a.agent FROM exchanges a
           WHERE a.session_id = e.session_id AND a.agent IS NOT NULL
@@ -110,9 +117,16 @@ export interface SessionTurn {
   model?: string;
   source: string;
   status?: number;
-  messages: Message[]; // only what this turn ADDED (see delta note above)
+  messages: DisplayMessage[]; // only what this turn ADDED (see delta note above)
   responseText: string | null;
+  /** Tool calls the model made in THIS turn's response — the "what was sent
+   *  back" half the transcript used to show one turn late (as request echoes). */
+  responseCalls: ToolAction[];
   leaks: DetailLeak[];
+  /** Leaks detected on the NEXT request, where this response's content (tool
+   *  args, echoed text) is actually scanned — used to highlight the response
+   *  section. Display-only; the leak event stays pinned to the next call. */
+  responseLeaks: DetailLeak[];
 }
 
 export interface SessionView {
@@ -137,6 +151,7 @@ export function buildSessionTurns(store: Store, sessionId: string, cap = 200): S
   let system: string | null = null;
   let prevWire: Message[] = [];
   let prevResponseText: string | null = null;
+  let lastWireTurn: SessionTurn | undefined;
   for (const { id } of ids.slice(0, cap)) {
     const call = store.getCall(id);
     if (!call) continue;
@@ -155,10 +170,30 @@ export function buildSessionTurns(store: Store, sessionId: string, cap = 200): S
       // history. Guard against a shrunk/reshaped history (compaction, branch,
       // retry): if the recorded prefix doesn't actually match, fall back to
       // the newest message rather than mis-attributing old ones as new.
-      if (messages.length > prevWire.length && sameHistoryPrefix(messages, prevWire)) {
-        messages = messages.slice(prevWire.length);
+      const from = wireDeltaIndex(messages, prevWire);
+      if (from != null) {
+        messages = messages.slice(from);
       } else if (messages.length > 0) {
         messages = messages.slice(-1);
+      }
+      // Label this turn's request-side tool items against the PREVIOUS wire
+      // turn's response: an fc the previous response already displayed is a
+      // resend (the transcript folds it — never drops it, so a wrong match
+      // costs one click, not visibility); a result that lost its tool name
+      // (previous_response_id-chained clients send no fc echo to pair with)
+      // borrows name + detail from the call it answers.
+      const prevCalls = lastWireTurn?.responseCalls ?? [];
+      if (prevCalls.length > 0) {
+        messages = messages.map((m) => {
+          if (m.kind === "call" && m.callId && prevCalls.some((c) => c.callId === m.callId)) {
+            return { ...m, resent: true as const };
+          }
+          if (m.kind === "result" && !m.tool && m.callId) {
+            const origin = prevCalls.find((c) => c.callId === m.callId);
+            if (origin) return { ...m, tool: sanitizeTool(origin.tool), detail: origin.detail };
+          }
+          return m;
+        });
       }
       // Stateless APIs echo the previous RESPONSE back as the next request's
       // assistant message — new to the wire history, but the reader just read
@@ -183,7 +218,7 @@ export function buildSessionTurns(store: Store, sessionId: string, cap = 200): S
       if (d.messages.length > 0) prevWire = d.messages;
       prevResponseText = d.responseText ?? prevResponseText;
     }
-    turns.push({
+    const turn: SessionTurn = {
       id: d.id,
       tsRequest: d.tsRequest,
       model: d.model,
@@ -191,8 +226,27 @@ export function buildSessionTurns(store: Store, sessionId: string, cap = 200): S
       status: d.status,
       messages,
       responseText: d.responseText,
+      responseCalls: d.responseCalls,
       leaks: d.leaks,
-    });
+      responseLeaks: [],
+    };
+    turns.push(turn);
+    if (d.source === "wire") lastWireTurn = turn;
+  }
+  // Backward leak propagation (R7): a secret inside a response (tool args,
+  // echoed text) is only ever SCANNED on the next request — so the turn that
+  // DISPLAYS that content (its response section) must highlight with the next
+  // turn's leak values, or the first render site would show it unmarked.
+  // Wire-to-wire, like the resent stamping above: a Mode B row interposed
+  // between two wire calls (tool hooks fire between response and next
+  // request) must not absorb the leaks meant for the wire response card.
+  let prevWireIdx = -1;
+  for (let i = 0; i < turns.length; i++) {
+    if (turns[i]!.source !== "wire") continue;
+    if (turns[i]!.leaks.length > 0 && prevWireIdx >= 0) {
+      turns[prevWireIdx]!.responseLeaks = turns[i]!.leaks;
+    }
+    prevWireIdx = i;
   }
   const utility =
     ids.length > 0 &&
@@ -203,6 +257,17 @@ export function buildSessionTurns(store: Store, sessionId: string, cap = 200): S
       )[0]?.u,
     );
   return { sessionId, system, turns, truncated, utility };
+}
+
+// Where does this request's NEW content start, given the previous wire call's
+// history? Returns the slice index when the recorded history truthfully
+// extends the previous one; null when no claim can be made (first call,
+// rewritten history, shrunk history) — callers choose their own fallback.
+// Shared by the transcript AND the call-detail view so both surfaces agree on
+// what "new this turn" means (single audit site).
+export function wireDeltaIndex(cur: Message[], prev: Message[]): number | null {
+  // An empty prev is a valid base: the session's first call is ALL new.
+  return cur.length > prev.length && sameHistoryPrefix(cur, prev) ? prev.length : null;
 }
 
 // Cheap prefix check: same roles + same content lengths. Full string compares

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import type { DisplayMessage } from "../src/parsers/parsers";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -96,7 +97,9 @@ describe("OTLP → Call mapping — Claude Code's real event schema (Mode B)", (
     // empty prompt/response → the mapper treats them as absent, so it's a
     // tool-call-only turn (like the real `{"tz":…}` calendar call).
     const c = mapOtlpLogsToCalls(logs(turnRecords({ prompt: "", response: "", toolInput: '{"tz":"America/Los_Angeles"}' })), ctx)[0]!;
-    expect(c.request.messages).toEqual([{ role: "tool", content: 'Bash: {"tz":"America/Los_Angeles"}' }]);
+    expect(c.request.messages).toEqual([
+      { role: "tool", content: 'Bash: {"tz":"America/Los_Angeles"}', tool: "Bash", kind: "call" },
+    ] as DisplayMessage[]);
     expect(decode(c.request.bodyBytes)).toBe('{"tz":"America/Los_Angeles"}'); // leak surface: input only, no name
   });
 
@@ -107,8 +110,8 @@ describe("OTLP → Call mapping — Claude Code's real event schema (Mode B)", (
     const c = mapOtlpLogsToCalls(logs(turnRecords({ prompt: "check the tz", toolInput: '{"cmd":"date"}' })), ctx)[0]!;
     expect(c.request.messages).toEqual([
       { role: "user", content: "check the tz" },
-      { role: "tool", content: 'Bash: {"cmd":"date"}' },
-    ]);
+      { role: "tool", content: 'Bash: {"cmd":"date"}', tool: "Bash", kind: "call" },
+    ] as DisplayMessage[]);
     expect(decode(c.request.bodyBytes)).toBe('check the tz\n{"cmd":"date"}'); // prompt + tool input
   });
 

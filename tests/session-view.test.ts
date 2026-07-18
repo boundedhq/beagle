@@ -369,6 +369,143 @@ describe("buildSessionTurns — the conversation delta", () => {
     store.close();
   });
 
+  test("openai-responses tool flow: calls land on their OWN turn's response; echoes stamp resent; results get names (turn clarity)", () => {
+    const store = Store.open(dir);
+    // Turn 1: user asks; the model responds with a bash function_call.
+    const req1 = { input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "run the tests" }] }] };
+    const resp1 = { output: [{ type: "function_call", call_id: "c1", name: "bash", arguments: '{"command":"bun test"}' }] };
+    // Turn 2: the request echoes the fc and adds the output; model replies with text.
+    const req2 = { input: [
+      ...req1.input,
+      { type: "function_call", call_id: "c1", name: "bash", arguments: '{"command":"bun test"}' },
+      { type: "function_call_output", call_id: "c1", output: "452 pass" },
+    ] };
+    const resp2 = { output: [{ type: "message", content: [{ type: "output_text", text: "All green." }] }] };
+    store.insertCall(call({
+      id: ulid(1000), tsRequest: 1000, endpoint: "/v1/responses",
+      requestBody: enc(JSON.stringify(req1)), responseBody: enc(JSON.stringify(resp1)),
+    }));
+    store.insertCall(call({
+      id: ulid(2000), tsRequest: 2000, endpoint: "/v1/responses",
+      requestBody: enc(JSON.stringify(req2)), responseBody: enc(JSON.stringify(resp2)),
+    }));
+    const turns = buildSessionTurns(store, "sess-1").turns;
+    // Turn 1's response section carries the model's tool call — no longer
+    // invisible until the next request echoes it.
+    expect(turns[0]!.responseCalls).toEqual([
+      { tool: "bash", detail: "bun test", callId: "c1", args: '{"command":"bun test"}' },
+    ]);
+    // Turn 2: the fc echo is stamped resent (folds in the UI, never dropped);
+    // the result knows which tool produced it.
+    const t2 = turns[1]!.messages;
+    expect(t2.map((m) => [m.kind, m.tool, m.resent ?? false])).toEqual([
+      ["call", "bash", true],
+      ["result", "bash", false],
+    ]);
+    expect(turns[1]!.responseText).toBe("All green.");
+    store.close();
+  });
+
+  test("an fc echo whose previous response did NOT parse stays unstamped (visible, not folded)", () => {
+    const store = Store.open(dir);
+    const req1 = { input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "go" }] }] };
+    store.insertCall(call({
+      id: ulid(1000), tsRequest: 1000, endpoint: "/v1/responses",
+      requestBody: enc(JSON.stringify(req1)),
+      responseBody: enc("\x00 not parseable"), // truncated capture
+    }));
+    const req2 = { input: [
+      ...req1.input,
+      { type: "function_call", call_id: "cX", name: "bash", arguments: "{}" },
+      { type: "function_call_output", call_id: "cX", output: "out" },
+    ] };
+    store.insertCall(call({
+      id: ulid(2000), tsRequest: 2000, endpoint: "/v1/responses",
+      requestBody: enc(JSON.stringify(req2)), responseBody: enc(JSON.stringify({ output: [] })),
+    }));
+    const turns = buildSessionTurns(store, "sess-1").turns;
+    expect(turns[0]!.responseCalls).toEqual([]); // nothing parsed
+    // no prev responseCalls to match → the echo must NOT be marked resent
+    expect(turns[1]!.messages[0]!.resent).toBeUndefined();
+    store.close();
+  });
+
+  test("a leak on turn N+1 highlights turn N's response section (backward propagation, R7)", () => {
+    const SECRET = "AKIAZQ3DRSTUVWXY2345";
+    const store = Store.open(dir);
+    const req1 = { input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "deploy" }] }] };
+    const resp1 = { output: [{ type: "function_call", call_id: "c1", name: "bash", arguments: `{"command":"deploy --key ${SECRET}"}` }] };
+    const req2str = JSON.stringify({ input: [
+      ...req1.input,
+      { type: "function_call", call_id: "c1", name: "bash", arguments: `{"command":"deploy --key ${SECRET}"}` },
+      { type: "function_call_output", call_id: "c1", output: "done" },
+    ] });
+    const id2 = ulid(2000);
+    store.insertCall(call({
+      id: ulid(1000), tsRequest: 1000, endpoint: "/v1/responses",
+      requestBody: enc(JSON.stringify(req1)), responseBody: enc(JSON.stringify(resp1)),
+    }));
+    store.insertCall(call({
+      id: id2, tsRequest: 2000, endpoint: "/v1/responses",
+      requestBody: enc(req2str), responseBody: enc(JSON.stringify({ output: [] })),
+    }));
+    const start = req2str.indexOf(SECRET);
+    store.upsertLeakEvent({
+      fingerprint: "fp", sessionId: "sess-1", detector: "aws-access-key-id",
+      secretType: "aws-access-key-id", severity: "high", confidenceTier: "structured",
+      destination: "openai", callId: id2, ts: 2000,
+      spanStart: start, spanEnd: start + SECRET.length,
+    });
+    const turns = buildSessionTurns(store, "sess-1").turns;
+    // The secret is scanned on call 2, but DISPLAYED first on turn 1's
+    // response card — the propagated leaks make that first render highlight.
+    expect(turns[0]!.responseLeaks.some((l) => l.value === SECRET)).toBe(true);
+    expect(turns[1]!.leaks.some((l) => l.value === SECRET)).toBe(true);
+    store.close();
+  });
+
+  test("leak propagation skips an interposed Mode B row — the WIRE response card gets the highlight (R7)", () => {
+    const SECRET = "AKIAZQ3DRSTUVWXY2345";
+    const store = Store.open(dir);
+    const req1 = { input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "deploy" }] }] };
+    const resp1 = { output: [{ type: "function_call", call_id: "c1", name: "bash", arguments: `{"command":"x ${SECRET}"}` }] };
+    store.insertCall(call({
+      id: ulid(1000), tsRequest: 1000, endpoint: "/v1/responses",
+      requestBody: enc(JSON.stringify(req1)), responseBody: enc(JSON.stringify(resp1)),
+    }));
+    // A tool hook fires between response and next request → an otel row lands
+    // BETWEEN the two wire calls (the "mixed" session shape).
+    store.insertCall(call({
+      id: ulid(1500), tsRequest: 1500, source: "otel", endpoint: "otel:tool_output:bash",
+      requestBody: enc("hook output"), responseBody: null,
+      displayMessages: [{ role: "tool", content: "bash: hook output" }],
+    }));
+    const req2str = JSON.stringify({ input: [
+      ...req1.input,
+      { type: "function_call", call_id: "c1", name: "bash", arguments: `{"command":"x ${SECRET}"}` },
+      { type: "function_call_output", call_id: "c1", output: "ok" },
+    ] });
+    const id3 = ulid(2000);
+    store.insertCall(call({
+      id: id3, tsRequest: 2000, endpoint: "/v1/responses",
+      requestBody: enc(req2str), responseBody: enc(JSON.stringify({ output: [] })),
+    }));
+    const at = req2str.indexOf(SECRET);
+    store.upsertLeakEvent({
+      fingerprint: "fp", sessionId: "sess-1", detector: "aws-access-key-id",
+      secretType: "aws-access-key-id", severity: "high", confidenceTier: "structured",
+      destination: "openai", callId: id3, ts: 2000, spanStart: at, spanEnd: at + SECRET.length,
+    });
+    const turns = buildSessionTurns(store, "sess-1").turns;
+    // wire turn 0 (whose responseCalls card DISPLAYS the secret) gets the
+    // propagated leaks — not the interposed otel row.
+    expect(turns[0]!.source).toBe("wire");
+    expect(turns[0]!.responseLeaks.some((l) => l.value === SECRET)).toBe(true);
+    expect(turns[1]!.source).toBe("otel");
+    expect(turns[1]!.responseLeaks).toEqual([]);
+    store.close();
+  });
+
   test("turn carries the leak values to highlight", () => {
     const store = Store.open(dir);
     const secret = "AKIAZQ3DRSTUVWXY2345";

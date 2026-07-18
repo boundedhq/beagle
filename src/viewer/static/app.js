@@ -258,7 +258,7 @@ function App() {
           <span class="time">time</span>
           <span class="agent">agent</span>
           <span class="model">model</span>
-          <span class="summary">what was sent</span>
+          <span class="summary">what happened</span>
           <span class="session">session</span>
         </div>`}
         ${visible.map(
@@ -382,7 +382,14 @@ function Sessions({ onOpen, leaksOnly }) {
 // unwrap that to the clean title; other agents' summaries are plain text and
 // pass through. Already secret-scrubbed at capture, so nothing to sanitize.
 function sessionTitle(raw) {
-  const t = (raw ?? "").trim();
+  // Summaries may carry a "what the agent sent" suffix (— to "…" / — after N
+  // tool results) — feed context, not title material. Strip only the LAST
+  // occurrence (the greedy leading group pushes the match rightmost) and keep
+  // the quoted ask bounded/quote-free so a title that legitimately contains
+  // the pattern loses at most the real suffix, never its own text.
+  const t = (raw ?? "")
+    .replace(/^([\s\S]*) — (?:to "[^"]{0,80}"|after \d+ tool results?)$/, "$1")
+    .trim();
   if (t.startsWith("{")) {
     try {
       const o = JSON.parse(t);
@@ -524,13 +531,21 @@ function SessionTranscript({ sessionId, row, onBack, onPurged }) {
                 <span class="turn-toggle">${open ? "▾ details" : "▸ details"}</span>
               </div>
               ${open && html`<${Detail} id=${t.id} />`}
-              ${t.messages.map(
-                (m, j) => html`<${TMsg} key=${`${t.id}:${j}`} m=${m} leaks=${t.leaks} />`,
+              ${groupResent(t.messages).map((g, j) =>
+                g.resent
+                  ? html`<${ResentFold} key=${`${t.id}:${j}`} msgs=${g.msgs} leaks=${t.leaks} />`
+                  : g.msgs.map((m, k) => html`<${TMsg} key=${`${t.id}:${j}:${k}`} m=${m} leaks=${t.leaks} />`),
               )}
               ${t.responseText != null && t.responseText !== "" &&
-              html`<${TMsg} key=${`${t.id}:resp`} leaks=${t.leaks}
+              html`<${TMsg} key=${`${t.id}:resp`} leaks=${respLeaks(t)}
                 m=${{ role: "response", content: t.responseText }} />`}
-              ${t.messages.length === 0 && !t.responseText &&
+              ${(t.responseCalls ?? []).length > 0 &&
+              html`<${ResponseCalls} calls=${t.responseCalls} leaks=${respLeaks(t)} />`}
+              ${i === turns.length - 1 && !view.truncated && (t.responseCalls ?? []).length > 0 &&
+              html`<div class="turn-note">results not captured yet (session ended or still running)</div>`}
+              ${leakNotVisible(t) &&
+              html`<div class="turn-note warn">a detected secret is not visible in the readable cards — open ▸ details → raw</div>`}
+              ${t.messages.length === 0 && !t.responseText && (t.responseCalls ?? []).length === 0 &&
               html`<div class="turn-empty">(no parsed content — open details for raw bytes)</div>`}
             </div>
           `;
@@ -538,6 +553,41 @@ function SessionTranscript({ sessionId, row, onBack, onPurged }) {
       </div>
     </div>
   `;
+}
+
+// Split a turn's messages into runs: consecutive resent fc-echoes fold as one
+// row; everything else renders as individual cards, in original wire order.
+function groupResent(messages) {
+  const groups = [];
+  for (const m of messages) {
+    const last = groups.at(-1);
+    if (last && last.resent === Boolean(m.resent)) last.msgs.push(m);
+    else groups.push({ resent: Boolean(m.resent), msgs: [m] });
+  }
+  return groups;
+}
+
+// The response section highlights with this turn's leaks PLUS the next
+// turn's (responseLeaks): a secret inside the response's content is only
+// scanned when it rides the next request, but it's DISPLAYED here first.
+function respLeaks(t) {
+  const extra = t.responseLeaks ?? [];
+  return extra.length ? [...t.leaks, ...extra] : t.leaks;
+}
+
+// R7 backstop note: the turn is flagged but SOME detected value appears in
+// none of its renderable text (secret in a header / protocol field / escaped
+// form) — say where to look instead of showing a flag with nothing marked.
+// Per-value, not all-or-nothing: one visible secret must not silence the
+// pointer for a second, invisible one.
+function leakNotVisible(t) {
+  if (t.leaks.length === 0) return false;
+  const text = [
+    ...t.messages.map((m) => String(m.content ?? "")),
+    t.responseText ?? "",
+    ...(t.responseCalls ?? []).map((c) => c.args ?? ""),
+  ].join("\n");
+  return t.leaks.some((l) => l.value && !text.includes(l.value));
 }
 
 // "3:42 PM" between turns; "Jul 15, 3:42 PM" with the date (first turn / day
@@ -588,7 +638,8 @@ function TMsg({ m, leaks }) {
   // never clamps and never renders collapsed.
   const hasLeak = (leaks ?? []).some((l) => l.value && content.includes(l.value));
   if (m.role === "tool" || m.role === "request") {
-    return html`<${ToolCard} role=${m.role} content=${content} leaks=${leaks} hasLeak=${hasLeak} />`;
+    return html`<${ToolCard} role=${m.role} content=${content} leaks=${leaks} hasLeak=${hasLeak}
+      tool=${m.tool} kind=${m.kind} detail=${m.detail} />`;
   }
   // user / response / assistant-history / any future role: same card, labeled
   // header; bodies get the same JSON pretty-printing as tool cards.
@@ -607,25 +658,41 @@ function TMsg({ m, leaks }) {
 // shell as every other message: always-visible header (glyph, name, one-line
 // preview), body only when opened, JSON pretty-printed for reading. Long cards
 // start collapsed — unless they carry a secret, which forces them open.
-function ToolCard({ role, content, leaks, hasLeak }) {
+// Enriched rows (parser-labeled tool/kind) get an explicit call vs result
+// header; legacy rows keep the display-only "Name: payload" sniff, unchanged.
+function ToolCard({ role, content, leaks, hasLeak, tool, kind, detail, hint }) {
   const startOpen = hasLeak || content.length <= 240;
   const [open, setOpen] = useState(startOpen);
   const isRequest = role === "request";
   // Display-only parse of the "Name: payload" convention the mappers write.
   // Hostile content can at most mislabel its own card — never inject markup.
   const match = isRequest ? null : content.match(/^([A-Za-z_][\w.-]{0,40}):\s/);
-  const name = isRequest ? "request" : (match?.[1] ?? "tool");
-  const payload = match ? content.slice(match[0].length) : content;
+  const name = isRequest
+    ? "request"
+    : kind === "result"
+      ? `${tool ?? "tool"} result`
+      : (tool ?? match?.[1] ?? "tool");
+  // Strip the "Name: " prefix only when it IS the label we're showing: legacy
+  // rows (the convention is all they have), or enriched CALL rows whose
+  // convention content repeats the tool name. Enriched RESULTS never strip —
+  // an output that merely LOOKS prefixed ("bash: command not found") is
+  // genuine content and stays verbatim.
+  const stripPrefix = match && (kind === undefined || (kind === "call" && match[1] === tool));
+  const payload = stripPrefix ? content.slice(match[0].length) : content;
   const collapsible = !startOpen || hasLeak || content.length > 240;
+  const glyph = isRequest ? "⇢" : kind === "result" ? "↳" : "⚙";
+  const title = isRequest
+    ? "what the agent reported sending — prompt and tool inputs as one block"
+    : kind === "result" && detail
+      ? `result of: ${detail}`
+      : hint;
   return html`
-    <div class=${hasLeak ? "mcard has-leak" : "mcard"}
-      title=${isRequest
-        ? "what the agent reported sending — prompt and tool inputs as one block"
-        : undefined}>
+    <div class=${hasLeak ? "mcard has-leak" : "mcard"} title=${title}>
       <div class=${collapsible ? "mc-head click" : "mc-head"}
         onClick=${() => collapsible && setOpen(!open)}>
-        <span aria-hidden="true">${isRequest ? "⇢" : "⚙"}</span>
+        <span aria-hidden="true">${glyph}</span>
         <span class=${`mc-name ${isRequest ? "request" : "tool"}`}>${name}</span>
+        ${kind === "call" && detail && html`<span class="mc-detail">${detail}</span>`}
         ${!open && html`<span class="mc-preview">${payload.slice(0, 200)}</span>`}
         ${hasLeak && html`<span class="chip leak">secret</span>`}
         ${collapsible && html`<span class="mc-chev" aria-hidden="true">${open ? "▾" : "▸"}</span>`}
@@ -636,6 +703,39 @@ function ToolCard({ role, content, leaks, hasLeak }) {
       </div>`}
     </div>
   `;
+}
+
+// A run of tool calls the request RESENT from the previous response (the
+// turn above already showed them as the model's actions): folded to one row.
+// Folded, never dropped — and force-open when a detected secret lives inside,
+// because THIS copy is the scanned occurrence (R7).
+function ResentFold({ msgs, leaks }) {
+  const holdsLeak = (leaks ?? []).some(
+    (l) => l.value && msgs.some((m) => String(m.content).includes(l.value)),
+  );
+  const [open, setOpen] = useState(holdsLeak);
+  return html`
+    <div class="resent">
+      <div class="folded" onClick=${() => setOpen(!open)}>
+        ${open ? "▾" : "▸"} ${msgs.length} tool call${msgs.length === 1 ? "" : "s"} resent from the previous response
+        ${holdsLeak && html`${" "}<span class="chip leak">secret</span>`}
+      </div>
+      ${open && html`
+        ${holdsLeak && html`<div class="resent-note">resent with this request — scanned and flagged here</div>`}
+        ${msgs.map((m, i) => html`<${TMsg} key=${i} m=${m} leaks=${leaks} />`)}
+      `}
+    </div>
+  `;
+}
+
+// The response side of a turn beyond its text: the tool calls the model asked
+// for. Display-only — response bytes are not request-scanned (leak values come
+// from the NEXT request, where this content is scanned; passed via leaks).
+function ResponseCalls({ calls, leaks }) {
+  return calls.map((c, i) => html`<${ToolCard} key=${i} role="tool" kind="call"
+    tool=${c.tool} detail=${c.detail} content=${c.args ?? c.detail ?? c.tool}
+    leaks=${leaks} hasLeak=${(leaks ?? []).some((l) => l.value && String(c.args ?? "").includes(l.value))}
+    hint="tool call from the model's response — displayed, not scanned (Beagle scans requests)" />`);
 }
 
 // "3 min", "2 h" — how long a session's activity spans, for the sessions list.
@@ -667,24 +767,43 @@ function Detail({ id, onSession }) {
       : [];
   const system = detail.system;
   const leaks = detail.leaks ?? [];
-  const older = messages.slice(0, -1);
-  const newest = messages.slice(-1);
-  // An earlier message that holds a leak must never sit behind the collapsed
+  const responseCalls = detail.responseCalls ?? [];
+  // The server diffed this request against the previous call in the session:
+  // newFrom marks where NEW content starts. null → no truthful claim (first
+  // call, rewritten history, Mode B) → fall back to the naive last-message
+  // split with no context/new labeling.
+  const newFrom = detail.newFrom;
+  const context = newFrom != null ? messages.slice(0, newFrom) : messages.slice(0, -1);
+  const fresh = newFrom != null ? messages.slice(newFrom) : messages.slice(-1);
+  // A context message that holds a leak must never sit behind the collapsed
   // fold — R7: detected secrets are ALWAYS visibly highlighted. When one does,
   // show the whole history inline (correctness beats brevity here).
-  const leakInOlder = older.some((m) => leaks.some((l) => l.value && String(m.content ?? "").includes(l.value)));
-  const showOlderInline = older.length <= 3 || leakInOlder;
+  const leakInOlder = context.some((m) => leaks.some((l) => l.value && String(m.content ?? "").includes(l.value)));
+  const showOlderInline = (newFrom == null && context.length <= 3) || leakInOlder;
   // Nothing structured → raw is the only honest view; don't show an empty
   // timeline with a toggle the user has to discover.
   const hasStructure = messages.length > 0 || system != null;
   const showRaw = raw || !hasStructure;
   // What the readable view actually HIGHLIGHTS inline: the messages (earlier
-  // ones holding a leak are force-shown, above) and the response. NOT the
-  // system prompt — it sits in a collapsed, un-highlighted chip — and NOT
-  // anything only in a header or protocol field. If the secret lives only in
-  // those, the readable view shows no highlight, so point the user at raw.
-  const readableText = [...messages.map((m) => m.content), detail.responseText ?? ""].join("\n");
-  const leakHiddenInRaw = leaks.length > 0 && !showRaw && leaks.every((l) => !readableText.includes(l.value));
+  // ones holding a leak are force-shown, above), the response text, and the
+  // response's tool-call args. NOT the system prompt — it sits in a collapsed,
+  // un-highlighted chip — and NOT anything only in a header or protocol field.
+  // If the secret lives only in those, point the user at raw.
+  const readableText = [
+    ...messages.map((m) => m.content),
+    detail.responseText ?? "",
+    ...responseCalls.map((c) => c.args ?? ""),
+  ].join("\n");
+  // Per-value, not all-or-nothing (mirrors leakNotVisible): if ANY detected
+  // value is absent from the readable text, point at raw — one visible secret
+  // must not suppress the pointer for a second that lives only in the system
+  // prompt / a header / a protocol field.
+  const leakHiddenInRaw = leaks.length > 0 && !showRaw && leaks.some((l) => l.value && !readableText.includes(l.value));
+  // Response-section highlighting: this call's leaks plus the NEXT request's
+  // (where the response's content actually got scanned).
+  const respHighlights = (detail.responseLeaks ?? []).length
+    ? [...leaks, ...detail.responseLeaks]
+    : leaks;
 
   return html`
     <div class="detail">
@@ -753,18 +872,25 @@ function Detail({ id, onSession }) {
         : html`
             ${system != null &&
             html`<${Chip} label="system prompt" body=${system} />`}
-            ${older.length > 0 && showOlderInline
-              ? older.map((m) => html`<${Msg} m=${m} leaks=${leaks} />`)
+            ${context.length > 0 && showOlderInline
+              ? context.map((m) => html`<${TMsg} m=${m} leaks=${leaks} />`)
               : html`
-                  ${older.length > 3 &&
+                  ${context.length > (newFrom != null ? 0 : 3) &&
                   html`<div class="folded history-fold" onClick=${() => setHistoryOpen(!historyOpen)}>
-                    ${historyOpen ? "▾ hide" : "▸ show"} the ${older.length} earlier messages
+                    ${historyOpen ? "▾ hide" : "▸ show"} ${newFrom != null
+                      ? `context — ${context.length} earlier message${context.length === 1 ? "" : "s"} (resent with every request)`
+                      : `the ${context.length} earlier messages`}
                   </div>`}
-                  ${historyOpen && older.map((m) => html`<${Msg} m=${m} leaks=${leaks} />`)}
+                  ${historyOpen && context.map((m) => html`<${TMsg} m=${m} leaks=${leaks} />`)}
                 `}
-            ${newest.map((m) => html`<${Msg} m=${m} leaks=${leaks} />`)}
+            ${newFrom != null && html`<h4 class="req" title="new content in this request — earlier messages are resent automatically">sent this turn</h4>`}
+            ${fresh.map((m) => html`<${TMsg} m=${m} leaks=${leaks} />`)}
+            ${newFrom != null && (detail.responseText != null || responseCalls.length > 0) &&
+            html`<h4 class="resp">response</h4>`}
             ${detail.responseText != null &&
-            html`<${Msg} m=${{ role: "response", content: detail.responseText }} leaks=${leaks} />`}
+            html`<${Msg} m=${{ role: "response", content: detail.responseText }} leaks=${respHighlights} />`}
+            ${responseCalls.length > 0 &&
+            html`<${ResponseCalls} calls=${responseCalls} leaks=${respHighlights} />`}
           `}
     </div>
   `;

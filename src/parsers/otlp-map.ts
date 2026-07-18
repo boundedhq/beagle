@@ -3,6 +3,7 @@
 // is the agent's self-report, not wire bytes. Two vendor schemas share this
 // module and the loopback receiver — Claude Code's (below) and Codex's
 // (`codex.*`, further down); the payload's event names discriminate.
+import { sanitizeTool, type DisplayMessage } from "./parsers";
 //
 // Claude Code's real schema (verified live against 2.1.193; scope
 // "com.anthropic.claude_code.events"). This is NOT the OpenTelemetry GenAI
@@ -166,9 +167,14 @@ function buildTurnCall(t: Turn, ctx: OtlpContext): OtelCall {
   // in the feed and its input never reaches the search index (searchText is
   // built from messages). Name-prefixed for display; the leak-surface scanText
   // stays inputs-only.
-  const messages: Array<{ role: string; content: string }> = [];
+  const messages: DisplayMessage[] = [];
   if (promptDisplay) messages.push({ role: "user", content: promptDisplay });
-  for (const c of t.tools) messages.push({ role: "tool", content: c.name ? `${c.name}: ${c.input}` : c.input });
+  for (const c of t.tools) {
+    messages.push({
+      role: "tool", content: c.name ? `${c.name}: ${c.input}` : c.input,
+      tool: sanitizeTool(c.name), kind: "call",
+    });
+  }
   return {
     id: ulid(ts),
     runId: "otel",
@@ -292,7 +298,7 @@ function buildCodexCall(o: {
   model?: string;
   endpoint: string;
   scanText: string;
-  display: { role: string; content: string };
+  display: DisplayMessage;
 }): OtelCall {
   return {
     id: ulid(o.ts),
@@ -410,7 +416,10 @@ function mapCodexRecords(records: OtlpRecord[]): OtelCall[] {
         model: g.model,
         endpoint: `otel:codex:tool_result:${g.tool}`,
         scanText: `${g.tool}\n${g.parts.join("\n")}`,
-        display: { role: "tool", content: `${g.tool}: ${g.lastOutput.slice(0, 4000)}` },
+        display: {
+          role: "tool", content: `${g.tool}: ${g.lastOutput.slice(0, 4000)}`,
+          tool: sanitizeTool(g.tool), kind: "result",
+        },
       }),
     });
   }
@@ -514,7 +523,10 @@ export function mapHookToCall(payload: unknown, ctx: OtlpContext): OtelCall | nu
       endpoint: `otel:tool_output:${toolName}`,
       request: {
         bodyBytes: new TextEncoder().encode(scanText),
-        messages: [{ role: "tool", content: `${toolName}: ${toolResponse.slice(0, 4000)}` }],
+        messages: [{
+          role: "tool", content: `${toolName}: ${toolResponse.slice(0, 4000)}`,
+          tool: sanitizeTool(toolName), kind: "result",
+        }] as DisplayMessage[],
       },
       response: { text: "", bodyBytes: new Uint8Array() },
       meta: { tsRequest: ts, tsResponse: ts },
