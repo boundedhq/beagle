@@ -17,35 +17,55 @@ command, without changing your setup.
 
 ## Quick start
 
+Install, then let Beagle find your agents and tell you exactly what to run:
+
 ```sh
-npm install -g @boundedhq/beagle   # single binary — more options under Install
-beagle detect                       # finds your agents, prints the command for each
-beagle run claude                   # wrap one session — that's it
+npm install -g @boundedhq/beagle   # single self-contained binary — more options under Install
+beagle detect
 ```
 
-`beagle run` wraps a single agent session and changes nothing on your system.
+```
+Found 4 agents — to capture one session, run the command shown:
+
+  claude    → beagle run claude
+              signed in with a subscription — captured via the agent's own usage report
+  codex     → beagle run codex
+              signed in with a subscription — captured via the agent's own usage report
+  opencode  → beagle run opencode
+              captured on the wire, full fidelity
+  pi        → beagle run pi
+              captured on the wire, full fidelity
+
+To capture every session automatically:  beagle watch <agent>
+```
+
+(That's this machine — Claude Code and Codex happen to be signed in with a
+subscription here; yours may say *"captured on the wire"* instead. Either way,
+you run the exact command it prints.) `beagle run` wraps **one** session and
+changes nothing on your system:
+
+```sh
+beagle run claude          # wrap one session — that's it
+```
+
 Every model call is captured locally; if a secret goes out, you get an OS
 notification the moment it happens. Afterwards:
 
 ```sh
-$ beagle leaks                     # did anything leak? every call was already scanned
-1 leak event:
-  2026-07-12T14:22:15.000Z  aws-access-key-id → anthropic  ×3  first: 01KXAK6K
+$ beagle leaks             # did anything leak? every call was already scanned
+1 leak event across 1 session — newest first:
 
-$ beagle ui                        # or browse it — leaks are highlighted inline
+  Fix the deploy script — claude · session 01KXAK6K2P
+      Jul 17 at 11:57 PM   AWS access key → anthropic   ×1   call 01KXT07ZKK7RB6Y12N51Y8NNJX
+
+$ beagle ui                # or browse it all in the dashboard — leaks highlighted inline
 ```
 
-## Which command for your agent?
+## Capture modes
 
-Beagle wraps four terminal agents — **Claude Code, Codex, opencode, and pi** —
-and the command is the same for all of them:
-
-```sh
-beagle run <agent>      # claude, codex, opencode, or pi — one session
-beagle watch <agent>    # the same, every session
-```
-
-Beagle detects how the agent is signed in and picks the right capture mode:
+The command is the same for every agent — `beagle run <agent>` for one
+session, `beagle watch <agent>` for always-on. What changes is *how* Beagle
+captures, and it picks that automatically from how the agent is signed in:
 
 | Your agent | Signed in with | What happens |
 |---|---|---|
@@ -62,12 +82,13 @@ to change it; `--wire` / `--telemetry` force a mode for one run). And if a
 wrong guess ever slips through, a session that captured nothing prints a
 warning afterwards naming the fix.
 
-`beagle watch` shows you the changes it wants to make before making them — a
-PATH shim for that agent, a background service so watched agents stay covered
-across reboots, and, if the shim isn't winning your PATH, one guarded block in
-your shell rc (`~/.zshrc` / `~/.bash_profile` / `config.fish`). Each is
-marker-owned and recorded; `beagle unwatch` (name it, pick from a list, or
-`--all`) reverts every one.
+`beagle watch <agent>` makes that agent always-on. It walks you through each
+change and asks `y/N` before making it — a PATH shim, a background service that
+survives reboots, and (only if the shim isn't already winning your PATH) one
+guarded block in your shell rc (`~/.zshrc` / `~/.bash_profile` / `config.fish`)
+— then offers to refresh your current shell so coverage is live right away.
+Every change is marker-owned and recorded; `beagle unwatch` (name an agent,
+pick from a list, or `--all`) reverts them all.
 
 **What's telemetry capture?** A subscription login only works over the
 vendor's own connection, so a proxy can't sit on that wire. Instead, Beagle
@@ -119,7 +140,7 @@ What Beagle is **not**:
 ```sh
 beagle detect              # find your agents and the command for each
 beagle run <agent>         # capture one session; nothing changed on your system
-beagle watch <agent>       # always-on for that agent (a PATH shim; asks first)
+beagle watch <agent>       # make that agent always-on (guided; asks before each change)
 beagle unwatch [<agent>]   # stop watching; restores your setup
                            # (no agent: pick from a list; --all for everything)
 beagle status              # trust strip: coverage, store size, retention, changes
