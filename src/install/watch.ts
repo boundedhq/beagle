@@ -156,11 +156,17 @@ export function watchAgent(agent: string, env: WatchEnv, requested: WatchModeReq
   let svc = servicePlan(env.platform, env.home, env.beagleBinary, env.stateDir);
   const svcSkippedTmp = Boolean(svc && isTmpPath(env.stateDir) && !isTmpPath(env.home));
   if (svcSkippedTmp) svc = null;
+  const runner = env.serviceRunner ?? osServiceRunner;
   const svcOnDisk = svc && existsSync(svc.path) ? readFileSync(svc.path, "utf8") : null;
   const svcInstall = Boolean(svc && svcOnDisk === null);
   const svcBakedState = svcOnDisk !== null ? serviceStateDir(svcOnDisk) : null;
   const svcRepair = Boolean(svc && svcBakedState !== null && resolve(svcBakedState) !== resolve(env.stateDir));
-  const svcChanges = svcInstall || svcRepair;
+  // Paused (e.g. by `beagle stop`) but otherwise healthy: watch re-enables
+  // always-on — the stop message promises exactly this.
+  const svcReenable = Boolean(
+    svc && !svcInstall && !svcRepair && runner.isActive && !runner.isActive(svc),
+  );
+  const svcChanges = svcInstall || svcRepair || svcReenable;
   const diffLines = [
     `Beagle will make ${svcChanges ? "these changes" : "one change"}:`,
     `  + create a PATH shim at ${plan.shimPath}`,
@@ -178,6 +184,11 @@ export function watchAgent(agent: string, env: WatchEnv, requested: WatchModeReq
     diffLines.push(
       `  + repair the background service at ${svc.path}`,
       `    (it keeps a daemon alive for ${svcBakedState} — a stale/test path; it will point at ${env.stateDir})`,
+    );
+  }
+  if (svc && svcReenable) {
+    diffLines.push(
+      `  + re-enable the background service (currently paused — e.g. by 'beagle stop')`,
     );
   }
   if (mode === "wire" && telemetrySupported(agent)) {
@@ -229,10 +240,18 @@ export function watchAgent(agent: string, env: WatchEnv, requested: WatchModeReq
   // unwatched. recordReplacing on repair: the entry may already exist.
   if (svc && svcInstall) {
     manifest.record({ kind: "service", agent: null, path: svc.path, backup: svc.kind });
-    installService(svc, env.serviceRunner ?? osServiceRunner);
+    installService(svc, runner);
   } else if (svc && svcRepair) {
     manifest.recordReplacing({ kind: "service", agent: null, path: svc.path, backup: svc.kind });
-    reinstallService(svc, env.serviceRunner ?? osServiceRunner);
+    reinstallService(svc, runner);
+  } else if (svc && svcReenable) {
+    manifest.recordReplacing({ kind: "service", agent: null, path: svc.path, backup: svc.kind });
+    runner.activate(svc);
+  } else if (svc && !manifest.list().some((e) => e.kind === "service")) {
+    // A healthy unit on disk that the manifest doesn't know about — orphaned
+    // by an older CLI's history. Adopt it (bookkeeping only, no OS action) so
+    // unwatch/uninstall can revert it and `stop` can pause it via the entry.
+    manifest.recordReplacing({ kind: "service", agent: null, path: svc.path, backup: svc.kind });
   }
 
   // Verify coverage against the user's actual shell (the honesty clause).

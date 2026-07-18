@@ -110,6 +110,9 @@ export function servicePlan(
 export interface ServiceRunner {
   activate(plan: ServicePlan): void;
   deactivate(plan: { kind: ServiceKind; path: string }): void;
+  /** Is the unit currently loaded/enabled? Optional — a runner without it
+   *  (older tests) reads as "active", so nothing re-activates spuriously. */
+  isActive?(plan: { kind: ServiceKind; path: string }): boolean;
 }
 
 export const osServiceRunner: ServiceRunner = {
@@ -127,6 +130,13 @@ export const osServiceRunner: ServiceRunner = {
       spawnQuiet(["systemctl", "--user", "disable", "--now", "beagle.service"]);
     }
   },
+  isActive(plan) {
+    if (plan.kind === "launchd") {
+      const uid = typeof process.getuid === "function" ? process.getuid() : 501;
+      return spawnOk(["launchctl", "print", `gui/${uid}/${SERVICE_LABEL}`]);
+    }
+    return spawnOk(["systemctl", "--user", "is-active", "--quiet", "beagle.service"]);
+  },
 };
 
 function spawnQuiet(argv: string[]): void {
@@ -134,6 +144,14 @@ function spawnQuiet(argv: string[]): void {
     Bun.spawnSync(argv, { stdio: ["ignore", "ignore", "ignore"] });
   } catch {
     /* best effort — the file is written regardless; user can activate manually */
+  }
+}
+
+function spawnOk(argv: string[]): boolean {
+  try {
+    return Bun.spawnSync(argv, { stdio: ["ignore", "ignore", "ignore"] }).exitCode === 0;
+  } catch {
+    return false;
   }
 }
 

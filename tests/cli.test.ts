@@ -711,13 +711,13 @@ describe("cmdStatus — daemon wording + service health", () => {
 
   test("daemon down + no watches → the DIRECT warning", () => {
     const dir = mkdtempSync(join(tmpdir(), "beagle-status-"));
-    expect(cmdStatus(dir, null)).toContain("go DIRECT (unmonitored)");
+    expect(cmdStatus(dir, null, () => true)).toContain("go DIRECT (unmonitored)");
   });
 
   test("daemon down + watched agents → starts-on-demand wording, not DIRECT", () => {
     const dir = mkdtempSync(join(tmpdir(), "beagle-status-"));
     writeFileSync(join(dir, "changes.json"), JSON.stringify([shimEntry(dir)]));
-    const s = cmdStatus(dir, null);
+    const s = cmdStatus(dir, null, () => true);
     expect(s).toContain("starts on demand at the next watched-agent launch");
     expect(s).not.toContain("go DIRECT");
   });
@@ -728,7 +728,7 @@ describe("cmdStatus — daemon wording + service health", () => {
       shimEntry(dir),
       { kind: "service", agent: null, path: join(dir, "beagle.service"), backup: "systemd" },
     ]));
-    const s = cmdStatus(dir, null);
+    const s = cmdStatus(dir, null, () => true);
     expect(s).toContain("background service file is missing");
     expect(s).toContain("beagle watch opencode");
   });
@@ -741,7 +741,7 @@ describe("cmdStatus — daemon wording + service health", () => {
       shimEntry(dir),
       { kind: "service", agent: null, path: svcPath, backup: "systemd" },
     ]));
-    const s = cmdStatus(dir, null);
+    const s = cmdStatus(dir, null, () => true);
     expect(s).toContain("/tmp/beagle-lease.STALE");
     expect(s).toContain("re-run `beagle watch opencode` to repair");
   });
@@ -754,7 +754,44 @@ describe("cmdStatus — daemon wording + service health", () => {
       shimEntry(dir),
       { kind: "service", agent: null, path: svcPath, backup: "systemd" },
     ]));
-    const s = cmdStatus(dir, null);
+    const s = cmdStatus(dir, null, () => true);
     expect(s).not.toContain("▲ background service");
+  });
+});
+
+  test("a healthy but PAUSED service (beagle stop) gets the resume hint", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-status-"));
+    const svcPath = join(dir, "beagle.service");
+    writeFileSync(svcPath, systemdUnit2({ beagleBinary: "/b", stateDir: dir }));
+    writeFileSync(join(dir, "changes.json"), JSON.stringify([
+      { kind: "shim", agent: "opencode", path: join(dir, "shims", "opencode"), backup: null },
+      { kind: "service", agent: null, path: svcPath, backup: "systemd" },
+    ]));
+    const s = cmdStatus(dir, null, () => false); // service inactive
+    expect(s).toContain("background service is paused");
+    expect(s).toContain("beagle watch opencode");
+  });
+
+// findInstalledService's canonical fallback must be scoped to ITS state dir —
+// a stop for a temp/test state dir once unloaded the REAL user service live.
+import { findInstalledService } from "../src/cli/commands";
+
+describe("findInstalledService scoping", () => {
+  test("a temp state dir never claims a canonical unit baked for another dir", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-fis-"));
+    // no manifest entry; the canonical unit (if any exists on this machine)
+    // is baked for a DIFFERENT state dir → must return null, never that unit
+    const found = findInstalledService(dir);
+    expect(found).toBeNull();
+  });
+
+  test("a manifest entry wins regardless", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-fis-"));
+    const svcPath = join(dir, "svc.plist");
+    writeFileSync(svcPath, "unit");
+    writeFileSync(join(dir, "changes.json"), JSON.stringify([
+      { kind: "service", agent: null, path: svcPath, backup: "launchd" },
+    ]));
+    expect(findInstalledService(dir)).toEqual({ kind: "launchd", path: svcPath });
   });
 });

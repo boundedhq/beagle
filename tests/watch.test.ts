@@ -453,3 +453,47 @@ describe("serviceStateDir", () => {
     expect(serviceStateDir("")).toBeNull();
   });
 });
+
+describe("watchAgent — re-enable a paused service", () => {
+  test("watch re-activates an installed, healthy, but inactive service", () => {
+    const env = makeEnv();
+    watchAgent("claude", env); // installs + activates
+    const before = activations.length;
+    // Same install, now reported inactive (e.g. after `beagle stop`).
+    const env2 = { ...env, serviceRunner: {
+      activate: (p: { path: string }) => activations.push(p.path),
+      deactivate: () => {},
+      isActive: () => false,
+    } };
+    const r = watchAgent("claude", env2);
+    expect(r.applied).toBe(true);
+    expect(activations.length).toBe(before + 1); // re-activated
+  });
+
+  test("an active service is left alone (no spurious re-activation)", () => {
+    const env = makeEnv();
+    watchAgent("claude", env);
+    const before = activations.length;
+    const env2 = { ...env, serviceRunner: {
+      activate: (p: { path: string }) => activations.push(p.path),
+      deactivate: () => {},
+      isActive: () => true,
+    } };
+    watchAgent("claude", env2);
+    expect(activations.length).toBe(before); // untouched
+  });
+});
+
+describe("watchAgent — orphaned service adoption", () => {
+  test("a healthy on-disk unit missing from the manifest is adopted (bookkeeping only)", () => {
+    const env = makeEnv();
+    const plan = servicePlan(env.platform, env.home, env.beagleBinary, env.stateDir)!;
+    mkdirSync(join(env.home, ".config", "systemd", "user"), { recursive: true });
+    writeFileSync(plan.path, systemdUnit({ beagleBinary: env.beagleBinary, stateDir: env.stateDir }));
+    const before = activations.length;
+    watchAgent("claude", env); // manifest had no service entry
+    const svcEntries = new ChangeManifest(env.stateDir).list().filter((e) => e.kind === "service");
+    expect(svcEntries.length).toBe(1); // adopted
+    expect(activations.length).toBe(before); // no OS action — it was healthy
+  });
+});

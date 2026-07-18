@@ -12,7 +12,7 @@ import { GraduationTracker } from "../install/graduation";
 import { claudeAuthMode, codexAuthMode, detectAgents, knownExtraLocations, pathDirsFromEnv } from "../install/detect";
 import { watchAgent, unwatchAgent, type WatchEnv, type WatchModeRequest } from "../install/watch";
 import { ChangeManifest } from "../install/manifest";
-import { serviceStateDir } from "../install/service";
+import { osServiceRunner, servicePlan, serviceStateDir, type ServiceKind, type ServiceRunner } from "../install/service";
 import { listLeakEvents } from "../viewer/feed-query";
 import { sessionHeadlines } from "../viewer/session-view";
 import { buildDetail, leakSpansFor, leakTypesFor } from "../viewer/detail";
@@ -150,7 +150,13 @@ function daemonWhy(d: DaemonInfo): string | null {
     : "idle — winds down within a few minutes";
 }
 
-export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null): string {
+export function cmdStatus(
+  stateDir: string,
+  daemonUp: DaemonInfo | null = null,
+  // Injectable so tests don't shell out to launchctl/systemctl.
+  isServiceActive: (kind: ServiceKind, path: string) => boolean = (kind, path) =>
+    osServiceRunner.isActive?.({ kind, path }) ?? true,
+): string {
   const row = (label: string, text: string) => label.padEnd(STATUS_GUTTER) + text;
   const cont = (text: string) => " ".repeat(STATUS_GUTTER) + text;
   const lines: string[] = [];
@@ -185,6 +191,10 @@ export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null):
         lines.push(
           cont(`▲ background service keeps a daemon alive for ${baked} (a stale/test path),`),
           cont(`  not this store — re-run \`beagle watch ${agentHint}\` to repair it`),
+        );
+      } else if (!isServiceActive((svcEntry.backup as ServiceKind) ?? "systemd", svcEntry.path)) {
+        lines.push(
+          cont(`▲ background service is paused (e.g. by \`beagle stop\`) — re-run \`beagle watch ${agentHint}\` to resume always-on`),
         );
       }
     }
@@ -514,7 +524,34 @@ export async function cmdPurge(stateDir: string, kind: string): Promise<string> 
 /** Stop the running beagle daemon (graceful, via its control socket). An
  *  agent mid-capture holds a lease — refuse then, unless forced, so stopping
  *  can't silently drop a live session's capture. */
-export async function cmdStop(stateDir: string, force = false): Promise<string> {
+/** The installed background service, from the manifest OR the canonical path
+ *  (an orphaned unit — recorded by an older run whose manifest was since
+ *  emptied — is still real and still resurrects daemons). The canonical
+ *  fallback is SCOPED: it claims the unit only when its baked state dir is
+ *  THIS one — a `beagle stop` for a temp/test state dir must never touch the
+ *  real install's service (a live test run did exactly that before this gate). */
+export function findInstalledService(
+  stateDir: string,
+): { kind: ServiceKind; path: string } | null {
+  const entry = new ChangeManifest(stateDir).list().find((e) => e.kind === "service");
+  if (entry && existsSync(entry.path)) {
+    return { kind: (entry.backup as ServiceKind) ?? "systemd", path: entry.path };
+  }
+  const plan = servicePlan(process.platform, homedir(), process.execPath, stateDir);
+  if (plan && existsSync(plan.path)) {
+    const baked = serviceStateDir(readFileSync(plan.path, "utf8"));
+    if (baked !== null && resolvePath(baked) === resolvePath(stateDir)) {
+      return { kind: plan.kind, path: plan.path };
+    }
+  }
+  return null;
+}
+
+export async function cmdStop(
+  stateDir: string,
+  force = false,
+  runner: ServiceRunner = osServiceRunner,
+): Promise<string> {
   const daemon = await pingDaemon(stateDir);
   if (!daemon) return "no beagle daemon is running.";
   // Client-side pre-check for a friendly message; the daemon re-checks
@@ -527,15 +564,33 @@ export async function cmdStop(stateDir: string, force = false): Promise<string> 
       `stopping now would drop that capture.\nFinish those sessions first, or force with: beagle stop --force`
     );
   }
-  const r = await controlRequest(daemon.socketPath, { cmd: "shutdown", args: { force } });
-  if (!r.ok) {
-    // The daemon refused — a capture started between our check and now.
-    return `a capture started just now — daemon not stopped (${r.error}). Retry, or force with: beagle stop --force`;
+  // An always-on service (KeepAlive) resurrects a stopped daemon within a
+  // second — a `stop` that silently turns into a restart is a broken promise.
+  // Pause the service FIRST (its teardown also kills the managed daemon),
+  // then stop whatever daemon remains. Leases were checked above.
+  // Act on OBSERVED reality, not bookkeeping: an orphaned unit at the
+  // canonical path (manifest emptied by an older CLI's unwatch, etc.) must
+  // still be paused, or KeepAlive wins and stop is a silent restart.
+  const svc = findInstalledService(stateDir);
+  let svcPaused = false;
+  if (svc) {
+    runner.deactivate(svc);
+    svcPaused = true;
   }
+  if (await pingDaemon(stateDir)) {
+    const r = await controlRequest(daemon.socketPath, { cmd: "shutdown", args: { force } });
+    if (!r.ok && !svcPaused) {
+      // The daemon refused — a capture started between our check and now.
+      return `a capture started just now — daemon not stopped (${r.error}). Retry, or force with: beagle stop --force`;
+    }
+  }
+  const pausedNote = svcPaused
+    ? `\nBackground service paused — always-on resumes at the next \`beagle watch\` (shims still start a daemon on demand).`
+    : "";
   // confirm it actually went down (the shutdown is async on the daemon side)
   for (let i = 0; i < 20; i++) {
     await Bun.sleep(100);
-    if (!(await pingDaemon(stateDir))) return `daemon stopped (pid ${daemon.pid}).`;
+    if (!(await pingDaemon(stateDir))) return `daemon stopped (pid ${daemon.pid}).${pausedNote}`;
   }
   return `asked the daemon (pid ${daemon.pid}) to stop, but it is still responding — check \`beagle status\`.`;
 }
