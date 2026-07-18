@@ -868,20 +868,22 @@ describe("offerRefreshedShell (post-rc-fix refreshed shell offer)", () => {
     expect(spawned).toBe(0);
   });
 
-  test("plain Enter takes the default (yes) and spawns the user's shell", async () => {
-    const spawnedWith: string[] = [];
-    const r = await offerRefreshedShell(true, "/bin/zsh",
-      async (sh) => { spawnedWith.push(sh); }, () => "\n");
-    expect(r).toBe(true);
-    expect(spawnedWith).toEqual(["/bin/zsh"]);
-  });
-
-  test("'n' declines — no shell spawned", async () => {
+  test("plain Enter takes the default — NO — and spawns nothing ([y/N])", async () => {
+    // default-No, consistent with the two consent prompts above it; a reflexive
+    // Enter must never grow a subshell
     let spawned = 0;
     const r = await offerRefreshedShell(true, "/bin/zsh",
-      async () => { spawned++; }, () => "n\n");
+      async () => { spawned++; }, () => "\n");
     expect(r).toBe(false);
     expect(spawned).toBe(0);
+  });
+
+  test("'y' accepts and spawns the user's shell", async () => {
+    const spawnedWith: string[] = [];
+    const r = await offerRefreshedShell(true, "/bin/zsh",
+      async (sh) => { spawnedWith.push(sh); }, () => "y\n");
+    expect(r).toBe(true);
+    expect(spawnedWith).toEqual(["/bin/zsh"]);
   });
 
   test("'yes' accepts", async () => {
@@ -892,7 +894,7 @@ describe("offerRefreshedShell (post-rc-fix refreshed shell offer)", () => {
     expect(spawned).toBe(1);
   });
 
-  test("EOF (Ctrl-D → empty string) declines, distinct from plain Enter", async () => {
+  test("EOF (Ctrl-D → empty string) declines", async () => {
     let spawned = 0;
     const r = await offerRefreshedShell(true, "/bin/zsh",
       async () => { spawned++; }, () => ""); // readLineSync returns "" on EOF

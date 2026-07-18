@@ -48,7 +48,7 @@ export interface WatchEnv {
   zdotdir?: string;
   resolveReal: (agent: string) => string | null; // where the real binary is
   runType: (agent: string) => string; // `$SHELL -ic 'type <agent>'` output
-  confirm: (diff: string) => boolean; // interactive y/N (or --yes)
+  confirm: (diff: string, prompt?: string) => boolean; // interactive y/N (or --yes)
   serviceRunner?: ServiceRunner; // injectable for tests; defaults to the OS one
   /** Is this agent on a subscription login the proxy can't see? Drives the
    *  auto mode choice (codex: read from ~/.codex/auth.json; claude: not
@@ -272,7 +272,9 @@ export function watchAgent(agent: string, env: WatchEnv, requested: WatchModeReq
   let msg: string;
   let shellReloadHint = false;
   if (verdict.covered) {
-    msg = `watching ${agent}${modeTag} — verified: ${verdict.reason}. New shells are covered; run 'rehash' or open a new terminal for existing ones.`;
+    msg =
+      `✓ watching ${agent}${modeTag} — shim placed and on your PATH.\n` +
+      `  New terminals are covered; in open ones, run 'rehash' (zsh) or open a new one.`;
   } else {
     // Never report a failure without the fix (R2) — and when the fix is a
     // PATH-order problem, OFFER to apply it rather than dictating homework:
@@ -291,24 +293,27 @@ export function watchAgent(agent: string, env: WatchEnv, requested: WatchModeReq
       ? null
       : rcTargetFor(env.shell, env.home, env.platform, env.shimDir, env.zdotdir);
     const manual =
-      `To fix, add Beagle's shim directory to the FRONT of your PATH — put this line in your shell rc (~/.zshrc or ~/.bashrc):\n` +
+      `To cover it, put Beagle's shim dir at the FRONT of your PATH — add this to your shell rc (~/.zshrc or ~/.bashrc):\n` +
       `  export PATH="${env.shimDir}:$PATH"\n` +
       `then open a new terminal and run 'beagle status' to re-verify.`;
-    msg = `shim placed, but coverage is NOT yet active: ${verdict.reason}\n${manual}`;
+    msg =
+      `Shim placed, but not covered yet — ${verdict.reason}.\n${manual}`;
     if (
       rc &&
       env.confirm(
-        `Coverage isn't active yet: ${verdict.reason}\n` +
-          `Beagle can fix this by adding one guarded block to ${rc.path}:\n` +
-          `  ${rc.line}\n` +
-          `(removed automatically by 'beagle unwatch' / 'beagle uninstall')`,
+        `Shim placed — but your PATH still finds the real ${agent} first (${plan.real}),\n` +
+          `so Beagle won't see its traffic. One guarded line in ${rc.path} puts\n` +
+          `Beagle's shims ahead of it:\n\n` +
+          `  ${rc.line}\n\n` +
+          `Beagle owns this block; 'beagle unwatch' / 'beagle uninstall' removes it.`,
+        `Add it to ${rc.path}? [y/N] `,
       )
     ) {
       if (pathBlockMalformed(rc.path)) {
         // Refuse an ambiguous prior block — and DON'T record a manifest entry
         // for an edit we're not making (that would make `status` lie).
         msg =
-          `shim placed, but ${rc.path} has a malformed beagle block (a begin marker with no end) — not touching it.\n` +
+          `Not touching ${rc.path} — it has a malformed beagle block (a begin marker with no end).\n` +
           `Remove the stray '# >>> beagle shims >>>' line, or apply the fix by hand:\n${manual}`;
       } else {
         // Record BEFORE mutating (§6.12); we now know we will actually write.
@@ -323,10 +328,11 @@ export function watchAgent(agent: string, env: WatchEnv, requested: WatchModeReq
         // ~/.bash_profile we wrote, so it won't verify — don't overclaim there.
         const reVerdict = parseCoverageVerdict(agent, plan.shimPath, env.runType(agent));
         msg = reVerdict.covered
-          ? `shim placed. PATH updated in ${rc.path} — verified: new terminals are covered ` +
-            `(a guarded block Beagle owns; removed on unwatch/uninstall).`
-          : `shim placed. PATH updated in ${rc.path} — a guarded block Beagle owns and removes on unwatch/uninstall.\n` +
-            `New login shells will pick it up — open one, or run 'exec $SHELL -l'.`;
+          ? `✓ watching ${agent}${modeTag} — shim placed, PATH updated in ${rc.path}, new terminals covered.\n` +
+            `  (Beagle owns that block; 'beagle unwatch' removes it.)`
+          : `✓ watching ${agent}${modeTag} — shim placed, PATH updated in ${rc.path}.\n` +
+            `  (Beagle owns that block; 'beagle unwatch' removes it.) New login shells pick it up —\n` +
+            `  open one, or run 'exec $SHELL -l'.`;
       }
     }
   }

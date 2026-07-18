@@ -800,10 +800,10 @@ function buildWatchEnv(stateDir: string, yes: boolean): WatchEnv {
         return "";
       }
     },
-    confirm: (diff) => {
+    confirm: (diff, prompt = "Proceed? [y/N] ") => {
       process.stdout.write(diff + "\n");
       if (yes) return true;
-      process.stdout.write("Proceed? [y/N] ");
+      process.stdout.write(prompt);
       const line = readLineSync();
       return /^y(es)?$/i.test(line.trim());
     },
@@ -909,13 +909,12 @@ export async function offerRefreshedShell(
   readLine: () => string = readLineSync,
 ): Promise<boolean> {
   if (!isTTY) return false;
+  // [y/N], default No — matches the two consent prompts above it, and never
+  // spawns a subshell on a reflexive Enter. EOF (Ctrl-D) also declines.
   process.stdout.write(
-    "Cover THIS terminal now? Beagle can start a refreshed shell here ('exit' returns). [Y/n] ",
+    "This terminal still has the old PATH. Start a refreshed shell here so it's covered now? ('exit' returns) [y/N] ",
   );
-  const raw = readLine();
-  if (raw === "") return false; // EOF (Ctrl-D) — an abort, distinct from plain Enter
-  const line = raw.trim();
-  if (line !== "" && !/^y(es)?$/i.test(line)) return false;
+  if (!/^y(es)?$/i.test(readLine().trim())) return false;
   console.log(`(refreshed ${stripControlChars(shell)} — watched agents resolve to their shims here)`);
   try {
     await spawnShell(shell);

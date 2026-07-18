@@ -71,8 +71,8 @@ describe("watchAgent", () => {
     const rcPath = join(env.home, ".zshrc");
     expect(r.message).toContain(`PATH updated in ${rcPath}`);
     // this fake env's runType never reflects the rc edit, so the re-probe still
-    // reads not-covered → the honest "new login shells" wording, not "verified"
-    expect(r.message).toContain("New login shells will pick it up");
+    // reads not-covered → the honest "new login shells" wording, not "covered"
+    expect(r.message).toContain("New login shells pick it up");
     // the CLI offers a refreshed shell for THIS terminal — signalled via the hint
     expect(r.shellReloadHint).toBe(true);
     const rc = readFileSync(rcPath, "utf8");
@@ -92,8 +92,20 @@ describe("watchAgent", () => {
     env.runType = (agent) =>
       existsSync(rcPath) ? `${agent} is ${join(env.shimDir, agent)}` : `${agent} is /opt/homebrew/bin/${agent}`;
     const r = watchAgent("claude", env);
-    expect(r.message).toContain("verified: new terminals are covered");
+    expect(r.message).toContain("new terminals covered");
     expect(r.shellReloadHint).toBe(true);
+  });
+
+  test("the rc-fix prompt is a distinct 'Add it to <rc>?' question, not a repeat 'Proceed?'", () => {
+    const prompts: (string | undefined)[] = [];
+    const env = makeEnv({
+      runType: () => "claude is /opt/homebrew/bin/claude",
+      confirm: (_diff, prompt) => { prompts.push(prompt); return true; },
+    });
+    watchAgent("claude", env);
+    // first confirm = the plan (default prompt); second = the rc edit (custom)
+    expect(prompts[0]).toBeUndefined(); // uses the default "Proceed? [y/N]"
+    expect(prompts[1]).toContain(`Add it to ${join(env.home, ".zshrc")}?`);
   });
 
   test("PATH-order non-coverage: declining the rc offer keeps the manual instructions", () => {
