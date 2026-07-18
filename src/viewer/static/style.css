@@ -354,20 +354,8 @@ button.linklike:hover { text-decoration: underline; }
   border-left: 2px dashed var(--border);
 }
 .detail .history-fold:hover { color: var(--accent); border-left-color: var(--accent); }
-.detail .msg { margin: 10px 0; padding: 6px 10px; border-left: 2px solid var(--border); }
-/* Role labels: same typography as the transcript's .mc-name — the two
-   screens must read as one product. */
-.detail .msg .role {
-  color: var(--accent); font-family: var(--sans); font-size: 10.5px;
-  font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em;
-  margin-bottom: 3px;
-}
-.detail .msg.assistant .role, .detail .msg.response .role { color: var(--ok); }
-/* bodies keep their newlines — pretty-printed JSON must not re-collapse —
-   and match the transcript/feed content size */
-.detail .msg > div:last-child {
-  white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--content);
-}
+/* (detail messages render through the transcript's TMsg cards — one card
+   system for both screens; the old .detail .msg styles are gone with Msg) */
 /* Raw payload / stream. Wrap at token boundaries, not mid-token: break-all
    turned indented JSON into a wall of characters. overflow-wrap only breaks a
    genuinely-unbreakable long token (e.g. a minified line) as a last resort. */

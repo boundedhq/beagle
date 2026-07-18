@@ -534,8 +534,8 @@ function SessionTranscript({ sessionId, row, onBack, onPurged }) {
               ${t.messages.length > 0 &&
               html`<div class="dir-label sent"
                 title=${t.source === "wire"
-                  ? "what the agent sent to the provider this turn"
-                  : "what the agent reported sending this turn"}>⇢ sent</div>`}
+                  ? "what this turn's request sent to the provider (resent context is folded)"
+                  : "what the agent reported sending this turn"}>⇢ request</div>`}
               ${groupResent(t.messages).map((g, j) =>
                 g.resent
                   ? html`<${ResentFold} key=${`${t.id}:${j}`} msgs=${g.msgs} leaks=${t.leaks} />`
@@ -545,7 +545,7 @@ function SessionTranscript({ sessionId, row, onBack, onPurged }) {
               html`<div class="dir-label recv"
                 title=${t.source === "wire"
                   ? "what the model sent back — its reply and/or the tools it asked the agent to run"
-                  : "what the agent reported receiving back"}>⇠ received</div>`}
+                  : "what the agent reported receiving back"}>⇠ response</div>`}
               ${t.responseText != null && t.responseText !== "" &&
               html`<${TMsg} key=${`${t.id}:resp`} leaks=${respLeaks(t)}
                 m=${{ role: "response", content: t.responseText }} />`}
@@ -651,11 +651,17 @@ function TMsg({ m, leaks }) {
     return html`<${ToolCard} role=${m.role} content=${content} leaks=${leaks} hasLeak=${hasLeak}
       tool=${m.tool} kind=${m.kind} detail=${m.detail} />`;
   }
-  // user / response / assistant-history / any future role: same card, labeled
-  // header; bodies get the same JSON pretty-printing as tool cards.
+  // user / response / assistant-history / any future role: same card shell.
+  // The turn's ⇢ request / ⇠ response group labels already carry direction, so
+  // the two COMMON roles render bare (a plain card under "request" IS the
+  // user's text; under "response" IS the model's reply) — repeating the word
+  // would just be noise. Rare roles (assistant history after a compaction,
+  // legacy "unknown") keep their header: a bare card must always mean the
+  // group's obvious role, never something surprising.
+  const bare = m.role === "user" || m.role === "response";
   return html`
     <div class=${hasLeak ? "mcard has-leak" : "mcard"}>
-      <div class="mc-head"><span class=${`mc-name ${m.role}`}>${m.role}</span></div>
+      ${!bare && html`<div class="mc-head"><span class=${`mc-name ${m.role}`}>${m.role}</span></div>`}
       <div class="mc-body">
         <${JsonBody} content=${content} leaks=${leaks}
           threshold=${m.role === "user" ? 1500 : 2500} hasLeak=${hasLeak} />
@@ -898,7 +904,7 @@ function Detail({ id, onSession }) {
             ${newFrom != null && (detail.responseText != null || responseCalls.length > 0) &&
             html`<h4 class="resp">response</h4>`}
             ${detail.responseText != null &&
-            html`<${Msg} m=${{ role: "response", content: detail.responseText }} leaks=${respHighlights} />`}
+            html`<${TMsg} m=${{ role: "response", content: detail.responseText }} leaks=${respHighlights} />`}
             ${responseCalls.length > 0 &&
             html`<${ResponseCalls} calls=${responseCalls} leaks=${respHighlights} />`}
           `}
@@ -914,17 +920,6 @@ function Chip({ label, body }) {
     <div class="syscard">
       <div class="sys-head" onClick=${() => setOpen(!open)}>${open ? "▾" : "▸"} ${label}</div>
       ${open && html`<pre>${body}</pre>`}
-    </div>
-  `;
-}
-
-function Msg({ m, leaks }) {
-  const content =
-    typeof m.content === "string" ? m.content : JSON.stringify(m.content, null, 2);
-  return html`
-    <div class=${"msg " + m.role}>
-      <div class="role">${m.role}</div>
-      <div><${JsonBody} content=${content} leaks=${leaks} threshold=${1e9} /></div>
     </div>
   `;
 }
