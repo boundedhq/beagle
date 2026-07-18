@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "notice": "Rule corpus derived from the MIT-licensed gitleaks ruleset (see THIRD-PARTY-NOTICES.md). Rules are data, not code (R5).",
   "rules": [
     {
@@ -24,9 +24,9 @@
     },
     {
       "id": "github-pat",
-      "description": "GitHub personal access token",
-      "regex": "\\b(gh[pousr]_[A-Za-z0-9_]{36,251})\\b",
-      "keywords": ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"],
+      "description": "GitHub personal access token (classic or fine-grained)",
+      "regex": "\\b(gh[pousr]_[A-Za-z0-9_]{36,251}|github_pat_[A-Za-z0-9_]{60,255})\\b",
+      "keywords": ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"],
       "secretGroup": 1,
       "severity": "high",
       "tier": "structured"
@@ -68,12 +68,147 @@
       "tier": "structured"
     },
     {
+      "id": "slack-webhook",
+      "description": "Slack incoming-webhook URL (token in path)",
+      "regex": "(https://hooks\\.slack\\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]{20,})",
+      "keywords": ["hooks.slack.com"],
+      "secretGroup": 1,
+      "severity": "medium",
+      "tier": "structured"
+    },
+    {
       "id": "google-api-key",
       "description": "Google API key",
       "regex": "\\b(AIza[A-Za-z0-9\\-_]{35})\\b",
       "keywords": ["aiza"],
       "secretGroup": 1,
       "severity": "medium",
+      "tier": "structured"
+    },
+    {
+      "id": "gitlab-pat",
+      "description": "GitLab personal access token",
+      "regex": "\\b(glpat-[A-Za-z0-9_\\-]{20,})\\b",
+      "keywords": ["glpat-"],
+      "secretGroup": 1,
+      "severity": "high",
+      "tier": "structured"
+    },
+    {
+      "id": "npm-token",
+      "description": "npm access token",
+      "regex": "\\b(npm_[A-Za-z0-9]{36})\\b",
+      "keywords": ["npm_"],
+      "secretGroup": 1,
+      "severity": "high",
+      "tier": "structured"
+    },
+    {
+      "id": "pypi-token",
+      "description": "PyPI API token",
+      "regex": "\\b(pypi-AgE[A-Za-z0-9_\\-]{50,})",
+      "keywords": ["pypi-age"],
+      "secretGroup": 1,
+      "severity": "high",
+      "tier": "structured"
+    },
+    {
+      "id": "sendgrid-key",
+      "description": "SendGrid API key",
+      "regex": "\\b(SG\\.[A-Za-z0-9_\\-]{22}\\.[A-Za-z0-9_\\-]{43})\\b",
+      "keywords": ["sg."],
+      "secretGroup": 1,
+      "severity": "high",
+      "tier": "structured"
+    },
+    {
+      "id": "huggingface-token",
+      "description": "Hugging Face access token",
+      "regex": "\\b(hf_[A-Za-z0-9]{34,})\\b",
+      "keywords": ["hf_"],
+      "secretGroup": 1,
+      "severity": "medium",
+      "tier": "structured"
+    },
+    {
+      "id": "twilio-api-key",
+      "description": "Twilio API key SID",
+      "regex": "\\b(SK[0-9a-f]{32})\\b",
+      "keywords": ["sk"],
+      "secretGroup": 1,
+      "severity": "medium",
+      "tier": "structured"
+    },
+    {
+      "id": "digitalocean-token",
+      "description": "DigitalOcean API token",
+      "regex": "\\b((?:dop|doo|dor)_v1_[a-f0-9]{64})\\b",
+      "keywords": ["dop_v1_", "doo_v1_", "dor_v1_"],
+      "secretGroup": 1,
+      "severity": "high",
+      "tier": "structured"
+    },
+    {
+      "id": "square-token",
+      "description": "Square access token",
+      "regex": "\\b(sq0(?:atp|csp)-[A-Za-z0-9_\\-]{22,})\\b",
+      "keywords": ["sq0atp-", "sq0csp-"],
+      "secretGroup": 1,
+      "severity": "high",
+      "tier": "structured"
+    },
+    {
+      "id": "shopify-token",
+      "description": "Shopify access token",
+      "regex": "\\b(shp(?:at|ss|ca|pa)_[a-fA-F0-9]{32})\\b",
+      "keywords": ["shpat_", "shpss_", "shpca_", "shppa_"],
+      "secretGroup": 1,
+      "severity": "high",
+      "tier": "structured"
+    },
+    {
+      "id": "postman-key",
+      "description": "Postman API key",
+      "regex": "\\b(PMAK-[A-Za-z0-9]{24}-[A-Za-z0-9]{34})\\b",
+      "keywords": ["pmak-"],
+      "secretGroup": 1,
+      "severity": "medium",
+      "tier": "structured"
+    },
+    {
+      "id": "linear-key",
+      "description": "Linear API key",
+      "regex": "\\b(lin_api_[A-Za-z0-9]{40,})\\b",
+      "keywords": ["lin_api_"],
+      "secretGroup": 1,
+      "severity": "medium",
+      "tier": "structured"
+    },
+    {
+      "id": "mailgun-key",
+      "description": "Mailgun API key (legacy key- format has no distinguishing shape beyond 32 hex, so require a mailgun context keyword or any key--prefixed md5/cache id would fire)",
+      "regex": "\\b(key-[a-f0-9]{32})\\b",
+      "keywords": ["mailgun"],
+      "secretGroup": 1,
+      "severity": "medium",
+      "tier": "structured"
+    },
+    {
+      "id": "telegram-bot-token",
+      "description": "Telegram bot token (no anchor keyword exists for this shape; the :AA secret-part prefix is required to keep 'epoch:hash' pairs from firing)",
+      "regex": "\\b(\\d{8,10}:AA[A-Za-z0-9_\\-]{33})\\b",
+      "keywords": [],
+      "secretGroup": 1,
+      "severity": "medium",
+      "tier": "structured"
+    },
+    {
+      "id": "azure-storage-key",
+      "description": "Azure Storage account key",
+      "regex": "(AccountKey=[A-Za-z0-9+/]{86}==)",
+      "keywords": ["accountkey"],
+      "secretGroup": 1,
+      "severity": "high",
       "tier": "structured"
     },
     {
@@ -99,7 +234,7 @@
       "id": "credit-card",
       "description": "Payment card number (Luhn-validated)",
       "regex": "\\b(\\d{13,16})\\b",
-      "keywords": ["card", "visa", "mastercard", "amex", "pan"],
+      "keywords": ["card", "visa", "mastercard", "amex", "cvc", "cvv"],
       "secretGroup": 1,
       "severity": "high",
       "tier": "structured",
@@ -116,14 +251,35 @@
     },
     {
       "id": "generic-api-key",
-      "description": "Generic secret assignment (entropy-gated; quiet tier only)",
-      "regex": "(?:api[_-]?key|apikey|key|secret|token|password|passwd|pwd)[\"':=\\s]{1,5}([A-Za-z0-9+/_\\-.=]{16,64})",
+      "description": "Generic secret assignment (entropy-gated; quiet tier only; vendor test-mode keys excluded)",
+      "regex": "(?:api[_-]?key|apikey|key|secret|token|password|passwd|pwd)[\"':=\\s]{1,5}(?!(?:sk|rk|pk)_test_)([A-Za-z0-9+/_\\-.=]{16,64})",
       "flags": "gi",
       "keywords": ["key", "secret", "token", "password", "passwd", "pwd"],
       "secretGroup": 1,
       "severity": "medium",
       "tier": "possible",
       "entropy": 3.5
+    },
+    {
+      "id": "aws-secret-shape",
+      "description": "Anchor-free 40-char AWS-secret-shaped token (quiet tier). Entropy 4.5 is above pure hex's 4.0 ceiling, so digests can never trip it — the cost is ~2% of genuinely random real keys landing under the gate and being missed. Exact-length delimiters keep longer base64 runs (images, signatures) out; '=' is a valid leading delimiter (VAR=secret is the most common leak shape). Leading delimiter is consumed, not a lookbehind — 7x faster on a 1 MB body (R5 scan budget).",
+      "regex": "(?:^|[^A-Za-z0-9/+])([A-Za-z0-9/+]{40})(?![A-Za-z0-9/+=])",
+      "keywords": [],
+      "secretGroup": 1,
+      "severity": "medium",
+      "tier": "possible",
+      "entropy": 4.5
+    },
+    {
+      "id": "base64-wrapped-secret",
+      "description": "Base64 blob that decodes to a structured secret (quiet tier). The decode-and-rescan validator makes this precise: base64 of anything else stays silent. Consumed leading delimiter (not lookbehind) and the entropy pre-gate keep the R5 scan budget: low-entropy runs never reach the decode probe.",
+      "regex": "(?:^|[^A-Za-z0-9+/])([A-Za-z0-9+/]{16,256}={0,2})(?![A-Za-z0-9+/=])",
+      "keywords": [],
+      "secretGroup": 1,
+      "severity": "medium",
+      "tier": "possible",
+      "entropy": 3.3,
+      "validators": ["base64-secret"]
     }
   ]
 }

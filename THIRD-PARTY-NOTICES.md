@@ -11,6 +11,15 @@ material it does ship is listed here in full.
   (no gitleaks code is included) and pinned by sha256 at build time. Full
   license text: [`rules/GITLEAKS-LICENSE`](rules/GITLEAKS-LICENSE).
 
+## Test fixtures (data)
+
+- **leakproof adversarial corpus** — Apache-2.0, Copyright hamstudios.
+  The scanner regression corpus in `tests/fixtures/leakproof-corpus.json` is
+  adapted from [leakproof](https://github.com/acunningham-ship-it/leakproof)'s
+  `tests/adversarial/corpus.py` (test data only; no leakproof code is
+  included). Every credential in it is synthetic — right format, not a real
+  secret. License text: <https://www.apache.org/licenses/LICENSE-2.0>.
+
 ## Viewer (vendored, pinned)
 
 - **Preact** — MIT, Copyright (c) 2015-present Jason Miller

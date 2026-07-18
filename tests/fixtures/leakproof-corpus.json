@@ -1,0 +1,192 @@
+{
+  "_notice": "Adversarial corpus adapted from leakproof (https://github.com/acunningham-ship-it/leakproof, tests/adversarial/corpus.py), Apache-2.0, Copyright hamstudios. All secrets are SYNTHETIC — right format, not real credentials. See THIRD-PARTY-NOTICES.md.",
+  "cases": [
+    {
+      "id": "aws_access_key_id",
+      "kind": "leak",
+      "text": "deploy script:\n  export AWS_ACCESS_KEY_ID=AKIA2E0A8F3B9C1D7K4P\n",
+      "detectors": [
+        "aws-access-key-id"
+      ],
+      "outcome": "caught"
+    },
+    {
+      "id": "aws_secret_in_prose",
+      "kind": "leak",
+      "text": "Hey, the staging secret is wJa1rXUtnF3MI4K7MDENGbPxRf9CYZ8qLm2Vt0Bn — don't share it.",
+      "detectors": [
+        "aws-secret-shape"
+      ],
+      "outcome": "caught"
+    },
+    {
+      "id": "github_pat",
+      "kind": "leak",
+      "text": "+ GH_TOKEN = 'ghp_R8kQ2mZ1nP7wV3xL9tD0cF6jH4bN5sA1eY8u'\n",
+      "detectors": [
+        "github-pat"
+      ],
+      "outcome": "caught"
+    },
+    {
+      "id": "openai_key",
+      "kind": "leak",
+      "text": "OPENAI_API_KEY=\"sk-proj-aZ09Xy7Qw2Er5Ty8Ui1Op3As6Df9Gh2Jk5Lz8Xc1Vb4Nm7Qw0\"\n",
+      "detectors": [
+        "openai-api-key"
+      ],
+      "outcome": "caught"
+    },
+    {
+      "id": "anthropic_key",
+      "kind": "leak",
+      "text": "client = Anthropic(api_key='sk-ant-api03-Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2Ji1Hg0Fe9Dc8Ba7-_Qw2Er')\n",
+      "detectors": [
+        "anthropic-api-key"
+      ],
+      "outcome": "caught"
+    },
+    {
+      "id": "stripe_live",
+      "kind": "leak",
+      "text": "STRIPE_SECRET=sk_live_51Mx9aQ2eRtYuIoP3aSdFgHjKlZxCvBnM\n",
+      "detectors": [
+        "stripe-live-key"
+      ],
+      "outcome": "caught"
+    },
+    {
+      "id": "jwt",
+      "kind": "leak",
+      "text": "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkFkbWluIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c\n",
+      "detectors": [
+        "jwt"
+      ],
+      "outcome": "caught"
+    },
+    {
+      "id": "pem_private_key",
+      "kind": "leak",
+      "text": "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEArandomlookingbase64paddingdatahereforthetestfixture0\n9z8Y7x6W5v4U3t2S1r0Q9p8O7n6M5l4K3j2I1h0G9f8E7d6C5b4A3210zyxwvut==\n-----END RSA PRIVATE KEY-----\n",
+      "detectors": [
+        "private-key"
+      ],
+      "outcome": "caught"
+    },
+    {
+      "id": "db_url_in_test_fixture",
+      "kind": "leak",
+      "text": "# tests/fixtures/conftest.py\nDB = 'postgres://svc_app:Pr0dPassw0rd!@db.prod.internal:5432/payments'\n",
+      "detectors": [
+        "connection-string"
+      ],
+      "outcome": "caught"
+    },
+    {
+      "id": "base64_wrapped_aws",
+      "kind": "leak",
+      "text": "config_blob = 'QUtJQTJFMEE4RjNCOUMxRDdLNFA='  # looks like opaque config\n",
+      "detectors": [
+        "base64-wrapped-secret"
+      ],
+      "outcome": "caught"
+    },
+    {
+      "id": "slack_webhook",
+      "kind": "leak",
+      "text": "SLACK_HOOK=https://hooks.slack.com/services/T00000000/B11111111/aZ09bY18cX27dW36eV45fU54\n",
+      "detectors": [
+        "slack-webhook"
+      ],
+      "outcome": "caught"
+    },
+    {
+      "id": "pii_email_phone",
+      "kind": "leak",
+      "text": "patient: Maria Gonzalez, dob 1984-03-11, cell +1 415 555 0179, mgonzalez84@gmail.com\n",
+      "detectors": [],
+      "outcome": "out-of-scope",
+      "note": "PII (email/phone) detection is out of scope: on conversation traffic it would fire constantly; Beagle is a secrets transparency tool"
+    },
+    {
+      "id": "credit_card",
+      "kind": "leak",
+      "text": "charge.create(number='5500005555555559', exp='04/27', cvc='913')\n",
+      "detectors": [
+        "credit-card"
+      ],
+      "outcome": "caught"
+    },
+    {
+      "id": "full_file_paste",
+      "kind": "leak",
+      "text": "Here's our whole auth module so you have context:\ndef _internal_handler_0(req, secret_salt='s4lt'): ...\ndef _internal_handler_1(req, secret_salt='s4lt'): ...\ndef _internal_handler_2(req, secret_salt='s4lt'): ...\ndef _internal_handler_3(req, secret_salt='s4lt'): ...\ndef _internal_handler_4(req, secret_salt='s4lt'): ...\ndef _internal_handler_5(req, secret_salt='s4lt'): ...\ndef _internal_handler_6(req, secret_salt='s4lt'): ...\ndef _internal_handler_7(req, secret_salt='s4lt'): ...\ndef _internal_handler_8(req, secret_salt='s4lt'): ...\ndef _internal_handler_9(req, secret_salt='s4lt'): ...\ndef _internal_handler_10(req, secret_salt='s4lt'): ...\ndef _internal_handler_11(req, secret_salt='s4lt'): ...\ndef _internal_handler_12(req, secret_salt='s4lt'): ...\ndef _internal_handler_13(req, secret_salt='s4lt'): ...\ndef _internal_handler_14(req, secret_salt='s4lt'): ...\ndef _internal_handler_15(req, secret_salt='s4lt'): ...\ndef _internal_handler_16(req, secret_salt='s4lt'): ...\ndef _internal_handler_17(req, secret_salt='s4lt'): ...\ndef _internal_handler_18(req, secret_salt='s4lt'): ...\ndef _internal_handler_19(req, secret_salt='s4lt'): ...\ndef _internal_handler_20(req, secret_salt='s4lt'): ...\ndef _internal_handler_21(req, secret_salt='s4lt'): ...\ndef _internal_handler_22(req, secret_salt='s4lt'): ...\ndef _internal_handler_23(req, secret_salt='s4lt'): ...\ndef _internal_handler_24(req, secret_salt='s4lt'): ...\ndef _internal_handler_25(req, secret_salt='s4lt'): ...\ndef _internal_handler_26(req, secret_salt='s4lt'): ...\ndef _internal_handler_27(req, secret_salt='s4lt'): ...\ndef _internal_handler_28(req, secret_salt='s4lt'): ...\ndef _internal_handler_29(req, secret_salt='s4lt'): ...\ndef _internal_handler_30(req, secret_salt='s4lt'): ...\ndef _internal_handler_31(req, secret_salt='s4lt'): ...\ndef _internal_handler_32(req, secret_salt='s4lt'): ...\ndef _internal_handler_33(req, secret_salt='s4lt'): ...\ndef _internal_handler_34(req, secret_salt='s4lt'): ...\ndef _internal_handler_35(req, secret_salt='s4lt'): ...\ndef _internal_handler_36(req, secret_salt='s4lt'): ...\ndef _internal_handler_37(req, secret_salt='s4lt'): ...\ndef _internal_handler_38(req, secret_salt='s4lt'): ...\ndef _internal_handler_39(req, secret_salt='s4lt'): ...",
+      "detectors": [],
+      "outcome": "out-of-scope",
+      "note": "bulk-paste line counting is out of scope; volume/endpoint anomaly alerting is the planned Beagle-native answer"
+    },
+    {
+      "id": "aws_documented_example",
+      "kind": "decoy",
+      "text": "see AWS docs: AKIAIOSFODNN7EXAMPLE / wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n",
+      "detectors": [],
+      "outcome": "clean"
+    },
+    {
+      "id": "placeholder_your_key",
+      "kind": "decoy",
+      "text": "OPENAI_API_KEY=\"sk-your-api-key-here\"   # fill this in\n",
+      "detectors": [],
+      "outcome": "clean"
+    },
+    {
+      "id": "xxx_redacted_token",
+      "kind": "decoy",
+      "text": "GH_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n",
+      "detectors": [],
+      "outcome": "clean"
+    },
+    {
+      "id": "env_read_not_literal",
+      "kind": "decoy",
+      "text": "db_password = os.environ['DB_PASSWORD']  # read from env, no secret in source\n",
+      "detectors": [],
+      "outcome": "clean"
+    },
+    {
+      "id": "stripe_test_key",
+      "kind": "decoy",
+      "text": "STRIPE_KEY=sk_test_4eC39HqLyjWDarjtT1zdp7dc  # test mode only\n",
+      "detectors": [],
+      "outcome": "clean"
+    },
+    {
+      "id": "example_dot_com_email",
+      "kind": "decoy",
+      "text": "contact: support@example.com (placeholder address)\n",
+      "detectors": [],
+      "outcome": "clean"
+    },
+    {
+      "id": "vendor_test_card",
+      "kind": "decoy",
+      "text": "test charge with Stripe's card 4242 4242 4242 4242\n",
+      "detectors": [],
+      "outcome": "clean"
+    },
+    {
+      "id": "high_entropy_but_benign",
+      "kind": "decoy",
+      "text": "commit = 'a3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5'  # git sha\n",
+      "detectors": [],
+      "outcome": "clean"
+    },
+    {
+      "id": "uuid",
+      "kind": "decoy",
+      "text": "request_id = \"550e8400-e29b-41d4-a716-446655440000\"\n",
+      "detectors": [],
+      "outcome": "clean"
+    }
+  ]
+}
