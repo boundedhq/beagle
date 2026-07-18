@@ -176,24 +176,34 @@ export function buildSessionTurns(store: Store, sessionId: string, cap = 200): S
       } else if (messages.length > 0) {
         messages = messages.slice(-1);
       }
-      // Label this turn's request-side tool items against the PREVIOUS wire
-      // turn's response: an fc the previous response already displayed is a
-      // resend (the transcript folds it — never drops it, so a wrong match
-      // costs one click, not visibility); a result that lost its tool name
-      // (previous_response_id-chained clients send no fc echo to pair with)
-      // borrows name + detail from the call it answers.
+      // Resolve this turn's request-side tool items against the PREVIOUS wire
+      // turn's response. An fc echo the previous response already DISPLAYED
+      // (matched by call_id) is dropped: the call card sits one card up, at
+      // the end of that turn's response section, so call and result read
+      // adjacently across the turn boundary — repeating the card here would
+      // be the duplication the delta view exists to kill. The ▸ details and
+      // raw views keep the resent bytes. Guards: an UNMATCHED echo stays
+      // visible (unparseable/truncated previous response — a wrong drop must
+      // be impossible by construction), and a leak-bearing echo is NEVER
+      // dropped — the request copy is the scanned occurrence (R7). A result
+      // that lost its tool name (previous_response_id-chained clients send no
+      // fc echo to pair with) borrows name + detail from the call it answers.
       const prevCalls = lastWireTurn?.responseCalls ?? [];
       if (prevCalls.length > 0) {
-        messages = messages.map((m) => {
-          if (m.kind === "call" && m.callId && prevCalls.some((c) => c.callId === m.callId)) {
-            return { ...m, resent: true as const };
-          }
-          if (m.kind === "result" && !m.tool && m.callId) {
-            const origin = prevCalls.find((c) => c.callId === m.callId);
-            if (origin) return { ...m, tool: sanitizeTool(origin.tool), detail: origin.detail };
-          }
-          return m;
-        });
+        messages = messages
+          .map((m) => {
+            if (m.kind === "result" && !m.tool && m.callId) {
+              const origin = prevCalls.find((c) => c.callId === m.callId);
+              if (origin) return { ...m, tool: sanitizeTool(origin.tool), detail: origin.detail };
+            }
+            return m;
+          })
+          .filter((m) => {
+            const isEcho =
+              m.kind === "call" && m.callId && prevCalls.some((c) => c.callId === m.callId);
+            if (!isEcho) return true;
+            return d.leaks.some((l) => l.value && String(m.content).includes(l.value));
+          });
       }
       // Stateless APIs echo the previous RESPONSE back as the next request's
       // assistant message — new to the wire history, but the reader just read

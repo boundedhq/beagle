@@ -536,10 +536,8 @@ function SessionTranscript({ sessionId, row, onBack, onPurged }) {
                 title=${t.source === "wire"
                   ? "what this turn's request sent to the provider (resent context is folded)"
                   : "what the agent reported sending this turn"}>⇢ request</div>`}
-              ${groupResent(t.messages).map((g, j) =>
-                g.resent
-                  ? html`<${ResentFold} key=${`${t.id}:${j}`} msgs=${g.msgs} leaks=${t.leaks} />`
-                  : g.msgs.map((m, k) => html`<${TMsg} key=${`${t.id}:${j}:${k}`} m=${m} leaks=${t.leaks} />`),
+              ${t.messages.map(
+                (m, j) => html`<${TMsg} key=${`${t.id}:${j}`} m=${m} leaks=${t.leaks} />`,
               )}
               ${((t.responseText != null && t.responseText !== "") || (t.responseCalls ?? []).length > 0) &&
               html`<div class="dir-label recv"
@@ -563,18 +561,6 @@ function SessionTranscript({ sessionId, row, onBack, onPurged }) {
       </div>
     </div>
   `;
-}
-
-// Split a turn's messages into runs: consecutive resent fc-echoes fold as one
-// row; everything else renders as individual cards, in original wire order.
-function groupResent(messages) {
-  const groups = [];
-  for (const m of messages) {
-    const last = groups.at(-1);
-    if (last && last.resent === Boolean(m.resent)) last.msgs.push(m);
-    else groups.push({ resent: Boolean(m.resent), msgs: [m] });
-  }
-  return groups;
 }
 
 // The response section highlights with this turn's leaks PLUS the next
@@ -708,7 +694,7 @@ function ToolCard({ role, content, leaks, hasLeak, tool, kind, detail, hint }) {
         onClick=${() => collapsible && setOpen(!open)}>
         <span aria-hidden="true">${glyph}</span>
         <span class=${`mc-name ${isRequest ? "request" : "tool"}`}>${name}</span>
-        ${kind === "call" && detail && html`<span class="mc-detail">${detail}</span>`}
+        ${kind && detail && html`<span class="mc-detail">${detail}</span>`}
         ${!open && html`<span class="mc-preview">${payload.slice(0, 200)}</span>`}
         ${hasLeak && html`<span class="chip leak">secret</span>`}
         ${collapsible && html`<span class="mc-chev" aria-hidden="true">${open ? "▾" : "▸"}</span>`}
@@ -717,29 +703,6 @@ function ToolCard({ role, content, leaks, hasLeak, tool, kind, detail, hint }) {
       html`<div class="mc-body scroll">
         <${JsonBody} content=${payload} leaks=${leaks} threshold=${1e9} hasLeak=${hasLeak} />
       </div>`}
-    </div>
-  `;
-}
-
-// A run of tool calls the request RESENT from the previous response (the
-// turn above already showed them as the model's actions): folded to one row.
-// Folded, never dropped — and force-open when a detected secret lives inside,
-// because THIS copy is the scanned occurrence (R7).
-function ResentFold({ msgs, leaks }) {
-  const holdsLeak = (leaks ?? []).some(
-    (l) => l.value && msgs.some((m) => String(m.content).includes(l.value)),
-  );
-  const [open, setOpen] = useState(holdsLeak);
-  return html`
-    <div class="resent">
-      <div class="folded" onClick=${() => setOpen(!open)}>
-        ${open ? "▾" : "▸"} ${msgs.length} tool call${msgs.length === 1 ? "" : "s"} resent from the previous response
-        ${holdsLeak && html`${" "}<span class="chip leak">secret</span>`}
-      </div>
-      ${open && html`
-        ${holdsLeak && html`<div class="resent-note">resent with this request — scanned and flagged here</div>`}
-        ${msgs.map((m, i) => html`<${TMsg} key=${i} m=${m} leaks=${leaks} />`)}
-      `}
     </div>
   `;
 }

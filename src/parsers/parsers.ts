@@ -12,10 +12,7 @@ export interface DisplayMessage extends Message {
   tool?: string; // sanitized tool name, or undefined when unknown/hostile
   kind?: "call" | "result";
   callId?: string;
-  detail?: string; // the originating call's short detail (a result's hover text)
-  /** Stamped by session-view on wire fc-echoes the previous response already
-   *  showed — the transcript folds these instead of repeating them. */
-  resent?: true;
+  detail?: string; // the originating call's short detail, shown in result headers
 }
 
 // A tool name is display-critical (it becomes a card header): accept only
