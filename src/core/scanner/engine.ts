@@ -52,7 +52,12 @@ export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): 
     // anchor-free entropy rules) have no anchor substring to prescan for.
     if (spec.keywords.length > 0 && !spec.keywords.some((k) => lower.includes(k))) continue;
     re.lastIndex = 0;
-    let ruleFindings = 0;
+    // probeBudget: decode-probe attempts are capped per rule pass because
+    // rejected candidates don't count toward MAX_FINDINGS_PER_RULE — without
+    // a cap, a body padded with thousands of high-entropy runs (git SHAs,
+    // wrapped base64) could ride the probe past the scan deadline and get the
+    // whole scan killed, suppressing every OTHER finding in the body.
+    let ruleFindings = 0, probeBudget = 512;
     let m: RegExpExecArray | null;
     while (ruleFindings < MAX_FINDINGS_PER_RULE && (m = re.exec(text)) !== null) {
       if (m[0].length === 0) { re.lastIndex++; continue; } // zero-width guard
@@ -71,11 +76,17 @@ export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): 
       // touched; probed regexes need no lastIndex restore because this loop
       // resets lastIndex before every rule's scan.
       if (spec.validators?.includes("base64-secret")) {
-        const decoded = Buffer.from(secret, "base64").toString("utf8");
+        const decoded = --probeBudget >= 0 ? Buffer.from(secret, "base64").toString("utf8") : "";
         if (decoded.length < 8 || !compiled.rules.some(({ spec: s, re: r }) =>
           s.tier === "structured" && !s.validators?.length && ((r.lastIndex = 0), r.test(decoded)))) continue;
       }
-      const start = m.index;
+      // Span the capture group, not the whole match: consumed leading
+      // delimiters and keyword prefixes must not leak into the span, or
+      // redact-on-capture splices them out too (e.g. eating a quote corrupts
+      // the stored JSON) and echo-scrubbing fails to match the bare secret.
+      // indexOf is exact when the group text appears once in the match; on a
+      // duplicate it still spans an identical occurrence of the same value.
+      const start = m.index + m[0].indexOf(secretRaw);
       ruleFindings++;
       findings.push({
         detector: spec.id,
@@ -83,7 +94,7 @@ export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): 
         severity: spec.severity,
         tier: spec.tier,
         start,
-        end: start + m[0].length,
+        end: start + secretRaw.length,
         fingerprint: fingerprint(secret, compiled.hmacKey),
         destinationOwnKey:
           authNorm !== undefined && (authNorm === secret || authNorm.includes(secret)),

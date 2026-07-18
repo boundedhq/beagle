@@ -32,9 +32,14 @@ const corpus: { cases: CorpusCase[] } = JSON.parse(
 describe("leakproof adversarial corpus", () => {
   for (const c of corpus.cases) {
     test(`${c.outcome}: ${c.id}`, () => {
-      const found = [...new Set(scanText(c.text).map((f) => f.detector))];
+      const findings = scanText(c.text);
+      const found = [...new Set(findings.map((f) => f.detector))];
       if (c.outcome === "caught") {
         for (const d of c.detectors) expect(found).toContain(d);
+        // No loud co-fires: a structured detector this case doesn't expect is
+        // a false-positive regression hiding behind a real catch.
+        const extras = findings.filter((f) => f.tier === "structured" && !c.detectors.includes(f.detector));
+        expect(extras).toEqual([]);
       } else {
         // clean AND out-of-scope: zero findings at any tier. If a new rule
         // starts catching an out-of-scope case, this fails on purpose —
@@ -59,7 +64,7 @@ describe("new vendor token rules", () => {
     ["postman-key", "PMAK-Ab3dEf6hIj9lMn2pQr5tUv8x-Ab3dEf6hIj9lMn2pQr5tUv8xYz1Bc4De7F"],
     ["linear-key", "LINEAR_API_KEY=lin_api_Ab3dEf6hIj9lMn2pQr5tUv8xYz1Bc4De7Fg0Hi3J"],
     ["mailgun-key", "mailgun key-3f9c1e8b7d62049f5e1c0a8b4d7e2f6c"],
-    ["telegram-bot-token", "bot 123456789:AbCdEfGhIjKlMnOpQrStUvWxYz0123456-8"],
+    ["telegram-bot-token", "bot 123456789:AAbCdEfGhIjKlMnOpQrStUvWxYz012345-8"],
     ["azure-storage-key", "AccountKey=Ab3dEf6hIj9lMn2pQr5tUv8xYz1Bc4De7Fg0Hi3Jk6Lm9No2Pq5Rs8Tu1Vw4Xy7ZAb3dEf6hIj9lMn2pQr5tUv=="],
     ["slack-webhook", "SLACK_HOOK=https://hooks.slack.com/services/T00000000/B11111111/aZ09bY18cX27dW36eV45fU54"],
     ["github-pat", "token: github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ012345"],
@@ -111,13 +116,45 @@ describe("quiet-tier fallbacks", () => {
 });
 
 describe("precision fixes", () => {
-  test("credit card without the word 'card' nearby", () => {
+  test("credit card without the word 'card' nearby (cvc anchors the prescan)", () => {
     const f = scanText("charge.create(number='5500005555555559', exp='04/27', cvc='913')");
     expect(f.some((x) => x.detector === "credit-card")).toBe(true);
+  });
+
+  test("Luhn-valid ms epoch next to 'number' stays silent (no card keyword)", () => {
+    const f = scanText('{"type":"number","created_at":1721234567899,"note":"retry the request"}');
+    expect(f.some((x) => x.detector === "credit-card")).toBe(false);
   });
 
   test("vendor test keys (sk_test_) no longer trip the generic rule", () => {
     const f = scanText("STRIPE_KEY=sk_test_4eC39HqLyjWDarjtT1zdp7dc  # test mode only");
     expect(f).toEqual([]);
+  });
+
+  test("key--prefixed md5 without mailgun context stays silent", () => {
+    const f = scanText("cache key-5f4dcc3b5aa765d61d8327deb882cf99 expired, refetching");
+    expect(f).toEqual([]);
+  });
+
+  test("epoch:hash pair is not a telegram token (:AA prefix required)", () => {
+    const f = scanText("row 1626890000:aB3dEf6hIj9lMn2pQr5tUv8xYz1Bc4De7Fg");
+    expect(f.some((x) => x.detector === "telegram-bot-token")).toBe(false);
+  });
+
+  test("VAR=secret: '=' is a valid leading delimiter for the shape rule", () => {
+    const f = scanText("S3_SAK=wJa1rXUtnF3MI4K7MDENGbPxRf9CYZ8qLm2Vt0Bn");
+    expect(f.some((x) => x.detector === "aws-secret-shape")).toBe(true);
+  });
+
+  test("VAR=base64: '=' is a valid leading delimiter for the base64 rule", () => {
+    const f = scanText("BLOB=QUtJQTJFMEE4RjNCOUMxRDdLNFA=");
+    expect(f.some((x) => x.detector === "base64-wrapped-secret")).toBe(true);
+  });
+
+  test("finding span covers exactly the secret, not the consumed delimiter", () => {
+    const text = "x = 'wJa1rXUtnF3MI4K7MDENGbPxRf9CYZ8qLm2Vt0Bn' ok";
+    const f = scanText(text).find((x) => x.detector === "aws-secret-shape");
+    expect(f).toBeDefined();
+    expect(text.slice(f!.start, f!.end)).toBe("wJa1rXUtnF3MI4K7MDENGbPxRf9CYZ8qLm2Vt0Bn");
   });
 });
