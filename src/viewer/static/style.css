@@ -483,6 +483,18 @@ button.danger:hover:not(:disabled) { background: #4a1a28; }
 .turn-rail .err { color: var(--leak-fg); }
 .turn-rail .turn-toggle { margin-left: auto; }
 .turn-empty { color: var(--muted); font-style: italic; font-size: 12px; padding: 6px 0; }
+/* Per-turn direction labels: every turn reads as a ⇢ sent block then a
+   ⇠ received block. Role cards (USER/RESPONSE) already carry direction in
+   their names — these make the TOOL cards' direction just as explicit
+   (results ride up with the request; calls come back in the response).
+   Colors reuse the existing direction code: accent = outbound, ok = inbound. */
+.dir-label {
+  font-family: var(--sans); font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted);
+  margin: 8px 0 3px; user-select: none;
+}
+.dir-label.sent { color: var(--accent); opacity: 0.75; }
+.dir-label.recv { color: var(--ok); opacity: 0.75; }
 
 /* uniform message cards: every message — user, assistant, tool, request —
    sits in the same shell; only the colored role label in the header differs */

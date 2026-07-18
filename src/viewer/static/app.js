@@ -531,11 +531,21 @@ function SessionTranscript({ sessionId, row, onBack, onPurged }) {
                 <span class="turn-toggle">${open ? "▾ details" : "▸ details"}</span>
               </div>
               ${open && html`<${Detail} id=${t.id} />`}
+              ${t.messages.length > 0 &&
+              html`<div class="dir-label sent"
+                title=${t.source === "wire"
+                  ? "what the agent sent to the provider this turn"
+                  : "what the agent reported sending this turn"}>⇢ sent</div>`}
               ${groupResent(t.messages).map((g, j) =>
                 g.resent
                   ? html`<${ResentFold} key=${`${t.id}:${j}`} msgs=${g.msgs} leaks=${t.leaks} />`
                   : g.msgs.map((m, k) => html`<${TMsg} key=${`${t.id}:${j}:${k}`} m=${m} leaks=${t.leaks} />`),
               )}
+              ${((t.responseText != null && t.responseText !== "") || (t.responseCalls ?? []).length > 0) &&
+              html`<div class="dir-label recv"
+                title=${t.source === "wire"
+                  ? "what the model sent back — its reply and/or the tools it asked the agent to run"
+                  : "what the agent reported receiving back"}>⇠ received</div>`}
               ${t.responseText != null && t.responseText !== "" &&
               html`<${TMsg} key=${`${t.id}:resp`} leaks=${respLeaks(t)}
                 m=${{ role: "response", content: t.responseText }} />`}
