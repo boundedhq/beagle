@@ -698,3 +698,392 @@ describe("runCallsArrived (the wire zero-capture tripwire's predicate)", () => {
   });
 });
 
+
+// Status honesty for the watched-but-daemon-down state, and the service
+// health warning (the "always-on daemon for the wrong store" failure).
+import { mkdirSync as mkdirSync2 } from "node:fs";
+import { systemdUnit as systemdUnit2 } from "../src/install/service";
+
+describe("cmdStatus — daemon wording + service health", () => {
+  const shimEntry = (dir: string) => ({
+    kind: "shim", agent: "opencode", path: join(dir, "shims", "opencode"), backup: null,
+  });
+
+  test("daemon down + no watches → the DIRECT warning", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-status-"));
+    expect(cmdStatus(dir, null, () => true)).toContain("go DIRECT (unmonitored)");
+  });
+
+  test("daemon down + watched agents → starts-on-demand wording, not DIRECT", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-status-"));
+    writeFileSync(join(dir, "changes.json"), JSON.stringify([shimEntry(dir)]));
+    const s = cmdStatus(dir, null, () => true);
+    expect(s).toContain("starts on demand at the next watched-agent launch");
+    expect(s).not.toContain("go DIRECT");
+  });
+
+  test("a service entry whose file is missing gets a warning with the fix", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-status-"));
+    writeFileSync(join(dir, "changes.json"), JSON.stringify([
+      shimEntry(dir),
+      { kind: "service", agent: null, path: join(dir, "beagle.service"), backup: "systemd" },
+    ]));
+    const s = cmdStatus(dir, null, () => true);
+    expect(s).toContain("background service file is missing");
+    expect(s).toContain("beagle watch opencode");
+  });
+
+  test("a service baked with a stale state dir gets the repair warning", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-status-"));
+    const svcPath = join(dir, "beagle.service");
+    writeFileSync(svcPath, systemdUnit2({ beagleBinary: "/b", stateDir: "/tmp/beagle-lease.STALE" }));
+    writeFileSync(join(dir, "changes.json"), JSON.stringify([
+      shimEntry(dir),
+      { kind: "service", agent: null, path: svcPath, backup: "systemd" },
+    ]));
+    const s = cmdStatus(dir, null, () => true);
+    expect(s).toContain("/tmp/beagle-lease.STALE");
+    expect(s).toContain("re-run `beagle watch opencode` to repair");
+  });
+
+  test("a healthy service produces no warning", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-status-"));
+    const svcPath = join(dir, "beagle.service");
+    writeFileSync(svcPath, systemdUnit2({ beagleBinary: "/b", stateDir: dir }));
+    writeFileSync(join(dir, "changes.json"), JSON.stringify([
+      shimEntry(dir),
+      { kind: "service", agent: null, path: svcPath, backup: "systemd" },
+    ]));
+    const s = cmdStatus(dir, null, () => true);
+    expect(s).not.toContain("▲ background service");
+  });
+
+  test("a healthy but PAUSED service (beagle stop) gets the resume hint", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-status-"));
+    const svcPath = join(dir, "beagle.service");
+    writeFileSync(svcPath, systemdUnit2({ beagleBinary: "/b", stateDir: dir }));
+    writeFileSync(join(dir, "changes.json"), JSON.stringify([
+      { kind: "shim", agent: "opencode", path: join(dir, "shims", "opencode"), backup: null },
+      { kind: "service", agent: null, path: svcPath, backup: "systemd" },
+    ]));
+    const s = cmdStatus(dir, null, () => false); // service inactive
+    expect(s).toContain("background service is paused");
+    expect(s).toContain("beagle watch opencode");
+  });
+});
+
+// findInstalledService's canonical fallback must be scoped to ITS state dir —
+// a stop for a temp/test state dir once unloaded the REAL user service live.
+import { findInstalledService } from "../src/cli/commands";
+
+describe("findInstalledService scoping", () => {
+  test("a temp state dir never claims a canonical unit baked for another dir", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-fis-"));
+    // no manifest entry; the canonical unit (if any exists on this machine)
+    // is baked for a DIFFERENT state dir → must return null, never that unit
+    const found = findInstalledService(dir);
+    expect(found).toBeNull();
+  });
+
+  test("a manifest entry wins regardless (unparseable unit we recorded is still ours)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-fis-"));
+    const svcPath = join(dir, "svc.plist");
+    writeFileSync(svcPath, "unit");
+    writeFileSync(join(dir, "changes.json"), JSON.stringify([
+      { kind: "service", agent: null, path: svcPath, backup: "launchd" },
+    ]));
+    expect(findInstalledService(dir)).toEqual({ kind: "launchd", path: svcPath });
+  });
+
+  test("a manifest entry whose unit was RE-BAKED for another state dir is disowned", () => {
+    // two state dirs shared the canonical slot; B re-baked the unit. A's stale
+    // manifest entry must no longer claim it (else A's `stop` pauses B).
+    const dir = mkdtempSync(join(tmpdir(), "beagle-fis-"));
+    const svcPath = join(dir, "beagle.service");
+    writeFileSync(svcPath, systemdUnit2({ beagleBinary: "/b", stateDir: "/some/other/state/dir" }));
+    writeFileSync(join(dir, "changes.json"), JSON.stringify([
+      { kind: "service", agent: null, path: svcPath, backup: "systemd" },
+    ]));
+    expect(findInstalledService(dir)).toBeNull();
+  });
+});
+
+// cmdStop must pause the always-on service (KeepAlive) or a stop silently
+// becomes a restart — and report truthfully, verified via isActive.
+import { cmdStop } from "../src/cli/commands";
+
+describe("cmdStop — service pause", () => {
+  function serviceFixture(): { dir: string; unit: string } {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-stop-"));
+    const unit = join(dir, "beagle.service");
+    writeFileSync(unit, systemdUnit2({ beagleBinary: "/b", stateDir: dir }));
+    writeFileSync(join(dir, "changes.json"), JSON.stringify([
+      { kind: "service", agent: null, path: unit, backup: "systemd" },
+    ]));
+    return { dir, unit };
+  }
+
+  test("no daemon but an installed service → pauses it and says so", async () => {
+    const { dir, unit } = serviceFixture();
+    const deactivated: string[] = [];
+    const out = await cmdStop(dir, false, {
+      activate: () => {}, deactivate: (p) => deactivated.push(p.path), isActive: () => false,
+    });
+    expect(deactivated).toEqual([unit]); // the (c) fix — pause even with no daemon
+    expect(out).toContain("Background service paused");
+  });
+
+  test("pause reports a WARNING when the service still reports active", async () => {
+    const { dir } = serviceFixture();
+    const out = await cmdStop(dir, false, {
+      activate: () => {}, deactivate: () => {}, isActive: () => true, // deactivate didn't take
+    });
+    expect(out).toContain("WARNING");
+    expect(out).not.toContain("Background service paused —");
+  });
+
+  test("no daemon and no service → plain message, runner never touched", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-stop-"));
+    const deactivated: string[] = [];
+    const out = await cmdStop(dir, false, {
+      activate: () => {}, deactivate: (p) => deactivated.push(p.path), isActive: () => false,
+    });
+    expect(out).toBe("no beagle daemon is running.");
+    expect(deactivated).toEqual([]);
+  });
+});
+
+// The "source ~/.zshrc" automation: a child process can never mutate its
+// parent shell's PATH, so after an rc fix `beagle watch` offers a refreshed
+// shell in place. TTY-gated so scripts and --yes runs never grow a subshell.
+import { offerRefreshedShell } from "../src/cli/commands";
+
+describe("offerRefreshedShell (post-rc-fix refreshed shell offer)", () => {
+  test("non-TTY: never prompts, never spawns", async () => {
+    let spawned = 0;
+    const r = await offerRefreshedShell(false, "/bin/zsh",
+      async () => { spawned++; },
+      () => { throw new Error("must not read stdin without a TTY"); });
+    expect(r).toBe(false);
+    expect(spawned).toBe(0);
+  });
+
+  test("plain Enter takes the default (yes) and spawns the user's shell", async () => {
+    const spawnedWith: string[] = [];
+    const r = await offerRefreshedShell(true, "/bin/zsh",
+      async (sh) => { spawnedWith.push(sh); }, () => "\n");
+    expect(r).toBe(true);
+    expect(spawnedWith).toEqual(["/bin/zsh"]);
+  });
+
+  test("'n' declines — no shell spawned", async () => {
+    let spawned = 0;
+    const r = await offerRefreshedShell(true, "/bin/zsh",
+      async () => { spawned++; }, () => "n\n");
+    expect(r).toBe(false);
+    expect(spawned).toBe(0);
+  });
+
+  test("'yes' accepts", async () => {
+    let spawned = 0;
+    const r = await offerRefreshedShell(true, "/bin/zsh",
+      async () => { spawned++; }, () => "yes\n");
+    expect(r).toBe(true);
+    expect(spawned).toBe(1);
+  });
+
+  test("EOF (Ctrl-D → empty string) declines, distinct from plain Enter", async () => {
+    let spawned = 0;
+    const r = await offerRefreshedShell(true, "/bin/zsh",
+      async () => { spawned++; }, () => ""); // readLineSync returns "" on EOF
+    expect(r).toBe(false);
+    expect(spawned).toBe(0);
+  });
+
+  test("a spawn failure (bogus $SHELL) is caught, not thrown — watch already succeeded", async () => {
+    const r = await offerRefreshedShell(true, "/bin/zsh",
+      async () => { throw new Error("ENOENT"); }, () => "y\n");
+    expect(r).toBe(false); // swallowed, returns false rather than crashing the CLI
+  });
+});
+
+// unwatch ergonomics: bare `beagle unwatch` picks from what's watched;
+// --all is the "stop watching everything, keep my data" teardown.
+import { cmdUnwatchAll, cmdUnwatchSelect, watchedAgents } from "../src/cli/commands";
+import { mkdirSync } from "node:fs";
+
+function watchedFixture(agents: string[]): string {
+  const dir = mkdtempSync(join(tmpdir(), "beagle-unw-"));
+  mkdirSync(join(dir, "shims"), { recursive: true });
+  const entries = agents.map((a) => {
+    const p = join(dir, "shims", a);
+    writeFileSync(p, "#!/bin/sh\n");
+    return { kind: "shim", agent: a, path: p, backup: null };
+  });
+  writeFileSync(join(dir, "changes.json"), JSON.stringify(entries));
+  return dir;
+}
+
+describe("watchedAgents", () => {
+  test("dedupes an agent that has BOTH a shim and a config-redirect entry", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-unw-"));
+    writeFileSync(join(dir, "changes.json"), JSON.stringify([
+      { kind: "shim", agent: "claude", path: join(dir, "s1"), backup: null },
+      // opencode appears TWICE (shim + config-redirect) — must collapse to one,
+      // or the picker would number the same agent twice
+      { kind: "shim", agent: "opencode", path: join(dir, "s2"), backup: null },
+      { kind: "config-redirect", agent: "opencode", path: join(dir, "c1"), backup: null },
+      { kind: "config-backup", agent: "opencode", path: join(dir, "c2"), backup: null },
+      { kind: "shellrc", agent: null, path: join(dir, "rc"), backup: null },
+    ]));
+    expect(watchedAgents(dir)).toEqual(["claude", "opencode"]);
+  });
+});
+
+describe("cmdUnwatchAll", () => {
+  test("nothing watched", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-unw-"));
+    expect(await cmdUnwatchAll(dir)).toBe("nothing is watched.");
+  });
+
+  test("removes every agent's shim and empties the manifest", async () => {
+    const dir = watchedFixture(["claude", "opencode"]);
+    const out = await cmdUnwatchAll(dir);
+    expect(out).toContain("claude");
+    expect(out).toContain("opencode");
+    expect(existsSync(join(dir, "shims", "claude"))).toBe(false);
+    expect(existsSync(join(dir, "shims", "opencode"))).toBe(false);
+    expect(watchedAgents(dir)).toEqual([]);
+  });
+
+  test("one agent's failure is isolated — the rest still unwatch", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-unw-"));
+    mkdirSync(join(dir, "shims"), { recursive: true });
+    const backup = join(dir, "backup");
+    writeFileSync(backup, "orig");
+    const shimB = join(dir, "shims", "opencode");
+    writeFileSync(shimB, "#!/bin/sh\n");
+    writeFileSync(join(dir, "changes.json"), JSON.stringify([
+      // codex's redirect restore targets a path whose PARENT dir is missing →
+      // copyFileSync throws ENOENT inside unwatchAgent
+      { kind: "config-redirect", agent: "codex", path: join(dir, "gone", "config"), backup },
+      { kind: "shim", agent: "opencode", path: shimB, backup: null },
+    ]));
+    const out = await cmdUnwatchAll(dir);
+    expect(out).toContain("failed to unwatch codex"); // isolated, not thrown
+    expect(existsSync(shimB)).toBe(false); // opencode still unwatched
+  });
+});
+
+describe("cmdUnwatchSelect (bare `beagle unwatch`)", () => {
+  test("no TTY: prints the choices instead of hanging on a read", async () => {
+    const dir = watchedFixture(["claude", "opencode"]);
+    const out = await cmdUnwatchSelect(dir, false, false, () => {
+      throw new Error("must not read stdin without a TTY");
+    });
+    expect(out).toContain("watched: claude, opencode");
+    expect(watchedAgents(dir)).toEqual(["claude", "opencode"]); // untouched
+  });
+
+  test("single watched agent: plain yes/no", async () => {
+    const dir = watchedFixture(["claude"]);
+    await cmdUnwatchSelect(dir, false, true, () => "y\n");
+    expect(watchedAgents(dir)).toEqual([]);
+  });
+
+  test("single watched agent: decline changes nothing", async () => {
+    const dir = watchedFixture(["claude"]);
+    const out = await cmdUnwatchSelect(dir, false, true, () => "\n");
+    expect(out).toBe("cancelled — nothing changed.");
+    expect(watchedAgents(dir)).toEqual(["claude"]);
+  });
+
+  test("pick by number", async () => {
+    const dir = watchedFixture(["claude", "opencode"]);
+    await cmdUnwatchSelect(dir, false, true, () => "2\n");
+    expect(watchedAgents(dir)).toEqual(["claude"]);
+  });
+
+  test("pick by name", async () => {
+    const dir = watchedFixture(["claude", "opencode"]);
+    await cmdUnwatchSelect(dir, false, true, () => "claude\n");
+    expect(watchedAgents(dir)).toEqual(["opencode"]);
+  });
+
+  test("'all' falls through to cmdUnwatchAll", async () => {
+    const dir = watchedFixture(["claude", "opencode"]);
+    await cmdUnwatchSelect(dir, false, true, () => "all\n");
+    expect(watchedAgents(dir)).toEqual([]);
+  });
+
+  test("out-of-range number and garbage both cancel", async () => {
+    const dir = watchedFixture(["claude", "opencode"]);
+    expect(await cmdUnwatchSelect(dir, false, true, () => "7\n")).toBe("cancelled — nothing changed.");
+    expect(await cmdUnwatchSelect(dir, false, true, () => "wat\n")).toBe("cancelled — nothing changed.");
+    expect(watchedAgents(dir)).toEqual(["claude", "opencode"]);
+  });
+});
+
+// main.ts unwatch routing + flag hygiene: the destructive sibling of watch
+// must reject typos loudly and route --all / bare-invocation correctly.
+import { run } from "../src/cli/main";
+
+describe("main.ts unwatch dispatch", () => {
+  const origEnv = process.env.BEAGLE_STATE_DIR;
+  let logs: string[];
+  let errs: string[];
+  const origLog = console.log;
+  const origErr = console.error;
+  beforeEach(() => {
+    logs = []; errs = [];
+    console.log = (...a: unknown[]) => { logs.push(a.join(" ")); };
+    console.error = (...a: unknown[]) => { errs.push(a.join(" ")); };
+  });
+  function restore() {
+    console.log = origLog; console.error = origErr;
+    if (origEnv === undefined) delete process.env.BEAGLE_STATE_DIR;
+    else process.env.BEAGLE_STATE_DIR = origEnv;
+  }
+
+  test("an unknown flag is rejected with exit 2 (no state touched)", async () => {
+    try {
+      expect(await run(["unwatch", "--froce"])).toBe(2);
+      expect(errs.join("\n")).toContain("unknown flag --froce");
+    } finally { restore(); }
+  });
+
+  test("--all with an agent is rejected with exit 2", async () => {
+    try {
+      expect(await run(["unwatch", "--all", "claude"])).toBe(2);
+      expect(errs.join("\n")).toContain("takes no agent");
+    } finally { restore(); }
+  });
+
+  test("bare `unwatch` (no TTY) routes to the picker's choice list", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-maindispatch-"));
+    mkdirSync(join(dir, "shims"), { recursive: true });
+    writeFileSync(join(dir, "changes.json"), JSON.stringify([
+      { kind: "shim", agent: "opencode", path: join(dir, "shims", "opencode"), backup: null },
+    ]));
+    process.env.BEAGLE_STATE_DIR = dir;
+    try {
+      // non-interactive stdin in the test runner → picker prints choices
+      expect(await run(["unwatch"])).toBe(0);
+      expect(logs.join("\n")).toContain("watched: opencode");
+    } finally { restore(); }
+  });
+
+  test("`unwatch --all` routes to cmdUnwatchAll and removes every shim", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-maindispatch-"));
+    mkdirSync(join(dir, "shims"), { recursive: true });
+    writeFileSync(join(dir, "shims", "opencode"), "#!/bin/sh\n");
+    writeFileSync(join(dir, "changes.json"), JSON.stringify([
+      { kind: "shim", agent: "opencode", path: join(dir, "shims", "opencode"), backup: null },
+    ]));
+    process.env.BEAGLE_STATE_DIR = dir;
+    try {
+      expect(await run(["unwatch", "--all"])).toBe(0);
+      expect(existsSync(join(dir, "shims", "opencode"))).toBe(false);
+    } finally { restore(); }
+  });
+});

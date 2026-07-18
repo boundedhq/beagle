@@ -2,7 +2,8 @@
 // leaks, show, purge — the whole product without the viewer.
 import {
   cmdConfig, cmdDetect, cmdHookForward, cmdLeaks, cmdPurge, cmdRun, cmdSearch, cmdShow,
-  cmdStatus, cmdStop, cmdUninstall, cmdUnwatch, cmdWatch, defaultStateDir, parseWatchArgs, readLineSync,
+  cmdStatus, cmdStop, cmdUninstall, cmdUnwatch, cmdUnwatchAll, cmdUnwatchSelect, cmdWatch,
+  defaultStateDir, offerRefreshedShell, parseWatchArgs, readLineSync,
 } from "./commands";
 import { BEAGLE_VERSION } from "../core/version";
 
@@ -20,12 +21,15 @@ usage:
   beagle watch <agent> [--yes]   watch an agent automatically (PATH shim);
                                  subscription logins auto-detected (claude,
                                  codex); --telemetry/--wire to force a mode
-  beagle unwatch <agent> [--force]
-                                 stop watching, restore your setup (stops the
-                                 daemon too when nothing is left watched;
-                                 refuses mid-capture unless --force)
-  beagle stop [--force]          stop the background daemon (refuses while an
-                                 agent session is being captured)
+  beagle unwatch [<agent>|--all] [--force]
+                                 stop watching, restore your setup (no agent:
+                                 pick from what's watched; --all: every agent;
+                                 removes the shell-rc PATH block and stops the
+                                 daemon once nothing is left watched; refuses
+                                 mid-capture unless --force)
+  beagle stop [--force]          stop the background daemon and pause the
+                                 always-on service until the next watch
+                                 (refuses while a session is being captured)
   beagle detect                  find supported agents on this machine
   beagle status                  trust strip: coverage, store, retention
   beagle search [string]         was this ever sent? definitive answer
@@ -70,12 +74,30 @@ export async function run(argv: string[]): Promise<number> {
       if ("error" in parsed) { console.error(parsed.error); return 2; }
       const r = cmdWatch(stateDir, parsed.agent, parsed.yes, parsed.mode);
       console.log(r.message);
+      if (r.ok && r.shellReloadHint) {
+        const launched = parsed.yes ? false : await offerRefreshedShell();
+        if (!launched)
+          console.log(
+            "(this terminal keeps its old PATH — open a new one, or run `exec $SHELL -l` to refresh in place)",
+          );
+      }
       return r.ok ? 0 : 1;
     }
     case "unwatch": {
+      // Reject unknown flags like `watch` does — unwatch is the destructive
+      // sibling, so a typo (`--al`, `--froce`) must fail loudly, not silently
+      // fall into the picker or run unforced.
+      const bad = rest.find((a) => a.startsWith("--") && a !== "--force" && a !== "--all");
+      if (bad) { console.error(`beagle unwatch: unknown flag ${bad}\nusage: beagle unwatch [<agent>|--all] [--force]`); return 2; }
       const agent = rest.find((a) => !a.startsWith("--"));
-      if (!agent) { console.error("usage: beagle unwatch <agent> [--force]"); return 2; }
-      console.log(await cmdUnwatch(stateDir, agent, rest.includes("--force")));
+      const force = rest.includes("--force");
+      if (rest.includes("--all")) {
+        if (agent) { console.error("beagle unwatch --all takes no agent (it unwatches everything)."); return 2; }
+        console.log(await cmdUnwatchAll(stateDir, force));
+        return 0;
+      }
+      if (!agent) { console.log(await cmdUnwatchSelect(stateDir, force)); return 0; }
+      console.log(await cmdUnwatch(stateDir, agent, force));
       return 0;
     }
     case "stop":

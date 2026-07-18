@@ -12,6 +12,7 @@ import { GraduationTracker } from "../install/graduation";
 import { claudeAuthMode, codexAuthMode, detectAgents, knownExtraLocations, pathDirsFromEnv } from "../install/detect";
 import { watchAgent, unwatchAgent, type WatchEnv, type WatchModeRequest } from "../install/watch";
 import { ChangeManifest } from "../install/manifest";
+import { osServiceRunner, servicePlan, serviceStateDir, type ServiceKind, type ServiceRunner } from "../install/service";
 import { listLeakEvents } from "../viewer/feed-query";
 import { sessionHeadlines } from "../viewer/session-view";
 import { buildDetail, leakSpansFor, leakTypesFor } from "../viewer/detail";
@@ -149,18 +150,54 @@ function daemonWhy(d: DaemonInfo): string | null {
     : "idle — winds down within a few minutes";
 }
 
-export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null): string {
+export function cmdStatus(
+  stateDir: string,
+  daemonUp: DaemonInfo | null = null,
+  // Injectable so tests don't shell out to launchctl/systemctl.
+  isServiceActive: (kind: ServiceKind, path: string) => boolean = (kind, path) =>
+    osServiceRunner.isActive?.({ kind, path }) ?? true,
+): string {
   const row = (label: string, text: string) => label.padEnd(STATUS_GUTTER) + text;
   const cont = (text: string) => " ".repeat(STATUS_GUTTER) + text;
   const lines: string[] = [];
 
+  const manifest = new ChangeManifest(stateDir);
+  const watchedEntries = manifest.list().filter((e) => e.kind === "shim" || e.kind === "config-redirect");
   if (daemonUp) {
     lines.push(row("daemon", `running — pid ${daemonUp.pid} · proxy 127.0.0.1:${daemonUp.proxyPort}`));
     // Say WHY it is running, so nobody has to wonder when it will go away.
     const why = daemonWhy(daemonUp);
     if (why) lines.push(cont(why));
+  } else if (watchedEntries.length > 0) {
+    // With shims installed, "not running" is a between-sessions state, not a
+    // coverage gap: the shim starts the daemon when the agent launches. (The
+    // background service should keep one alive anyway — a warning below says
+    // so if it can't.)
+    lines.push(row("daemon", "not running — starts on demand at the next watched-agent launch (or `beagle ui`)"));
   } else {
     lines.push(row("daemon", "not running — new agent sessions go DIRECT (unmonitored)"));
+  }
+  // The background service's one job is keeping a daemon alive for THIS state
+  // dir. An installed unit that is missing or baked with a different state
+  // dir silently un-does the "always on" promise — say so, with the fix.
+  const svcEntry = manifest.list().find((e) => e.kind === "service");
+  if (svcEntry && watchedEntries.length > 0) {
+    const agentHint = watchedEntries[0]?.agent ?? "<agent>";
+    if (!existsSync(svcEntry.path)) {
+      lines.push(cont(`▲ background service file is missing — re-run \`beagle watch ${agentHint}\` to reinstall`));
+    } else {
+      const baked = serviceStateDir(readFileSync(svcEntry.path, "utf8"));
+      if (baked !== null && resolvePath(baked) !== resolvePath(stateDir)) {
+        lines.push(
+          cont(`▲ background service keeps a daemon alive for ${stripControlChars(baked)} (a stale/test path),`),
+          cont(`  not this store — re-run \`beagle watch ${agentHint}\` to repair it`),
+        );
+      } else if (!isServiceActive((svcEntry.backup as ServiceKind) ?? "systemd", svcEntry.path)) {
+        lines.push(
+          cont(`▲ background service is paused (e.g. by \`beagle stop\`) — re-run \`beagle watch ${agentHint}\` to resume always-on`),
+        );
+      }
+    }
   }
   lines.push("");
 
@@ -199,7 +236,6 @@ export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null):
   );
   lines.push("");
 
-  const manifest = new ChangeManifest(stateDir);
   lines.push(
     row("changes", manifest.list().length === 0
       ? "none — beagle has modified nothing on this system"
@@ -488,30 +524,102 @@ export async function cmdPurge(stateDir: string, kind: string): Promise<string> 
 /** Stop the running beagle daemon (graceful, via its control socket). An
  *  agent mid-capture holds a lease — refuse then, unless forced, so stopping
  *  can't silently drop a live session's capture. */
-export async function cmdStop(stateDir: string, force = false): Promise<string> {
+/** The installed background service, from the manifest OR the canonical path
+ *  (an orphaned unit — recorded by an older run whose manifest was since
+ *  emptied — is still real and still resurrects daemons). The canonical
+ *  fallback is SCOPED: it claims the unit only when its baked state dir is
+ *  THIS one — a `beagle stop` for a temp/test state dir must never touch the
+ *  real install's service (a live test run did exactly that before this gate). */
+export function findInstalledService(
+  stateDir: string,
+): { kind: ServiceKind; path: string } | null {
+  const entry = new ChangeManifest(stateDir).list().find((e) => e.kind === "service");
+  if (entry && existsSync(entry.path)) {
+    // Scope like the canonical fallback: if the unit has since been re-baked
+    // for a DIFFERENT state dir (another install re-took the shared canonical
+    // slot), it's no longer ours to pause/remove. A unit we can't parse but
+    // that WE recorded is still ours (baked === null → keep).
+    const baked = serviceStateDir(readFileSync(entry.path, "utf8"));
+    if (baked === null || resolvePath(baked) === resolvePath(stateDir)) {
+      return { kind: (entry.backup as ServiceKind) ?? "systemd", path: entry.path };
+    }
+    return null;
+  }
+  const plan = servicePlan(process.platform, homedir(), process.execPath, stateDir);
+  if (plan && existsSync(plan.path)) {
+    const baked = serviceStateDir(readFileSync(plan.path, "utf8"));
+    if (baked !== null && resolvePath(baked) === resolvePath(stateDir)) {
+      return { kind: plan.kind, path: plan.path };
+    }
+  }
+  return null;
+}
+
+export async function cmdStop(
+  stateDir: string,
+  force = false,
+  runner: ServiceRunner = osServiceRunner,
+): Promise<string> {
+  // Act on OBSERVED reality, not bookkeeping: an orphaned unit at the canonical
+  // path (manifest emptied by an older CLI's unwatch, etc.) must still be paused
+  // or KeepAlive wins and stop is a silent restart.
+  const svc = findInstalledService(stateDir);
+  // Pause the always-on service and REPORT truthfully — verify with isActive
+  // (deactivate is best-effort spawnQuiet) rather than assuming it worked.
+  const pauseService = (): string => {
+    if (!svc) return "";
+    runner.deactivate(svc);
+    const paused = runner.isActive ? !runner.isActive(svc) : true;
+    return paused
+      ? `\nBackground service paused — always-on resumes at the next \`beagle watch\` (shims still start a daemon on demand).`
+      : `\nWARNING: tried to pause the background service but it still reports active — check \`beagle status\`.`;
+  };
+
   const daemon = await pingDaemon(stateDir);
-  if (!daemon) return "no beagle daemon is running.";
-  // Client-side pre-check for a friendly message; the daemon re-checks
-  // authoritatively at shutdown (closing the read-then-act race).
-  const status = await controlRequest(daemon.socketPath, { cmd: "status" });
-  const leases = (status.data as { leases?: number } | undefined)?.leases ?? 0;
-  if (leases > 0 && !force) {
+  if (!daemon) {
+    // No daemon now — but an always-on service resurrects one within seconds,
+    // so a stop that leaves it enabled is a silent no-op. Pause it anyway.
+    return svc ? `no daemon was running.${pauseService()}` : "no beagle daemon is running.";
+  }
+
+  // Authoritative lease check right before we touch anything. If the daemon's
+  // status can't be read we CANNOT confirm it's safe to pause the service
+  // (whose teardown SIGTERMs the daemon lease-unaware) — refuse unforced
+  // rather than risk dropping a live capture.
+  let leases: number | null;
+  try {
+    const status = await controlRequest(daemon.socketPath, { cmd: "status" });
+    leases = status.ok ? ((status.data as { leases?: number } | undefined)?.leases ?? 0) : null;
+  } catch {
+    leases = null;
+  }
+  if (!force && leases === null) {
+    return "couldn't confirm capture state from the daemon — not stopping. Retry, or force with: beagle stop --force";
+  }
+  if (!force && leases! > 0) {
     return (
       `the daemon is capturing for ${leases} live agent session${leases === 1 ? "" : "s"} — ` +
       `stopping now would drop that capture.\nFinish those sessions first, or force with: beagle stop --force`
     );
   }
-  const r = await controlRequest(daemon.socketPath, { cmd: "shutdown", args: { force } });
-  if (!r.ok) {
-    // The daemon refused — a capture started between our check and now.
-    return `a capture started just now — daemon not stopped (${r.error}). Retry, or force with: beagle stop --force`;
+
+  // Pause the KeepAlive service FIRST (its teardown also kills the managed
+  // daemon; leaving it enabled resurrects the daemon we're about to stop).
+  // Leases were just confirmed 0 (or forced).
+  const pausedNote = pauseService();
+  if (await pingDaemon(stateDir)) {
+    const r = await controlRequest(daemon.socketPath, { cmd: "shutdown", args: { force } });
+    if (!r.ok) {
+      // A capture started between the check and now (only possible unforced).
+      return `a capture started just now — daemon not stopped (${r.error}).${pausedNote}\nRetry, or force with: beagle stop --force`;
+    }
   }
   // confirm it actually went down (the shutdown is async on the daemon side)
   for (let i = 0; i < 20; i++) {
     await Bun.sleep(100);
-    if (!(await pingDaemon(stateDir))) return `daemon stopped (pid ${daemon.pid}).`;
+    if (!(await pingDaemon(stateDir))) return `daemon stopped (pid ${daemon.pid}).${pausedNote}`;
   }
-  return `asked the daemon (pid ${daemon.pid}) to stop, but it is still responding — check \`beagle status\`.`;
+  return `asked the daemon (pid ${daemon.pid}) to stop, but it is still responding — check \`beagle status\`.${pausedNote}`;
 }
 
 /** Full, safe teardown in one command: unwatch every watched agent (restoring
@@ -527,8 +635,7 @@ export async function cmdUninstall(
   // non-interactive path deterministically — mirrors resolveRunMode(isTTY).
   isTTY = Boolean(process.stdin.isTTY),
 ): Promise<string> {
-  const manifest = new ChangeManifest(stateDir);
-  const watched = [...new Set(manifest.list().filter((e) => e.kind === "shim" && e.agent).map((e) => e.agent!))];
+  const watched = watchedAgents(stateDir);
   const hasStore = existsSync(join(stateDir, "beagle.db"));
   const daemonUp = (await pingDaemon(stateDir)) !== null;
   if (!existsSync(stateDir) || (!watched.length && !hasStore && !daemonUp)) {
@@ -680,6 +787,7 @@ function buildWatchEnv(stateDir: string, yes: boolean): WatchEnv {
     shell: process.env.SHELL ?? "/bin/sh",
     platform: process.platform,
     home: homedir(),
+    zdotdir: process.env.ZDOTDIR,
     resolveReal: (agent) => resolveRealBinary(stateDir, agent),
     runType: (agent) => {
       try {
@@ -768,11 +876,74 @@ export function cmdWatch(
   agent: string,
   yes: boolean,
   mode: WatchModeRequest = "auto",
-): { ok: boolean; message: string } {
+): { ok: boolean; message: string; shellReloadHint?: boolean } {
   const env = buildWatchEnv(stateDir, yes);
   const r = watchAgent(agent, env, mode);
   if (r.applied) new GraduationTracker(stateDir).markWatched(agent);
-  return { ok: r.applied, message: r.message };
+  return { ok: r.applied, message: r.message, shellReloadHint: r.shellReloadHint };
+}
+
+/** The closest thing to "source ~/.zshrc for the user" the OS allows: a child
+ *  process can never mutate its parent shell's PATH, but it CAN hand the user
+ *  a fresh shell that read the updated rc — so the terminal they are sitting
+ *  in (where they'll type the agent's name next) is covered immediately.
+ *  Interactive-TTY only: scripts and --yes runs must never grow a subshell. */
+function defaultSpawnShell(sh: string): Promise<unknown> {
+  // Login + interactive: bash then reads ~/.bash_profile (where rcTargetFor
+  // writes on macOS), zsh ~/.zprofile+~/.zshrc, fish config.fish — so the
+  // shims are actually on PATH. `-i` alone gives a NON-login bash that reads
+  // only ~/.bashrc and would miss the block on macOS.
+  // Strip BEAGLE_STATE_DIR/BEAGLE_EPHEMERAL so a one-shot `BEAGLE_STATE_DIR=…
+  // beagle watch` doesn't silently pin every later command in the new shell to
+  // that override (an intentional, profile-set value comes back via login).
+  const env = { ...process.env };
+  delete env.BEAGLE_STATE_DIR;
+  delete env.BEAGLE_EPHEMERAL;
+  return Bun.spawn([sh, "-l", "-i"], { stdio: ["inherit", "inherit", "inherit"], env }).exited;
+}
+
+export async function offerRefreshedShell(
+  isTTY = Boolean(process.stdin.isTTY),
+  shell = process.env.SHELL ?? "/bin/sh",
+  spawnShell: (sh: string) => Promise<unknown> = defaultSpawnShell,
+  readLine: () => string = readLineSync,
+): Promise<boolean> {
+  if (!isTTY) return false;
+  process.stdout.write(
+    "Cover THIS terminal now? Beagle can start a refreshed shell here ('exit' returns). [Y/n] ",
+  );
+  const raw = readLine();
+  if (raw === "") return false; // EOF (Ctrl-D) — an abort, distinct from plain Enter
+  const line = raw.trim();
+  if (line !== "" && !/^y(es)?$/i.test(line)) return false;
+  console.log(`(refreshed ${stripControlChars(shell)} — watched agents resolve to their shims here)`);
+  try {
+    await spawnShell(shell);
+  } catch {
+    // A bogus $SHELL (deleted binary) must not crash a watch that already
+    // succeeded — fall back to the manual hint.
+    console.log("couldn't start a refreshed shell — open a new terminal, or run 'exec $SHELL -l'.");
+    return false;
+  }
+  return true;
+}
+
+/** Agents currently watched, per the manifest — the manifest entry, not the
+ *  shim file, IS the watch relationship (mirrors unwatchAgent's definition,
+ *  including config-redirect-only agents). */
+export function watchedAgents(stateDir: string): string[] {
+  return [...new Set(
+    new ChangeManifest(stateDir).list()
+      .filter((e) => (e.kind === "shim" || e.kind === "config-redirect") && e.agent)
+      .map((e) => e.agent!),
+  )];
+}
+
+async function liveLeases(stateDir: string): Promise<number> {
+  const daemon = await pingDaemon(stateDir);
+  if (!daemon) return 0;
+  const status = await controlRequest(daemon.socketPath, { cmd: "status" });
+  return (status.data as { leases?: number } | undefined)?.leases ?? 0;
 }
 
 export async function cmdUnwatch(stateDir: string, agent: string, force = false): Promise<string> {
@@ -782,17 +953,13 @@ export async function cmdUnwatch(stateDir: string, agent: string, force = false)
   // lease check can't protect a capture that's already been dropped. Refuse a
   // deliberate unwatch mid-capture; --force overrides (uninstall forces).
   if (!force) {
-    const daemon = await pingDaemon(stateDir);
-    if (daemon) {
-      const status = await controlRequest(daemon.socketPath, { cmd: "status" });
-      const leases = (status.data as { leases?: number } | undefined)?.leases ?? 0;
-      if (leases > 0) {
-        return (
-          `not unwatching ${agent} — Beagle is capturing ${leases} live session${leases === 1 ? "" : "s"} and ` +
-          `unwatch would tear down the daemon and drop them.\n` +
-          `Finish those sessions first, or force with: beagle unwatch ${agent} --force`
-        );
-      }
+    const leases = await liveLeases(stateDir);
+    if (leases > 0) {
+      return (
+        `not unwatching ${agent} — Beagle is capturing ${leases} live session${leases === 1 ? "" : "s"} and ` +
+        `unwatch would tear down the daemon and drop them.\n` +
+        `Finish those sessions first, or force with: beagle unwatch ${agent} --force`
+      );
     }
   }
   const r = unwatchAgent(agent, buildWatchEnv(stateDir, true));
@@ -803,10 +970,74 @@ export async function cmdUnwatch(stateDir: string, agent: string, force = false)
     const daemon = await pingDaemon(stateDir);
     if (daemon) {
       await controlRequest(daemon.socketPath, { cmd: "shutdown", args: { force: true } });
-      return r.message + " Daemon stopped.";
+      return r.message + "\nDaemon stopped.";
     }
   }
   return r.message;
+}
+
+/** Unwatch every agent in one shot — "stop watching, keep my data"
+ *  (uninstall is this plus erasing the store). One friendly lease check up
+ *  front; each per-agent unwatch then passes `force` THROUGH, so an unforced
+ *  --all re-checks per agent and a capture that starts mid-loop still refuses
+ *  (rather than the last agent force-tearing down a live daemon). Error-
+ *  isolated like uninstall: one agent's failure can't abort the rest. */
+export async function cmdUnwatchAll(stateDir: string, force = false): Promise<string> {
+  const agents = watchedAgents(stateDir);
+  if (!agents.length) return "nothing is watched.";
+  if (!force) {
+    const leases = await liveLeases(stateDir);
+    if (leases > 0) {
+      return (
+        `not unwatching — Beagle is capturing ${leases} live session${leases === 1 ? "" : "s"} and ` +
+        `unwatch would tear down the daemon and drop them.\n` +
+        `Finish those sessions first, or force with: beagle unwatch --all --force`
+      );
+    }
+  }
+  const out: string[] = [];
+  for (const a of agents) {
+    try {
+      out.push(await cmdUnwatch(stateDir, a, force));
+    } catch (e) {
+      out.push(`failed to unwatch ${a}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  return out.join("\n");
+}
+
+/** `beagle unwatch` with no agent: show what's watched and ask which.
+ *  One agent → a plain yes/no; several → a numbered pick (number, name, or
+ *  'all'). No TTY → print the choices instead of hanging on a read. */
+export async function cmdUnwatchSelect(
+  stateDir: string,
+  force = false,
+  isTTY = Boolean(process.stdin.isTTY),
+  readLine: () => string = readLineSync,
+): Promise<string> {
+  const agents = watchedAgents(stateDir);
+  if (!agents.length) return "nothing is watched.";
+  // Agent names come from the manifest (0600, user-owned) — sanitize before
+  // echoing so a doctored entry can't inject terminal escapes. Matching below
+  // still uses the raw value.
+  if (!isTTY) {
+    return `beagle unwatch <agent> — watched: ${agents.map(stripControlChars).join(", ")} (or: beagle unwatch --all)`;
+  }
+  if (agents.length === 1) {
+    process.stdout.write(`Unwatch ${stripControlChars(agents[0]!)}? [y/N] `);
+    if (!/^y(es)?$/i.test(readLine().trim())) return "cancelled — nothing changed.";
+    return cmdUnwatch(stateDir, agents[0]!, force);
+  }
+  process.stdout.write(
+    "watched agents:\n" +
+      agents.map((a, i) => `  ${i + 1}. ${stripControlChars(a)}`).join("\n") +
+      `\nUnwatch which? [1-${agents.length}, name, or 'all'] `,
+  );
+  const ans = readLine().trim();
+  if (ans.toLowerCase() === "all") return cmdUnwatchAll(stateDir, force);
+  const pick = /^\d+$/.test(ans) ? agents[Number(ans) - 1] : agents.find((a) => a === ans);
+  if (!pick) return "cancelled — nothing changed.";
+  return cmdUnwatch(stateDir, pick, force);
 }
 
 // Reads one line from stdin (until newline or EOF, capped at 64 KB). Exported

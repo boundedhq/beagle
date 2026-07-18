@@ -1,19 +1,39 @@
 // watch/unwatch orchestration (design §6.7, §6.12, R2). Places a PATH shim
 // after a diff-and-confirm, verifies coverage via the user's real shell, and
 // records every mutation in the change manifest so revert is mechanical.
-import { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { AGENTS } from "../cli/agents";
 import { ChangeManifest } from "./manifest";
 import { isBeagleShim, shimScript, parseCoverageVerdict, type CoverageVerdict } from "./shim";
+import { installPathBlock, pathBlockMalformed, rcTargetFor, removePathBlock } from "./shellrc";
+import { stripControlChars } from "../notifier/notifier";
 import {
   installService,
+  reinstallService,
   removeService,
   servicePlan,
+  serviceStateDir,
   osServiceRunner,
   type ServiceKind,
   type ServiceRunner,
 } from "./service";
+
+// A path that lives in a throwaway location. A REAL home plus a tmp state dir
+// is the poison combo: it would pin the user's login service to a directory
+// that evaporates — which is exactly what a Jul-13 acceptance-test run did
+// live (launchd agent left pointing at /tmp/beagle-lease.*).
+function isTmpPath(p: string): boolean {
+  const r = resolve(p);
+  return (
+    r.startsWith("/tmp/") ||
+    r.startsWith("/private/tmp/") ||
+    r.startsWith("/private/var/folders/") ||
+    r.startsWith("/var/folders/") ||
+    r.startsWith(resolve(tmpdir()) + "/")
+  );
+}
 
 export interface WatchEnv {
   stateDir: string;
@@ -24,6 +44,8 @@ export interface WatchEnv {
   shell: string; // $SHELL
   platform: NodeJS.Platform;
   home: string;
+  /** zsh's rc dir override, when set — .zshrc lives there, not in $HOME. */
+  zdotdir?: string;
   resolveReal: (agent: string) => string | null; // where the real binary is
   runType: (agent: string) => string; // `$SHELL -ic 'type <agent>'` output
   confirm: (diff: string) => boolean; // interactive y/N (or --yes)
@@ -41,6 +63,9 @@ export interface WatchResult {
   /** unwatch only: the shared background service was torn down too (this was
    *  the last watched agent) — the caller may also stop a running daemon. */
   serviceRemoved?: boolean;
+  /** The rc PATH block was (re)applied this run: NEW shells are covered but
+   *  the CALLING shell is stale — the CLI can offer to spawn a refreshed one. */
+  shellReloadHint?: boolean;
 }
 
 /** How a watched agent is captured. "auto" resolves per agent: telemetry when
@@ -125,20 +150,53 @@ export function watchAgent(agent: string, env: WatchEnv, requested: WatchModeReq
         `a shim exec'ing itself would loop forever. Run 'beagle unwatch ${agent}' first, or check your PATH.`,
     };
   }
-  // The always-on daemon service is installed once, on the first graduation.
-  const svc = servicePlan(env.platform, env.home, env.beagleBinary, env.stateDir);
-  const svcAlreadyInstalled = svc ? existsSync(svc.path) : true;
+  // The always-on daemon service is installed once, on the first graduation —
+  // and VERIFIED on every later watch: an installed unit whose baked state dir
+  // doesn't match this one is keeping a daemon alive for the wrong store (the
+  // exact failure a stale test unit caused live) and gets repaired. A unit we
+  // can't parse was hand-edited — the user's; left alone. The poison-combo
+  // guard skips service install entirely when a REAL home would be pointed at
+  // a throwaway state dir.
+  let svc = servicePlan(env.platform, env.home, env.beagleBinary, env.stateDir);
+  const svcSkippedTmp = Boolean(svc && isTmpPath(env.stateDir) && !isTmpPath(env.home));
+  if (svcSkippedTmp) svc = null;
+  const runner = env.serviceRunner ?? osServiceRunner;
+  const svcOnDisk = svc && existsSync(svc.path) ? readFileSync(svc.path, "utf8") : null;
+  const svcInstall = Boolean(svc && svcOnDisk === null);
+  const svcBakedState = svcOnDisk !== null ? serviceStateDir(svcOnDisk) : null;
+  // A unit whose baked state dir we can PARSE and it's ours. `svcBakedState ===
+  // null` means hand-edited/unrecognizable — the user's; we never re-enable,
+  // adopt, or remove it (only repair touches a parseable-but-stale unit).
+  const svcOwned = Boolean(svc && svcBakedState !== null && resolve(svcBakedState) === resolve(env.stateDir));
+  const svcRepair = Boolean(svc && svcBakedState !== null && resolve(svcBakedState) !== resolve(env.stateDir));
+  // Paused (e.g. by `beagle stop`) but otherwise healthy: watch re-enables
+  // always-on — the stop message promises exactly this. Only for a unit we own.
+  const svcReenable = Boolean(
+    svc && !svcInstall && svcOwned && runner.isActive && !runner.isActive(svc),
+  );
+  const svcChanges = svcInstall || svcRepair || svcReenable;
   const diffLines = [
-    `Beagle will make ${svc && !svcAlreadyInstalled ? "these changes" : "one change"}:`,
+    `Beagle will make ${svcChanges ? "these changes" : "one change"}:`,
     `  + create a PATH shim at ${plan.shimPath}`,
     mode === "telemetry"
       ? `    (runs the real ${agent} at ${plan.real} with its own telemetry reporting to Beagle — ${why})`
       : `    (execs the real ${agent} at ${plan.real} through Beagle)`,
   ];
-  if (svc && !svcAlreadyInstalled) {
+  if (svc && svcInstall) {
     diffLines.push(
       `  + install a background service (${svc.kind}) so watched agents stay covered across reboots`,
       `    at ${svc.path}`,
+    );
+  }
+  if (svc && svcRepair) {
+    diffLines.push(
+      `  + repair the background service at ${svc.path}`,
+      `    (it keeps a daemon alive for ${stripControlChars(svcBakedState ?? "")} — a stale/test path; it will point at ${env.stateDir})`,
+    );
+  }
+  if (svc && svcReenable) {
+    diffLines.push(
+      `  + re-enable the background service (currently paused — e.g. by 'beagle stop')`,
     );
   }
   if (mode === "wire" && telemetrySupported(agent)) {
@@ -184,30 +242,100 @@ export function watchAgent(agent: string, env: WatchEnv, requested: WatchModeReq
     { mode: 0o755 },
   );
 
-  // Install the always-on service on first graduation (§6.7). Recorded with a
-  // null agent (it's shared, not per-agent) so it's removed only at uninstall
-  // or when the last watched agent is unwatched.
-  if (svc && !svcAlreadyInstalled) {
-    manifest.record({ kind: "service", agent: null, path: svc.path, backup: svc.kind });
-    installService(svc, env.serviceRunner ?? osServiceRunner);
+  // Install the always-on service on first graduation (§6.7), or repair a
+  // stale one. Recorded with a null agent (it's shared, not per-agent) so
+  // it's removed only at uninstall or when the last watched agent is
+  // unwatched. recordReplacing on repair: the entry may already exist.
+  if (svc && svcInstall) {
+    // recordReplacing, not record: a stale entry may linger if the file was
+    // deleted out from under it (status warns, user re-watches) — replace it.
+    manifest.recordReplacing({ kind: "service", agent: null, path: svc.path, backup: svc.kind });
+    installService(svc, runner);
+  } else if (svc && svcRepair) {
+    manifest.recordReplacing({ kind: "service", agent: null, path: svc.path, backup: svc.kind });
+    reinstallService(svc, runner);
+  } else if (svc && svcReenable) {
+    manifest.recordReplacing({ kind: "service", agent: null, path: svc.path, backup: svc.kind });
+    runner.activate(svc);
+  } else if (svc && svcOwned && !manifest.list().some((e) => e.kind === "service")) {
+    // A healthy unit on disk, baked for THIS state dir, that the manifest
+    // doesn't know about — orphaned by an older CLI's history. Adopt it
+    // (bookkeeping only, no OS action) so unwatch/uninstall can revert it and
+    // `stop` can pause it. A unit we can't parse is left entirely alone —
+    // never adopted (unwatch would then delete a file Beagle never wrote).
+    manifest.recordReplacing({ kind: "service", agent: null, path: svc.path, backup: svc.kind });
   }
 
   // Verify coverage against the user's actual shell (the honesty clause).
   const verdict = parseCoverageVerdict(agent, plan.shimPath, env.runType(agent));
   const modeTag = mode === "telemetry" ? " (agent telemetry — subscription-safe)" : "";
   let msg: string;
+  let shellReloadHint = false;
   if (verdict.covered) {
     msg = `watching ${agent}${modeTag} — verified: ${verdict.reason}. New shells are covered; run 'rehash' or open a new terminal for existing ones.`;
   } else {
-    // Never report a failure without the fix (R2: name the exact cause AND
-    // how to close it) — the usual cause is the shim dir not being on PATH.
-    msg =
-      `shim placed, but coverage is NOT yet active: ${verdict.reason}\n` +
+    // Never report a failure without the fix (R2) — and when the fix is a
+    // PATH-order problem, OFFER to apply it rather than dictating homework:
+    // one marker-guarded block in the shell rc, recorded in the manifest,
+    // removed by unwatch-of-last-agent/uninstall. An alias bypass is the one
+    // cause a PATH edit can't fix, so it keeps the manual explanation. An
+    // unknown shell (or a declined offer / malformed prior block) falls back
+    // to the printed instructions.
+    const aliasCase = verdict.reason.startsWith("an alias bypasses");
+    // Same poison-combo guard the service install uses: a REAL home + a tmp
+    // state dir must never write a /tmp shim path into the user's real rc —
+    // the manifest that would remove it lives in the throwaway dir. Fall back
+    // to printed instructions there.
+    const rcSkippedTmp = isTmpPath(env.stateDir) && !isTmpPath(env.home);
+    const rc = aliasCase || rcSkippedTmp
+      ? null
+      : rcTargetFor(env.shell, env.home, env.platform, env.shimDir, env.zdotdir);
+    const manual =
       `To fix, add Beagle's shim directory to the FRONT of your PATH — put this line in your shell rc (~/.zshrc or ~/.bashrc):\n` +
       `  export PATH="${env.shimDir}:$PATH"\n` +
       `then open a new terminal and run 'beagle status' to re-verify.`;
+    msg = `shim placed, but coverage is NOT yet active: ${verdict.reason}\n${manual}`;
+    if (
+      rc &&
+      env.confirm(
+        `Coverage isn't active yet: ${verdict.reason}\n` +
+          `Beagle can fix this by adding one guarded block to ${rc.path}:\n` +
+          `  ${rc.line}\n` +
+          `(removed automatically by 'beagle unwatch' / 'beagle uninstall')`,
+      )
+    ) {
+      if (pathBlockMalformed(rc.path)) {
+        // Refuse an ambiguous prior block — and DON'T record a manifest entry
+        // for an edit we're not making (that would make `status` lie).
+        msg =
+          `shim placed, but ${rc.path} has a malformed beagle block (a begin marker with no end) — not touching it.\n` +
+          `Remove the stray '# >>> beagle shims >>>' line, or apply the fix by hand:\n${manual}`;
+      } else {
+        // Record BEFORE mutating (§6.12); we now know we will actually write.
+        // agent null: one PATH block serves every shim, so it lives and dies
+        // with the LAST watched agent.
+        manifest.recordReplacing({ kind: "shellrc", agent: null, path: rc.path, backup: null });
+        installPathBlock(rc.path, rc.line);
+        shellReloadHint = true;
+        // Earn the "covered" claim by re-probing the shell the same way the
+        // covered branch did: the `-ic` probe sources the rc we just edited
+        // (zsh/linux-bash/fish). darwin bash reads ~/.bashrc, not the
+        // ~/.bash_profile we wrote, so it won't verify — don't overclaim there.
+        const reVerdict = parseCoverageVerdict(agent, plan.shimPath, env.runType(agent));
+        msg = reVerdict.covered
+          ? `shim placed. PATH updated in ${rc.path} — verified: new terminals are covered ` +
+            `(a guarded block Beagle owns; removed on unwatch/uninstall).`
+          : `shim placed. PATH updated in ${rc.path} — a guarded block Beagle owns and removes on unwatch/uninstall.\n` +
+            `New login shells will pick it up — open one, or run 'exec $SHELL -l'.`;
+      }
+    }
   }
-  return { applied: true, message: msg, verdict };
+  if (svcSkippedTmp) {
+    msg +=
+      `\nNote: background service NOT installed — the state dir (${env.stateDir}) is a temporary path ` +
+      `(test context); a login service must never be pointed at one.`;
+  }
+  return { applied: true, message: msg, verdict, shellReloadHint };
 }
 
 export function unwatchAgent(agent: string, env: WatchEnv): WatchResult {
@@ -232,16 +360,25 @@ export function unwatchAgent(agent: string, env: WatchEnv): WatchResult {
     }
   });
 
-  // The daemon service is shared across watched agents; tear it down only when
-  // the last one is unwatched (no shim/config-redirect entries remain).
+  // The daemon service and the shell-rc PATH block are shared across watched
+  // agents; tear them down only when the last one is unwatched (no
+  // shim/config-redirect entries remain). The rc edit removes exactly the
+  // marker-guarded block Beagle added — the user's file is otherwise theirs.
   const remaining = manifest.list();
   const anyAgentLeft = remaining.some((e) => e.kind === "shim" || e.kind === "config-redirect");
   let serviceRemoved = false;
+  let rcCleaned: string | null = null;
   if (!anyAgentLeft) {
     manifest.removeFor(null, (e) => {
       if (e.kind === "service") {
         removeService(e.path, (e.backup as ServiceKind) ?? "systemd", runner);
         serviceRemoved = true;
+      }
+      // Scope the strip to OUR block: if another state dir has since re-taken
+      // the shared rc file, its block references a different shim dir and we
+      // leave it alone (removePathBlock returns false).
+      if (e.kind === "shellrc" && removePathBlock(e.path, env.shimDir)) {
+        rcCleaned = e.path;
       }
     });
   }
@@ -250,9 +387,12 @@ export function unwatchAgent(agent: string, env: WatchEnv): WatchResult {
   return {
     applied: true,
     serviceRemoved,
-    message:
-      `unwatched ${agent} — shim removed, config restored.` +
-      (serviceRemoved ? " Background service removed (no agents left watched)." : ""),
+    // One action per line — several teardowns can land in a single unwatch.
+    message: [
+      `unwatched ${agent} — shim removed, config restored.`,
+      ...(serviceRemoved ? ["Background service removed (no agents left watched)."] : []),
+      ...(rcCleaned ? [`PATH block removed from ${rcCleaned}.`] : []),
+    ].join("\n"),
   };
 }
 

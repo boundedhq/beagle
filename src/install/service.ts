@@ -110,6 +110,9 @@ export function servicePlan(
 export interface ServiceRunner {
   activate(plan: ServicePlan): void;
   deactivate(plan: { kind: ServiceKind; path: string }): void;
+  /** Is the unit currently loaded/enabled? Optional — a runner without it
+   *  (older tests) reads as "active", so nothing re-activates spuriously. */
+  isActive?(plan: { kind: ServiceKind; path: string }): boolean;
 }
 
 export const osServiceRunner: ServiceRunner = {
@@ -127,6 +130,13 @@ export const osServiceRunner: ServiceRunner = {
       spawnQuiet(["systemctl", "--user", "disable", "--now", "beagle.service"]);
     }
   },
+  isActive(plan) {
+    if (plan.kind === "launchd") {
+      const uid = typeof process.getuid === "function" ? process.getuid() : 501;
+      return spawnOk(["launchctl", "print", `gui/${uid}/${SERVICE_LABEL}`]);
+    }
+    return spawnOk(["systemctl", "--user", "is-active", "--quiet", "beagle.service"]);
+  },
 };
 
 function spawnQuiet(argv: string[]): void {
@@ -137,6 +147,30 @@ function spawnQuiet(argv: string[]): void {
   }
 }
 
+function spawnOk(argv: string[]): boolean {
+  try {
+    return Bun.spawnSync(argv, { stdio: ["ignore", "ignore", "ignore"] }).exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Which state dir does an installed unit point its daemon at? Parses both
+ *  formats WE generate; anything unrecognizable → null (a hand-edited unit is
+ *  the user's — repair must not clobber what it can't read). */
+export function serviceStateDir(content: string): string | null {
+  const plist = content.match(
+    /<key>BEAGLE_STATE_DIR<\/key>\s*<string>([^<]*)<\/string>/,
+  );
+  if (plist) {
+    return plist[1]!
+      .replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  }
+  const unit = content.match(/Environment="BEAGLE_STATE_DIR=((?:[^"\\]|\\.)*)"/);
+  if (unit) return unit[1]!.replace(/\\(["\\])/g, "$1");
+  return null;
+}
+
 /** Write + activate the unit. Returns false if it was already installed. */
 export function installService(plan: ServicePlan, runner: ServiceRunner): boolean {
   if (existsSync(plan.path)) return false;
@@ -145,6 +179,17 @@ export function installService(plan: ServicePlan, runner: ServiceRunner): boolea
   chmodSync(plan.path, 0o644);
   runner.activate(plan);
   return true;
+}
+
+/** Overwrite + re-activate an EXISTING unit (repair path: the installed one
+ *  points its daemon at the wrong state dir). Deactivate first so launchd/
+ *  systemd re-read the corrected file rather than keeping the old process. */
+export function reinstallService(plan: ServicePlan, runner: ServiceRunner): void {
+  runner.deactivate(plan);
+  mkdirSync(dirname(plan.path), { recursive: true });
+  writeFileSync(plan.path, plan.content, { mode: 0o644 });
+  chmodSync(plan.path, 0o644);
+  runner.activate(plan);
 }
 
 export function removeService(path: string, kind: ServiceKind, runner: ServiceRunner): void {
