@@ -399,3 +399,57 @@ describe("shellrc PATH block", () => {
     expect(rcTargetFor("/usr/bin/nushell", "/h", "linux", "/s")).toBeNull();
   });
 });
+
+// Service verify/repair: an installed unit pointing at the wrong state dir is
+// the "always-on daemon for the wrong store" failure — caught live when a
+// stale test unit pinned the real launchd agent to /tmp/beagle-lease.*.
+import { launchdPlist, servicePlan, serviceStateDir, systemdUnit } from "../src/install/service";
+
+describe("watchAgent — service verify/repair", () => {
+  test("a unit baked with a different state dir is repaired (rewritten + reactivated)", () => {
+    const env = makeEnv();
+    const plan = servicePlan(env.platform, env.home, env.beagleBinary, env.stateDir)!;
+    mkdirSync(join(env.home, ".config", "systemd", "user"), { recursive: true });
+    writeFileSync(plan.path, systemdUnit({ beagleBinary: env.beagleBinary, stateDir: "/tmp/beagle-lease.STALE" }));
+    const before = deactivations.length;
+    const r = watchAgent("claude", env);
+    expect(r.applied).toBe(true);
+    const after = readFileSync(plan.path, "utf8");
+    expect(after).toContain(env.stateDir);
+    expect(after).not.toContain("beagle-lease.STALE");
+    expect(deactivations.length).toBe(before + 1); // deactivate → rewrite → activate
+    // the shared entry exists exactly once
+    const svcEntries = new ChangeManifest(env.stateDir).list().filter((e) => e.kind === "service");
+    expect(svcEntries.length).toBe(1);
+  });
+
+  test("a hand-edited unit Beagle can't parse is left alone", () => {
+    const env = makeEnv();
+    const plan = servicePlan(env.platform, env.home, env.beagleBinary, env.stateDir)!;
+    mkdirSync(join(env.home, ".config", "systemd", "user"), { recursive: true });
+    writeFileSync(plan.path, "# my custom unit\n[Service]\nExecStart=/somewhere/else\n");
+    watchAgent("claude", env);
+    expect(readFileSync(plan.path, "utf8")).toContain("my custom unit"); // untouched
+  });
+
+  test("poison combo: tmp state dir + REAL home skips the service entirely", () => {
+    const env = makeEnv({ home: "/Users/nonexistent-real-home" }); // never written to
+    const r = watchAgent("claude", env);
+    expect(r.applied).toBe(true);
+    expect(r.message).toContain("background service NOT installed");
+    const kinds = new ChangeManifest(env.stateDir).list().map((e) => e.kind);
+    expect(kinds).not.toContain("service");
+  });
+});
+
+describe("serviceStateDir", () => {
+  test("reads back both unit formats, including escaped characters", () => {
+    const odd = '/tmp/we"ird &dir';
+    expect(serviceStateDir(launchdPlist({ beagleBinary: "/b", stateDir: odd }))).toBe(odd);
+    expect(serviceStateDir(systemdUnit({ beagleBinary: "/b", stateDir: odd }))).toBe(odd);
+  });
+  test("hand-edited/unknown content → null", () => {
+    expect(serviceStateDir("[Service]\nExecStart=/x daemon\n")).toBeNull();
+    expect(serviceStateDir("")).toBeNull();
+  });
+});

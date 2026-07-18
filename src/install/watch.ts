@@ -1,7 +1,8 @@
 // watch/unwatch orchestration (design §6.7, §6.12, R2). Places a PATH shim
 // after a diff-and-confirm, verifies coverage via the user's real shell, and
 // records every mutation in the change manifest so revert is mechanical.
-import { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { AGENTS } from "../cli/agents";
 import { ChangeManifest } from "./manifest";
@@ -9,12 +10,29 @@ import { isBeagleShim, shimScript, parseCoverageVerdict, type CoverageVerdict } 
 import { installPathBlock, rcTargetFor, removePathBlock } from "./shellrc";
 import {
   installService,
+  reinstallService,
   removeService,
   servicePlan,
+  serviceStateDir,
   osServiceRunner,
   type ServiceKind,
   type ServiceRunner,
 } from "./service";
+
+// A path that lives in a throwaway location. A REAL home plus a tmp state dir
+// is the poison combo: it would pin the user's login service to a directory
+// that evaporates — which is exactly what a Jul-13 acceptance-test run did
+// live (launchd agent left pointing at /tmp/beagle-lease.*).
+function isTmpPath(p: string): boolean {
+  const r = resolve(p);
+  return (
+    r.startsWith("/tmp/") ||
+    r.startsWith("/private/tmp/") ||
+    r.startsWith("/private/var/folders/") ||
+    r.startsWith("/var/folders/") ||
+    r.startsWith(resolve(tmpdir()) + "/")
+  );
+}
 
 export interface WatchEnv {
   stateDir: string;
@@ -128,20 +146,38 @@ export function watchAgent(agent: string, env: WatchEnv, requested: WatchModeReq
         `a shim exec'ing itself would loop forever. Run 'beagle unwatch ${agent}' first, or check your PATH.`,
     };
   }
-  // The always-on daemon service is installed once, on the first graduation.
-  const svc = servicePlan(env.platform, env.home, env.beagleBinary, env.stateDir);
-  const svcAlreadyInstalled = svc ? existsSync(svc.path) : true;
+  // The always-on daemon service is installed once, on the first graduation —
+  // and VERIFIED on every later watch: an installed unit whose baked state dir
+  // doesn't match this one is keeping a daemon alive for the wrong store (the
+  // exact failure a stale test unit caused live) and gets repaired. A unit we
+  // can't parse was hand-edited — the user's; left alone. The poison-combo
+  // guard skips service install entirely when a REAL home would be pointed at
+  // a throwaway state dir.
+  let svc = servicePlan(env.platform, env.home, env.beagleBinary, env.stateDir);
+  const svcSkippedTmp = Boolean(svc && isTmpPath(env.stateDir) && !isTmpPath(env.home));
+  if (svcSkippedTmp) svc = null;
+  const svcOnDisk = svc && existsSync(svc.path) ? readFileSync(svc.path, "utf8") : null;
+  const svcInstall = Boolean(svc && svcOnDisk === null);
+  const svcBakedState = svcOnDisk !== null ? serviceStateDir(svcOnDisk) : null;
+  const svcRepair = Boolean(svc && svcBakedState !== null && resolve(svcBakedState) !== resolve(env.stateDir));
+  const svcChanges = svcInstall || svcRepair;
   const diffLines = [
-    `Beagle will make ${svc && !svcAlreadyInstalled ? "these changes" : "one change"}:`,
+    `Beagle will make ${svcChanges ? "these changes" : "one change"}:`,
     `  + create a PATH shim at ${plan.shimPath}`,
     mode === "telemetry"
       ? `    (runs the real ${agent} at ${plan.real} with its own telemetry reporting to Beagle — ${why})`
       : `    (execs the real ${agent} at ${plan.real} through Beagle)`,
   ];
-  if (svc && !svcAlreadyInstalled) {
+  if (svc && svcInstall) {
     diffLines.push(
       `  + install a background service (${svc.kind}) so watched agents stay covered across reboots`,
       `    at ${svc.path}`,
+    );
+  }
+  if (svc && svcRepair) {
+    diffLines.push(
+      `  + repair the background service at ${svc.path}`,
+      `    (it keeps a daemon alive for ${svcBakedState} — a stale/test path; it will point at ${env.stateDir})`,
     );
   }
   if (mode === "wire" && telemetrySupported(agent)) {
@@ -187,12 +223,16 @@ export function watchAgent(agent: string, env: WatchEnv, requested: WatchModeReq
     { mode: 0o755 },
   );
 
-  // Install the always-on service on first graduation (§6.7). Recorded with a
-  // null agent (it's shared, not per-agent) so it's removed only at uninstall
-  // or when the last watched agent is unwatched.
-  if (svc && !svcAlreadyInstalled) {
+  // Install the always-on service on first graduation (§6.7), or repair a
+  // stale one. Recorded with a null agent (it's shared, not per-agent) so
+  // it's removed only at uninstall or when the last watched agent is
+  // unwatched. recordReplacing on repair: the entry may already exist.
+  if (svc && svcInstall) {
     manifest.record({ kind: "service", agent: null, path: svc.path, backup: svc.kind });
     installService(svc, env.serviceRunner ?? osServiceRunner);
+  } else if (svc && svcRepair) {
+    manifest.recordReplacing({ kind: "service", agent: null, path: svc.path, backup: svc.kind });
+    reinstallService(svc, env.serviceRunner ?? osServiceRunner);
   }
 
   // Verify coverage against the user's actual shell (the honesty clause).
@@ -237,6 +277,11 @@ export function watchAgent(agent: string, env: WatchEnv, requested: WatchModeReq
         : `shim placed, but ${rc.path} has a malformed beagle block (a begin marker with no end) — not touching it.\n` +
           `Remove the stray '# >>> beagle shims >>>' line, or apply the fix by hand:\n${manual}`;
     }
+  }
+  if (svcSkippedTmp) {
+    msg +=
+      `\nNote: background service NOT installed — the state dir (${env.stateDir}) is a temporary path ` +
+      `(test context); a login service must never be pointed at one.`;
   }
   return { applied: true, message: msg, verdict };
 }

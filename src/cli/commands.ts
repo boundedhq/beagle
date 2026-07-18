@@ -12,6 +12,7 @@ import { GraduationTracker } from "../install/graduation";
 import { claudeAuthMode, codexAuthMode, detectAgents, knownExtraLocations, pathDirsFromEnv } from "../install/detect";
 import { watchAgent, unwatchAgent, type WatchEnv, type WatchModeRequest } from "../install/watch";
 import { ChangeManifest } from "../install/manifest";
+import { serviceStateDir } from "../install/service";
 import { listLeakEvents } from "../viewer/feed-query";
 import { sessionHeadlines } from "../viewer/session-view";
 import { buildDetail, leakSpansFor, leakTypesFor } from "../viewer/detail";
@@ -154,13 +155,39 @@ export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null):
   const cont = (text: string) => " ".repeat(STATUS_GUTTER) + text;
   const lines: string[] = [];
 
+  const manifest = new ChangeManifest(stateDir);
+  const watchedEntries = manifest.list().filter((e) => e.kind === "shim" || e.kind === "config-redirect");
   if (daemonUp) {
     lines.push(row("daemon", `running — pid ${daemonUp.pid} · proxy 127.0.0.1:${daemonUp.proxyPort}`));
     // Say WHY it is running, so nobody has to wonder when it will go away.
     const why = daemonWhy(daemonUp);
     if (why) lines.push(cont(why));
+  } else if (watchedEntries.length > 0) {
+    // With shims installed, "not running" is a between-sessions state, not a
+    // coverage gap: the shim starts the daemon when the agent launches. (The
+    // background service should keep one alive anyway — a warning below says
+    // so if it can't.)
+    lines.push(row("daemon", "not running — starts on demand at the next watched-agent launch (or `beagle ui`)"));
   } else {
     lines.push(row("daemon", "not running — new agent sessions go DIRECT (unmonitored)"));
+  }
+  // The background service's one job is keeping a daemon alive for THIS state
+  // dir. An installed unit that is missing or baked with a different state
+  // dir silently un-does the "always on" promise — say so, with the fix.
+  const svcEntry = manifest.list().find((e) => e.kind === "service");
+  if (svcEntry && watchedEntries.length > 0) {
+    const agentHint = watchedEntries[0]?.agent ?? "<agent>";
+    if (!existsSync(svcEntry.path)) {
+      lines.push(cont(`▲ background service file is missing — re-run \`beagle watch ${agentHint}\` to reinstall`));
+    } else {
+      const baked = serviceStateDir(readFileSync(svcEntry.path, "utf8"));
+      if (baked !== null && resolvePath(baked) !== resolvePath(stateDir)) {
+        lines.push(
+          cont(`▲ background service keeps a daemon alive for ${baked} (a stale/test path),`),
+          cont(`  not this store — re-run \`beagle watch ${agentHint}\` to repair it`),
+        );
+      }
+    }
   }
   lines.push("");
 
@@ -199,7 +226,6 @@ export function cmdStatus(stateDir: string, daemonUp: DaemonInfo | null = null):
   );
   lines.push("");
 
-  const manifest = new ChangeManifest(stateDir);
   lines.push(
     row("changes", manifest.list().length === 0
       ? "none — beagle has modified nothing on this system"

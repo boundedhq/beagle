@@ -698,3 +698,63 @@ describe("runCallsArrived (the wire zero-capture tripwire's predicate)", () => {
   });
 });
 
+
+// Status honesty for the watched-but-daemon-down state, and the service
+// health warning (the "always-on daemon for the wrong store" failure).
+import { mkdirSync as mkdirSync2 } from "node:fs";
+import { systemdUnit as systemdUnit2 } from "../src/install/service";
+
+describe("cmdStatus — daemon wording + service health", () => {
+  const shimEntry = (dir: string) => ({
+    kind: "shim", agent: "opencode", path: join(dir, "shims", "opencode"), backup: null,
+  });
+
+  test("daemon down + no watches → the DIRECT warning", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-status-"));
+    expect(cmdStatus(dir, null)).toContain("go DIRECT (unmonitored)");
+  });
+
+  test("daemon down + watched agents → starts-on-demand wording, not DIRECT", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-status-"));
+    writeFileSync(join(dir, "changes.json"), JSON.stringify([shimEntry(dir)]));
+    const s = cmdStatus(dir, null);
+    expect(s).toContain("starts on demand at the next watched-agent launch");
+    expect(s).not.toContain("go DIRECT");
+  });
+
+  test("a service entry whose file is missing gets a warning with the fix", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-status-"));
+    writeFileSync(join(dir, "changes.json"), JSON.stringify([
+      shimEntry(dir),
+      { kind: "service", agent: null, path: join(dir, "beagle.service"), backup: "systemd" },
+    ]));
+    const s = cmdStatus(dir, null);
+    expect(s).toContain("background service file is missing");
+    expect(s).toContain("beagle watch opencode");
+  });
+
+  test("a service baked with a stale state dir gets the repair warning", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-status-"));
+    const svcPath = join(dir, "beagle.service");
+    writeFileSync(svcPath, systemdUnit2({ beagleBinary: "/b", stateDir: "/tmp/beagle-lease.STALE" }));
+    writeFileSync(join(dir, "changes.json"), JSON.stringify([
+      shimEntry(dir),
+      { kind: "service", agent: null, path: svcPath, backup: "systemd" },
+    ]));
+    const s = cmdStatus(dir, null);
+    expect(s).toContain("/tmp/beagle-lease.STALE");
+    expect(s).toContain("re-run `beagle watch opencode` to repair");
+  });
+
+  test("a healthy service produces no warning", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-status-"));
+    const svcPath = join(dir, "beagle.service");
+    writeFileSync(svcPath, systemdUnit2({ beagleBinary: "/b", stateDir: dir }));
+    writeFileSync(join(dir, "changes.json"), JSON.stringify([
+      shimEntry(dir),
+      { kind: "service", agent: null, path: svcPath, backup: "systemd" },
+    ]));
+    const s = cmdStatus(dir, null);
+    expect(s).not.toContain("▲ background service");
+  });
+});
