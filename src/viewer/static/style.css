@@ -371,12 +371,12 @@ button.linklike:hover { text-decoration: underline; }
 }
 /* Section labels above each raw block — same typography as the transcript's
    .mc-name labels, colored the same way (request accent, response ok). */
+/* Only the raw stream's label still uses an h4 — request/response sections
+   carry the same ⇢/⇠ .dir-label the transcript uses (one vocabulary). */
 .detail h4 {
   font-family: var(--sans); font-size: 10.5px; text-transform: uppercase;
   letter-spacing: 0.07em; font-weight: 600; color: var(--muted); margin: 16px 0 6px;
 }
-.detail h4.req { color: var(--accent); }
-.detail h4.resp { color: var(--ok); }
 /* The readable ⇄ raw switch: a segmented control so it reads as two views,
    not a lone button (users didn't notice it toggled anything). */
 .viewswitch { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 14px 0 12px; }

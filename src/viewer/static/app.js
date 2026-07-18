@@ -841,9 +841,9 @@ function Detail({ id, onSession }) {
       </div>`}
       ${showRaw
         ? html`
-            <h4 class="req">request</h4>
+            <div class="dir-label sent">⇢ request</div>
             <${RawBody} body=${detail.requestRaw} leaks=${leaks} />
-            <h4 class="resp">response</h4>
+            <div class="dir-label recv">⇠ response</div>
             <${RawBody} body=${detail.responseRaw} leaks=${leaks} />
             ${detail.sseRaw &&
             html`<h4>raw stream (as received)</h4><pre>${detail.sseRaw}</pre>`}
@@ -851,6 +851,11 @@ function Detail({ id, onSession }) {
         : html`
             ${system != null &&
             html`<${Chip} label="system prompt" body=${system} />`}
+            ${messages.length > 0 &&
+            html`<div class="dir-label sent"
+              title=${detail.source === "wire"
+                ? "what this request sent to the provider — earlier messages fold below"
+                : "what the agent reported sending"}>⇢ request</div>`}
             ${context.length > 0 && showOlderInline
               ? context.map((m) => html`<${TMsg} m=${m} leaks=${leaks} />`)
               : html`
@@ -862,10 +867,12 @@ function Detail({ id, onSession }) {
                   </div>`}
                   ${historyOpen && context.map((m) => html`<${TMsg} m=${m} leaks=${leaks} />`)}
                 `}
-            ${newFrom != null && html`<h4 class="req" title="new content in this request — earlier messages are resent automatically">sent this turn</h4>`}
             ${fresh.map((m) => html`<${TMsg} m=${m} leaks=${leaks} />`)}
-            ${newFrom != null && (detail.responseText != null || responseCalls.length > 0) &&
-            html`<h4 class="resp">response</h4>`}
+            ${(detail.responseText != null || responseCalls.length > 0) &&
+            html`<div class="dir-label recv"
+              title=${detail.source === "wire"
+                ? "what the model sent back — its reply and/or the tools it asked the agent to run"
+                : "what the agent reported receiving back"}>⇠ response</div>`}
             ${detail.responseText != null &&
             html`<${TMsg} m=${{ role: "response", content: detail.responseText }} leaks=${respHighlights} />`}
             ${responseCalls.length > 0 &&
