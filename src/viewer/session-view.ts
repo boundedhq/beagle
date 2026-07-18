@@ -184,12 +184,17 @@ export function buildSessionTurns(store: Store, sessionId: string, cap = 200): S
       // be the duplication the delta view exists to kill. The ▸ details and
       // raw views keep the resent bytes. Guards: an UNMATCHED echo stays
       // visible (unparseable/truncated previous response — a wrong drop must
-      // be impossible by construction), and a leak-bearing echo is NEVER
-      // dropped — the request copy is the scanned occurrence (R7). A result
-      // that lost its tool name (previous_response_id-chained clients send no
-      // fc echo to pair with) borrows name + detail from the call it answers.
+      // be impossible by construction), and NOTHING is dropped from a turn
+      // that carries a detected secret — the request copy is where a secret
+      // in tool args is scanned (R7). That's a turn-level check on purpose: it
+      // makes R7 hold at the drop site itself, rather than leaning on a
+      // value-match (which escaping could defeat) plus the leak-not-visible
+      // note downstream. A result that lost its tool name (previous_response_id
+      // -chained clients send no fc echo to pair with) borrows name + detail
+      // from the call it answers.
       const prevCalls = lastWireTurn?.responseCalls ?? [];
       if (prevCalls.length > 0) {
+        const turnHasLeak = d.leaks.length > 0;
         messages = messages
           .map((m) => {
             if (m.kind === "result" && !m.tool && m.callId) {
@@ -201,8 +206,7 @@ export function buildSessionTurns(store: Store, sessionId: string, cap = 200): S
           .filter((m) => {
             const isEcho =
               m.kind === "call" && m.callId && prevCalls.some((c) => c.callId === m.callId);
-            if (!isEcho) return true;
-            return d.leaks.some((l) => l.value && String(m.content).includes(l.value));
+            return !isEcho || turnHasLeak;
           });
       }
       // Stateless APIs echo the previous RESPONSE back as the next request's
