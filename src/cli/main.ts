@@ -2,8 +2,8 @@
 // leaks, show, purge — the whole product without the viewer.
 import {
   cmdConfig, cmdDetect, cmdHookForward, cmdLeaks, cmdPurge, cmdRun, cmdSearch, cmdShow,
-  cmdStatus, cmdStop, cmdUninstall, cmdUnwatch, cmdWatch, defaultStateDir, offerRefreshedShell,
-  parseWatchArgs, readLineSync,
+  cmdStatus, cmdStop, cmdUninstall, cmdUnwatch, cmdUnwatchAll, cmdUnwatchSelect, cmdWatch,
+  defaultStateDir, offerRefreshedShell, parseWatchArgs, readLineSync,
 } from "./commands";
 import { BEAGLE_VERSION } from "../core/version";
 
@@ -21,10 +21,11 @@ usage:
   beagle watch <agent> [--yes]   watch an agent automatically (PATH shim);
                                  subscription logins auto-detected (claude,
                                  codex); --telemetry/--wire to force a mode
-  beagle unwatch <agent> [--force]
-                                 stop watching, restore your setup (stops the
-                                 daemon too when nothing is left watched;
-                                 refuses mid-capture unless --force)
+  beagle unwatch [<agent>|--all] [--force]
+                                 stop watching, restore your setup (no agent:
+                                 pick from what's watched; stops the daemon
+                                 too when nothing is left watched; refuses
+                                 mid-capture unless --force)
   beagle stop [--force]          stop the background daemon (refuses while an
                                  agent session is being captured)
   beagle detect                  find supported agents on this machine
@@ -82,8 +83,10 @@ export async function run(argv: string[]): Promise<number> {
     }
     case "unwatch": {
       const agent = rest.find((a) => !a.startsWith("--"));
-      if (!agent) { console.error("usage: beagle unwatch <agent> [--force]"); return 2; }
-      console.log(await cmdUnwatch(stateDir, agent, rest.includes("--force")));
+      const force = rest.includes("--force");
+      if (rest.includes("--all")) { console.log(await cmdUnwatchAll(stateDir, force)); return 0; }
+      if (!agent) { console.log(await cmdUnwatchSelect(stateDir, force)); return 0; }
+      console.log(await cmdUnwatch(stateDir, agent, force));
       return 0;
     }
     case "stop":

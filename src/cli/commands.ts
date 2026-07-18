@@ -608,8 +608,7 @@ export async function cmdUninstall(
   // non-interactive path deterministically — mirrors resolveRunMode(isTTY).
   isTTY = Boolean(process.stdin.isTTY),
 ): Promise<string> {
-  const manifest = new ChangeManifest(stateDir);
-  const watched = [...new Set(manifest.list().filter((e) => e.kind === "shim" && e.agent).map((e) => e.agent!))];
+  const watched = watchedAgents(stateDir);
   const hasStore = existsSync(join(stateDir, "beagle.db"));
   const daemonUp = (await pingDaemon(stateDir)) !== null;
   if (!existsSync(stateDir) || (!watched.length && !hasStore && !daemonUp)) {
@@ -880,6 +879,24 @@ export async function offerRefreshedShell(
   return true;
 }
 
+/** Agents currently watched, per the manifest — the manifest entry, not the
+ *  shim file, IS the watch relationship (mirrors unwatchAgent's definition,
+ *  including config-redirect-only agents). */
+export function watchedAgents(stateDir: string): string[] {
+  return [...new Set(
+    new ChangeManifest(stateDir).list()
+      .filter((e) => (e.kind === "shim" || e.kind === "config-redirect") && e.agent)
+      .map((e) => e.agent!),
+  )];
+}
+
+async function liveLeases(stateDir: string): Promise<number> {
+  const daemon = await pingDaemon(stateDir);
+  if (!daemon) return 0;
+  const status = await controlRequest(daemon.socketPath, { cmd: "status" });
+  return (status.data as { leases?: number } | undefined)?.leases ?? 0;
+}
+
 export async function cmdUnwatch(stateDir: string, agent: string, force = false): Promise<string> {
   // Check for a live capture BEFORE touching anything: removing the last
   // agent tears down the shared background service, which kills the
@@ -887,17 +904,13 @@ export async function cmdUnwatch(stateDir: string, agent: string, force = false)
   // lease check can't protect a capture that's already been dropped. Refuse a
   // deliberate unwatch mid-capture; --force overrides (uninstall forces).
   if (!force) {
-    const daemon = await pingDaemon(stateDir);
-    if (daemon) {
-      const status = await controlRequest(daemon.socketPath, { cmd: "status" });
-      const leases = (status.data as { leases?: number } | undefined)?.leases ?? 0;
-      if (leases > 0) {
-        return (
-          `not unwatching ${agent} — Beagle is capturing ${leases} live session${leases === 1 ? "" : "s"} and ` +
-          `unwatch would tear down the daemon and drop them.\n` +
-          `Finish those sessions first, or force with: beagle unwatch ${agent} --force`
-        );
-      }
+    const leases = await liveLeases(stateDir);
+    if (leases > 0) {
+      return (
+        `not unwatching ${agent} — Beagle is capturing ${leases} live session${leases === 1 ? "" : "s"} and ` +
+        `unwatch would tear down the daemon and drop them.\n` +
+        `Finish those sessions first, or force with: beagle unwatch ${agent} --force`
+      );
     }
   }
   const r = unwatchAgent(agent, buildWatchEnv(stateDir, true));
@@ -912,6 +925,59 @@ export async function cmdUnwatch(stateDir: string, agent: string, force = false)
     }
   }
   return r.message;
+}
+
+/** Unwatch every agent in one shot — "stop watching, keep my data"
+ *  (uninstall is this plus erasing the store). One lease check up front,
+ *  then each per-agent unwatch runs forced so a partial teardown can't
+ *  strand the shared service on a manifest that says no agents remain. */
+export async function cmdUnwatchAll(stateDir: string, force = false): Promise<string> {
+  const agents = watchedAgents(stateDir);
+  if (!agents.length) return "nothing is watched.";
+  if (!force) {
+    const leases = await liveLeases(stateDir);
+    if (leases > 0) {
+      return (
+        `not unwatching — Beagle is capturing ${leases} live session${leases === 1 ? "" : "s"} and ` +
+        `unwatch would tear down the daemon and drop them.\n` +
+        `Finish those sessions first, or force with: beagle unwatch --all --force`
+      );
+    }
+  }
+  const out: string[] = [];
+  for (const a of agents) out.push(await cmdUnwatch(stateDir, a, true));
+  return out.join("\n");
+}
+
+/** `beagle unwatch` with no agent: show what's watched and ask which.
+ *  One agent → a plain yes/no; several → a numbered pick (number, name, or
+ *  'all'). No TTY → print the choices instead of hanging on a read. */
+export async function cmdUnwatchSelect(
+  stateDir: string,
+  force = false,
+  isTTY = Boolean(process.stdin.isTTY),
+  readLine: () => string = readLineSync,
+): Promise<string> {
+  const agents = watchedAgents(stateDir);
+  if (!agents.length) return "nothing is watched.";
+  if (!isTTY) {
+    return `beagle unwatch <agent> — watched: ${agents.join(", ")} (or: beagle unwatch --all)`;
+  }
+  if (agents.length === 1) {
+    process.stdout.write(`Unwatch ${agents[0]}? [y/N] `);
+    if (!/^y(es)?$/i.test(readLine().trim())) return "cancelled — nothing changed.";
+    return cmdUnwatch(stateDir, agents[0]!, force);
+  }
+  process.stdout.write(
+    "watched agents:\n" +
+      agents.map((a, i) => `  ${i + 1}. ${a}`).join("\n") +
+      `\nUnwatch which? [1-${agents.length}, name, or 'all'] `,
+  );
+  const ans = readLine().trim();
+  if (ans.toLowerCase() === "all") return cmdUnwatchAll(stateDir, force);
+  const pick = /^\d+$/.test(ans) ? agents[Number(ans) - 1] : agents.find((a) => a === ans);
+  if (!pick) return "cancelled — nothing changed.";
+  return cmdUnwatch(stateDir, pick, force);
 }
 
 // Reads one line from stdin (until newline or EOF, capped at 64 KB). Exported

@@ -835,3 +835,99 @@ describe("offerRefreshedShell (post-rc-fix refreshed shell offer)", () => {
     expect(spawned).toBe(1);
   });
 });
+
+// unwatch ergonomics: bare `beagle unwatch` picks from what's watched;
+// --all is the "stop watching everything, keep my data" teardown.
+import { cmdUnwatchAll, cmdUnwatchSelect, watchedAgents } from "../src/cli/commands";
+import { mkdirSync } from "node:fs";
+
+function watchedFixture(agents: string[]): string {
+  const dir = mkdtempSync(join(tmpdir(), "beagle-unw-"));
+  mkdirSync(join(dir, "shims"), { recursive: true });
+  const entries = agents.map((a) => {
+    const p = join(dir, "shims", a);
+    writeFileSync(p, "#!/bin/sh\n");
+    return { kind: "shim", agent: a, path: p, backup: null };
+  });
+  writeFileSync(join(dir, "changes.json"), JSON.stringify(entries));
+  return dir;
+}
+
+describe("watchedAgents", () => {
+  test("unique agents from shim AND config-redirect entries", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-unw-"));
+    writeFileSync(join(dir, "changes.json"), JSON.stringify([
+      { kind: "shim", agent: "claude", path: join(dir, "s1"), backup: null },
+      { kind: "config-redirect", agent: "opencode", path: join(dir, "c1"), backup: null },
+      { kind: "config-backup", agent: "opencode", path: join(dir, "c2"), backup: null },
+      { kind: "shellrc", agent: null, path: join(dir, "rc"), backup: null },
+    ]));
+    expect(watchedAgents(dir)).toEqual(["claude", "opencode"]);
+  });
+});
+
+describe("cmdUnwatchAll", () => {
+  test("nothing watched", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-unw-"));
+    expect(await cmdUnwatchAll(dir)).toBe("nothing is watched.");
+  });
+
+  test("removes every agent's shim and empties the manifest", async () => {
+    const dir = watchedFixture(["claude", "opencode"]);
+    const out = await cmdUnwatchAll(dir);
+    expect(out).toContain("claude");
+    expect(out).toContain("opencode");
+    expect(existsSync(join(dir, "shims", "claude"))).toBe(false);
+    expect(existsSync(join(dir, "shims", "opencode"))).toBe(false);
+    expect(watchedAgents(dir)).toEqual([]);
+  });
+});
+
+describe("cmdUnwatchSelect (bare `beagle unwatch`)", () => {
+  test("no TTY: prints the choices instead of hanging on a read", async () => {
+    const dir = watchedFixture(["claude", "opencode"]);
+    const out = await cmdUnwatchSelect(dir, false, false, () => {
+      throw new Error("must not read stdin without a TTY");
+    });
+    expect(out).toContain("watched: claude, opencode");
+    expect(watchedAgents(dir)).toEqual(["claude", "opencode"]); // untouched
+  });
+
+  test("single watched agent: plain yes/no", async () => {
+    const dir = watchedFixture(["claude"]);
+    await cmdUnwatchSelect(dir, false, true, () => "y\n");
+    expect(watchedAgents(dir)).toEqual([]);
+  });
+
+  test("single watched agent: decline changes nothing", async () => {
+    const dir = watchedFixture(["claude"]);
+    const out = await cmdUnwatchSelect(dir, false, true, () => "\n");
+    expect(out).toBe("cancelled — nothing changed.");
+    expect(watchedAgents(dir)).toEqual(["claude"]);
+  });
+
+  test("pick by number", async () => {
+    const dir = watchedFixture(["claude", "opencode"]);
+    await cmdUnwatchSelect(dir, false, true, () => "2\n");
+    expect(watchedAgents(dir)).toEqual(["claude"]);
+  });
+
+  test("pick by name", async () => {
+    const dir = watchedFixture(["claude", "opencode"]);
+    await cmdUnwatchSelect(dir, false, true, () => "claude\n");
+    expect(watchedAgents(dir)).toEqual(["opencode"]);
+  });
+
+  test("'all' falls through to cmdUnwatchAll", async () => {
+    const dir = watchedFixture(["claude", "opencode"]);
+    await cmdUnwatchSelect(dir, false, true, () => "all\n");
+    expect(watchedAgents(dir)).toEqual([]);
+  });
+
+  test("out-of-range number and garbage both cancel", async () => {
+    const dir = watchedFixture(["claude", "opencode"]);
+    expect(await cmdUnwatchSelect(dir, false, true, () => "7\n")).toBe("cancelled — nothing changed.");
+    expect(await cmdUnwatchSelect(dir, false, true, () => "wat\n")).toBe("cancelled — nothing changed.");
+    expect(watchedAgents(dir)).toEqual(["claude", "opencode"]);
+  });
+});

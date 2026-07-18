@@ -118,7 +118,8 @@ What Beagle is **not**:
 beagle detect              # find your agents and the command for each
 beagle run <agent>         # capture one session; nothing changed on your system
 beagle watch <agent>       # always-on for that agent (a PATH shim; asks first)
-beagle unwatch <agent>     # stop watching; restores your setup
+beagle unwatch [<agent>]   # stop watching; restores your setup
+                           # (no agent: pick from a list; --all for everything)
 beagle status              # trust strip: coverage, store size, retention, changes
 beagle leaks               # the leak log — every detected secret, deduped
 beagle search [string]     # was this exact string ever sent? (no arg → reads stdin)
