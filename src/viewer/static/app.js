@@ -282,14 +282,16 @@ function App() {
   `;
 }
 
-// Split a summary into [lead, sent-suffix] display runs so the feed can mute
-// the suffix — the row then reads two-toned like the transcript's direction
-// labels. Recognizes exactly the suffix shapes buildSummary appends (same
-// pattern the title strips use); anything else renders as one plain run.
-// Text nodes only either way (§6.8).
+// Split a summary into display runs so the feed can mute the SENT half — the
+// row reads two-toned in wire order: sent quiet, got-back bright. Recognizes
+// exactly the shapes buildSummary emits, leading `"ask" → ` / `N x results → `
+// (plus the legacy trailing suffix on old rows); anything else renders as one
+// plain run. Text nodes only either way (§6.8).
 function summaryParts(summary) {
   const s = summary ?? "(no summary)";
-  const m = s.match(/^([\s\S]*)( — (?:to "[^"]{0,80}"|after \d+ [A-Za-z_][\w.-]{0,40} results?))$/);
+  let m = s.match(/^("[^"]{1,40}" → |\d+ [A-Za-z_][\w.-]{0,40} results? → )([\s\S]*)$/);
+  if (m) return [[m[1], true], [m[2], false]];
+  m = s.match(/^([\s\S]*)( — (?:to "[^"]{0,80}"|after \d+ [A-Za-z_][\w.-]{0,40} results?))$/);
   return m ? [[m[1], false], [m[2], true]] : [[s, false]];
 }
 
@@ -394,14 +396,18 @@ function Sessions({ onOpen, leaksOnly }) {
 // unwrap that to the clean title; other agents' summaries are plain text and
 // pass through. Already secret-scrubbed at capture, so nothing to sanitize.
 function sessionTitle(raw) {
-  // Summaries may carry a "what the agent sent" suffix (— to "…" / — after N
-  // tool results) — feed context, not title material. Strip only the LAST
-  // occurrence (the greedy leading group pushes the match rightmost) and keep
-  // the quoted ask bounded/quote-free so a title that legitimately contains
-  // the pattern loses at most the real suffix, never its own text.
-  const t = (raw ?? "")
-    .replace(/^([\s\S]*) — (?:to "[^"]{0,80}"|after \d+ [A-Za-z_][\w.-]{0,40} results?)$/, "$1")
-    .trim();
+  // Summaries read in wire order: `"ask" → got` / `N x results → got`. For a
+  // title, the ASK is the best material (it names the conversation, the way
+  // chat apps title threads); a results-led line titles by what came back.
+  // Older rows may still carry the legacy trailing suffix (— to "…" /
+  // — after N x results) — strip it (rightmost, bounded). A summary matching
+  // none of these is already title-shaped.
+  let t = (raw ?? "").trim();
+  let m = t.match(/^"([^"]{1,40})" → [\s\S]*$/);
+  if (m) t = m[1];
+  else if ((m = t.match(/^\d+ [A-Za-z_][\w.-]{0,40} results? → ([\s\S]*)$/))) t = m[1];
+  else t = t.replace(/^([\s\S]*) — (?:to "[^"]{0,80}"|after \d+ [A-Za-z_][\w.-]{0,40} results?)$/, "$1");
+  t = t.trim();
   if (t.startsWith("{")) {
     try {
       const o = JSON.parse(t);

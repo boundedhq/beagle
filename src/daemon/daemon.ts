@@ -803,10 +803,11 @@ function findingValues(
     .filter((v) => v.value !== "");
 }
 
-// A plain-English "what happened" line (R7). Leads with the assistant's
-// actions (tool calls) or reply — never the raw user message, which for a
-// leak turn would echo the secret into the always-visible feed — then adds
-// what the agent SENT as a short suffix, so one line covers both directions.
+// A plain-English "what happened" line (R7), in wire order: what the request
+// sent (short, bounded) → what came back (actions or reply). The scrub below
+// runs unconditionally with the scan findings, so a detected secret in the
+// quoted ask never reaches the feed; the quote is capped at 40 chars either
+// way. One line, both directions, same reading order as the ⇢/⇠ views.
 export function buildSummary(
   parsed: ParsedRequest | null,
   responseText?: string,
@@ -823,19 +824,21 @@ export function buildSummary(
     actions = actions?.map((a) => (a.detail ? { ...a, detail: scrub(a.detail) } : a));
     if (parsed) parsed = { ...parsed, messages: parsed.messages.map((m) => ({ ...m, content: scrub(m.content) })) };
   }
-  // The sent-suffix is computed FIRST so the lead can budget the line: when
-  // both halves render, the lead caps at 2 actions / 70 chars — a suffix that
-  // exists but never fits the visible row is worse than none. Skipped for
-  // one-shots — their summaries feed sessionTitle's JSON unwrap untouched.
-  const suffix = parsed?.oneShot ? "" : sentSuffix(parsed?.messages);
-  const lead =
+  // Wire order: what the request sent, then what came back — the same
+  // reading direction as every ⇢/⇠ surface. The sent half leads because it
+  // is short and BOUNDED (a 40-char quoted ask or "N x results"), so the
+  // response keeps the rest of the line; the response half still budgets
+  // (2 actions / 80 chars) when both render. Skipped for one-shots — their
+  // summaries feed sessionTitle's JSON unwrap untouched.
+  const sent = parsed?.oneShot ? "" : sentPart(parsed?.messages);
+  const got =
     actions && actions.length > 0
-      ? summarizeActions(actions, suffix !== "")
+      ? summarizeActions(actions, sent !== "")
       : responseText
-        ? firstLine(responseText, suffix ? 70 : 100)
+        ? firstLine(responseText, sent ? 80 : 100)
         : null;
-  if (lead !== null) {
-    return `${lead}${suffix}`;
+  if (got !== null) {
+    return sent ? `${sent} → ${got}` : got;
   }
   if (!parsed) return "unparsed call (raw view available)";
   if (parsed.messages.length === 0) return "(no message content)";
@@ -849,15 +852,16 @@ export function buildSummary(
 // The request's newest content, judged from its trailing messages only (the
 // daemon has no previous-call diff): a trailing user message, or a trailing
 // run of tool results. Content is already scrubbed by the caller.
-function sentSuffix(messages?: DisplayMessage[]): string {
+// The request's newest content as the summary's LEADING half: a trailing run
+// of tool results ("3 webfetch results") or the trailing user ask (quoted,
+// capped at 40). The results check comes FIRST: Anthropic's protocol carries
+// tool results inside user-ROLE messages (kind stamps them at parse) —
+// quoting those as the user's ask would caption tool output as human words.
+// Tool names are parse-sanitized identifiers, so the title/splitter regexes
+// can recognize the shape. Content is already scrubbed by the caller.
+function sentPart(messages?: DisplayMessage[]): string {
   if (!messages?.length) return "";
   const last = messages.at(-1)!;
-  // The results check comes FIRST: Anthropic's protocol carries tool results
-  // inside user-ROLE messages (kind stamps them at parse) — quoting those as
-  // the user's ask would caption tool output as human words. Name the tool
-  // when the trailing run agrees on one ("after 3 webfetch results" beats
-  // "after 3 tool results" at the same width); names are parse-sanitized
-  // identifiers, so the title-strip regexes can match them.
   let results = 0;
   const tools = new Set<string>();
   for (let i = messages.length - 1; i >= 0 && messages[i]!.kind === "result"; i--) {
@@ -866,9 +870,9 @@ function sentSuffix(messages?: DisplayMessage[]): string {
   }
   if (results > 0) {
     const name = tools.size === 1 ? [...tools][0]! : "tool";
-    return ` — after ${results} ${name} result${results === 1 ? "" : "s"}`;
+    return `${results} ${name} result${results === 1 ? "" : "s"}`;
   }
-  if (last.role === "user") return ` — to "${firstLine(last.content, 40)}"`;
+  if (last.role === "user") return `"${firstLine(last.content, 40)}"`;
   return "";
 }
 

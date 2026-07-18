@@ -242,9 +242,12 @@ function fmtWhen(ts: number): string {
 // results) — feed/CLI context, not a title — then unwrap Claude Code's
 // title-generation turn whose summary is literally {"title":"…"}.
 function unwrapTitle(raw: string | undefined): string {
-  const t = (raw ?? "")
-    .replace(/^([\s\S]*) — (?:to "[^"]{0,80}"|after \d+ [A-Za-z_][\w.-]{0,40} results?)$/, "$1")
-    .trim();
+  let t = (raw ?? "").trim();
+  let m = t.match(/^"([^"]{1,40})" → [\s\S]*$/);
+  if (m) t = m[1]!;
+  else if ((m = t.match(/^\d+ [A-Za-z_][\w.-]{0,40} results? → ([\s\S]*)$/))) t = m[1]!;
+  else t = t.replace(/^([\s\S]*) — (?:to "[^"]{0,80}"|after \d+ [A-Za-z_][\w.-]{0,40} results?)$/, "$1");
+  t = t.trim();
   if (t.startsWith("{")) {
     try {
       const o = JSON.parse(t) as { title?: unknown };
