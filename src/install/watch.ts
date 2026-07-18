@@ -360,10 +360,12 @@ export function unwatchAgent(agent: string, env: WatchEnv): WatchResult {
   return {
     applied: true,
     serviceRemoved,
-    message:
-      `unwatched ${agent} — shim removed, config restored.` +
-      (serviceRemoved ? " Background service removed (no agents left watched)." : "") +
-      (rcCleaned ? ` PATH block removed from ${rcCleaned}.` : ""),
+    // One action per line — several teardowns can land in a single unwatch.
+    message: [
+      `unwatched ${agent} — shim removed, config restored.`,
+      ...(serviceRemoved ? ["Background service removed (no agents left watched)."] : []),
+      ...(rcCleaned ? [`PATH block removed from ${rcCleaned}.`] : []),
+    ].join("\n"),
   };
 }
 

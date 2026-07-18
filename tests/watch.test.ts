@@ -131,6 +131,8 @@ describe("watchAgent", () => {
     const r = unwatchAgent("claude", env);
     expect(r.applied).toBe(true);
     expect(r.message).toContain(`PATH block removed from ${rcPath}`);
+    // one action per line: unwatched / service removed / PATH block removed
+    expect(r.message.split("\n")).toHaveLength(3);
     const after = readFileSync(rcPath, "utf8");
     expect(after).not.toContain("beagle shims");
     expect(after).toContain("# mine before"); // the user's content survives

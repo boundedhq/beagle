@@ -921,7 +921,7 @@ export async function cmdUnwatch(stateDir: string, agent: string, force = false)
     const daemon = await pingDaemon(stateDir);
     if (daemon) {
       await controlRequest(daemon.socketPath, { cmd: "shutdown", args: { force: true } });
-      return r.message + " Daemon stopped.";
+      return r.message + "\nDaemon stopped.";
     }
   }
   return r.message;
