@@ -245,6 +245,9 @@ main { flex: 1; padding: 8px 16px; }
 .row .agent { color: var(--accent); flex: 0 0 100px; overflow: hidden; text-overflow: ellipsis; }
 .row .model { color: var(--muted); flex: 0 0 130px; overflow: hidden; text-overflow: ellipsis; }
 .row .summary { flex: 1 1 auto; min-width: 120px; overflow: hidden; text-overflow: ellipsis; }
+/* The summary's "what the agent sent" suffix (— to "…" / — after N x results)
+   renders muted, so the row reads two-toned: got-back bright, sent quiet. */
+.sum-suffix { color: var(--muted); }
 /* 12 id chars: a ULID's first 10 encode the millisecond, so sessions minted
    together are identical at 6-8 chars — two extra random chars disambiguate
    (the title-generation turn lands in the same instant its conversation

@@ -282,6 +282,17 @@ function App() {
   `;
 }
 
+// Split a summary into [lead, sent-suffix] display runs so the feed can mute
+// the suffix — the row then reads two-toned like the transcript's direction
+// labels. Recognizes exactly the suffix shapes buildSummary appends (same
+// pattern the title strips use); anything else renders as one plain run.
+// Text nodes only either way (§6.8).
+function summaryParts(summary) {
+  const s = summary ?? "(no summary)";
+  const m = s.match(/^([\s\S]*)( — (?:to "[^"]{0,80}"|after \d+ [A-Za-z_][\w.-]{0,40} results?))$/);
+  return m ? [[m[1], false], [m[2], true]] : [[s, false]];
+}
+
 function Row({ x, onToggle, onSession }) {
   const t = new Date(x.tsRequest).toLocaleTimeString();
   return html`
@@ -299,7 +310,8 @@ function Row({ x, onToggle, onSession }) {
       <span class="time">${t}</span>
       <span class="agent">${x.agent ?? "?"}</span>
       <span class="model">${x.model ?? ""}</span>
-      <span class="summary">${x.summary ?? "(no summary)"}</span>
+      <span class="summary">${summaryParts(x.summary).map(([text, muted], i) =>
+        muted ? html`<span key=${i} class="sum-suffix">${text}</span>` : text)}</span>
       ${x.hasLeak && html`<span class="chip leak">leak</span>`}
       ${x.source === "wire"
         ? html`<span class="chip wire"
@@ -388,7 +400,7 @@ function sessionTitle(raw) {
   // the quoted ask bounded/quote-free so a title that legitimately contains
   // the pattern loses at most the real suffix, never its own text.
   const t = (raw ?? "")
-    .replace(/^([\s\S]*) — (?:to "[^"]{0,80}"|after \d+ tool results?)$/, "$1")
+    .replace(/^([\s\S]*) — (?:to "[^"]{0,80}"|after \d+ [A-Za-z_][\w.-]{0,40} results?)$/, "$1")
     .trim();
   if (t.startsWith("{")) {
     try {

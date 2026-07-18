@@ -243,7 +243,7 @@ function fmtWhen(ts: number): string {
 // title-generation turn whose summary is literally {"title":"…"}.
 function unwrapTitle(raw: string | undefined): string {
   const t = (raw ?? "")
-    .replace(/^([\s\S]*) — (?:to "[^"]{0,80}"|after \d+ tool results?)$/, "$1")
+    .replace(/^([\s\S]*) — (?:to "[^"]{0,80}"|after \d+ [A-Za-z_][\w.-]{0,40} results?)$/, "$1")
     .trim();
   if (t.startsWith("{")) {
     try {

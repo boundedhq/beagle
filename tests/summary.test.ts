@@ -117,6 +117,55 @@ describe("buildSummary — sent suffix", () => {
     expect(s).not.toContain('to "452 pass');
   });
 
+  test("the suffix names the tool when the trailing results agree on one", () => {
+    const s = buildSummary(
+      req([
+        { role: "user", content: "q" },
+        { role: "tool", content: "out1", kind: "result", tool: "webfetch" },
+        { role: "tool", content: "out2", kind: "result", tool: "webfetch" },
+      ]),
+      undefined,
+      [{ tool: "grep", detail: "opencode" }],
+    );
+    expect(s).toBe("searched `opencode` — after 2 webfetch results");
+  });
+
+  test("mixed-tool trailing results fall back to the generic name", () => {
+    const s = buildSummary(
+      req([
+        { role: "tool", content: "a", kind: "result", tool: "bash" },
+        { role: "tool", content: "b", kind: "result", tool: "webfetch" },
+      ]),
+      "Done.",
+    );
+    expect(s).toBe("Done. — after 2 tool results");
+  });
+
+  test("with a suffix, the lead budgets to 2 actions and shows the overflow as +N", () => {
+    const s = buildSummary(
+      req([{ role: "tool", content: "r", kind: "result", tool: "bash" }]),
+      undefined,
+      [
+        { tool: "webfetch", detail: "https://a.test/x" },
+        { tool: "webfetch", detail: "https://b.test/y" },
+        { tool: "webfetch", detail: "https://c.test/z" },
+      ],
+    );
+    expect(s).toBe("fetched `https://a.test/x`, fetched `https://b.test/y` +1 — after 1 bash result");
+  });
+
+  test("without a suffix, 3 actions show and deeper overflow is +N, never silent", () => {
+    const s = buildSummary(
+      req([{ role: "user", content: "go" }, { role: "assistant", content: "x" }]),
+      undefined,
+      [
+        { tool: "bash", detail: "a" }, { tool: "bash", detail: "b" },
+        { tool: "bash", detail: "c" }, { tool: "bash", detail: "d" },
+      ],
+    );
+    expect(s).toBe("ran `a`, ran `b`, ran `c` +1");
+  });
+
   test("a secret in the trailing user message is scrubbed before the suffix truncates", () => {
     const SECRET = "AKIAZQ3DRSTUVWXY2345";
     const s = buildSummary(
