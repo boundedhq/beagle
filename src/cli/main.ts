@@ -2,7 +2,8 @@
 // leaks, show, purge — the whole product without the viewer.
 import {
   cmdConfig, cmdDetect, cmdHookForward, cmdLeaks, cmdPurge, cmdRun, cmdSearch, cmdShow,
-  cmdStatus, cmdStop, cmdUninstall, cmdUnwatch, cmdWatch, defaultStateDir, parseWatchArgs, readLineSync,
+  cmdStatus, cmdStop, cmdUninstall, cmdUnwatch, cmdWatch, defaultStateDir, offerRefreshedShell,
+  parseWatchArgs, readLineSync,
 } from "./commands";
 import { BEAGLE_VERSION } from "../core/version";
 
@@ -70,6 +71,13 @@ export async function run(argv: string[]): Promise<number> {
       if ("error" in parsed) { console.error(parsed.error); return 2; }
       const r = cmdWatch(stateDir, parsed.agent, parsed.yes, parsed.mode);
       console.log(r.message);
+      if (r.ok && r.shellReloadHint) {
+        const launched = parsed.yes ? false : await offerRefreshedShell();
+        if (!launched)
+          console.log(
+            "(this terminal keeps its old PATH — open a new one, or run `exec $SHELL` to refresh in place)",
+          );
+      }
       return r.ok ? 0 : 1;
     }
     case "unwatch": {

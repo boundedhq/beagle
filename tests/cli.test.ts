@@ -795,3 +795,43 @@ describe("findInstalledService scoping", () => {
     expect(findInstalledService(dir)).toEqual({ kind: "launchd", path: svcPath });
   });
 });
+
+// The "source ~/.zshrc" automation: a child process can never mutate its
+// parent shell's PATH, so after an rc fix `beagle watch` offers a refreshed
+// shell in place. TTY-gated so scripts and --yes runs never grow a subshell.
+import { offerRefreshedShell } from "../src/cli/commands";
+
+describe("offerRefreshedShell (post-rc-fix refreshed shell offer)", () => {
+  test("non-TTY: never prompts, never spawns", async () => {
+    let spawned = 0;
+    const r = await offerRefreshedShell(false, "/bin/zsh",
+      async () => { spawned++; },
+      () => { throw new Error("must not read stdin without a TTY"); });
+    expect(r).toBe(false);
+    expect(spawned).toBe(0);
+  });
+
+  test("plain Enter takes the default (yes) and spawns the user's shell", async () => {
+    const spawnedWith: string[] = [];
+    const r = await offerRefreshedShell(true, "/bin/zsh",
+      async (sh) => { spawnedWith.push(sh); }, () => "\n");
+    expect(r).toBe(true);
+    expect(spawnedWith).toEqual(["/bin/zsh"]);
+  });
+
+  test("'n' declines — no shell spawned", async () => {
+    let spawned = 0;
+    const r = await offerRefreshedShell(true, "/bin/zsh",
+      async () => { spawned++; }, () => "n\n");
+    expect(r).toBe(false);
+    expect(spawned).toBe(0);
+  });
+
+  test("'yes' accepts", async () => {
+    let spawned = 0;
+    const r = await offerRefreshedShell(true, "/bin/zsh",
+      async () => { spawned++; }, () => "yes\n");
+    expect(r).toBe(true);
+    expect(spawned).toBe(1);
+  });
+});

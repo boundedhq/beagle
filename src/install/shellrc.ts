@@ -28,7 +28,9 @@ export function rcTargetFor(
 ): RcTarget | null {
   const name = shell.split("/").pop() ?? "";
   if (name === "zsh") {
-    return { path: join(zdotdir ?? home, ".zshrc"), line: exportLine(shimDir) };
+    // `|| home`, not `??`: ZDOTDIR set-but-empty means "unset" to zsh, and an
+    // empty string here would resolve to ./.zshrc in whatever CWD we run from.
+    return { path: join(zdotdir || home, ".zshrc"), line: exportLine(shimDir) };
   }
   if (name === "bash") {
     return {

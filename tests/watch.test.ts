@@ -35,6 +35,7 @@ describe("watchAgent", () => {
     const r = watchAgent("claude", env);
     expect(r.applied).toBe(true);
     expect(r.verdict?.covered).toBe(true);
+    expect(r.shellReloadHint).toBe(false); // already covered → no reload offer
     expect(existsSync(join(env.shimDir, "claude"))).toBe(true);
     const shim = readFileSync(join(env.shimDir, "claude"), "utf8");
     expect(shim).toContain("beagle");
@@ -69,7 +70,9 @@ describe("watchAgent", () => {
     // consent (confirm → true) → the fix is APPLIED, not dictated
     const rcPath = join(env.home, ".zshrc");
     expect(r.message).toContain(`PATH updated in ${rcPath}`);
-    expect(r.message).toContain("beagle status");
+    expect(r.message).toContain("New terminals are covered automatically");
+    // the CLI offers a refreshed shell for THIS terminal — signalled via the hint
+    expect(r.shellReloadHint).toBe(true);
     const rc = readFileSync(rcPath, "utf8");
     expect(rc).toContain("# >>> beagle shims >>>");
     expect(rc).toContain(`export PATH="${env.shimDir}:$PATH"`);
@@ -86,6 +89,7 @@ describe("watchAgent", () => {
     });
     const r = watchAgent("claude", env);
     expect(r.message).toContain(`export PATH="${env.shimDir}:$PATH"`);
+    expect(r.shellReloadHint).toBe(false); // no rc change → nothing to reload
     expect(existsSync(join(env.home, ".zshrc"))).toBe(false);
     expect(new ChangeManifest(env.stateDir).list().some((e) => e.kind === "shellrc")).toBe(false);
   });
@@ -114,6 +118,7 @@ describe("watchAgent", () => {
     writeFileSync(rcPath, "# my stuff\n# >>> beagle shims >>>\nexport PATH=oops\n"); // no end marker
     const r = watchAgent("claude", env);
     expect(r.message).toContain("malformed");
+    expect(r.shellReloadHint).toBe(false); // nothing changed → no reload offer
     expect(readFileSync(rcPath, "utf8")).toContain("export PATH=oops"); // untouched
   });
 
@@ -391,6 +396,9 @@ describe("shellrc PATH block", () => {
       path: "/h/.zshrc", line: 'export PATH="/s:$PATH"',
     });
     expect(rcTargetFor("/bin/zsh", "/h", "linux", "/s", "/zdot")?.path).toBe("/zdot/.zshrc");
+    // ZDOTDIR set-but-empty means unset — an empty string must never produce
+    // a CWD-relative "./.zshrc" (found live: block written into the repo root)
+    expect(rcTargetFor("/bin/zsh", "/h", "linux", "/s", "")?.path).toBe("/h/.zshrc");
     expect(rcTargetFor("/bin/bash", "/h", "darwin", "/s")?.path).toBe("/h/.bash_profile");
     expect(rcTargetFor("/bin/bash", "/h", "linux", "/s")?.path).toBe("/h/.bashrc");
     const fish = rcTargetFor("/usr/bin/fish", "/h", "linux", "/s");

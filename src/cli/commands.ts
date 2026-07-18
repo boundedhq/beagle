@@ -850,11 +850,34 @@ export function cmdWatch(
   agent: string,
   yes: boolean,
   mode: WatchModeRequest = "auto",
-): { ok: boolean; message: string } {
+): { ok: boolean; message: string; shellReloadHint?: boolean } {
   const env = buildWatchEnv(stateDir, yes);
   const r = watchAgent(agent, env, mode);
   if (r.applied) new GraduationTracker(stateDir).markWatched(agent);
-  return { ok: r.applied, message: r.message };
+  return { ok: r.applied, message: r.message, shellReloadHint: r.shellReloadHint };
+}
+
+/** The closest thing to "source ~/.zshrc for the user" the OS allows: a child
+ *  process can never mutate its parent shell's PATH, but it CAN hand the user
+ *  a fresh shell that read the updated rc — so the terminal they are sitting
+ *  in (where they'll type the agent's name next) is covered immediately.
+ *  Interactive-TTY only: scripts and --yes runs must never grow a subshell. */
+export async function offerRefreshedShell(
+  isTTY = Boolean(process.stdin.isTTY),
+  shell = process.env.SHELL ?? "/bin/sh",
+  spawnShell: (sh: string) => Promise<unknown> = (sh) =>
+    Bun.spawn([sh, "-i"], { stdio: ["inherit", "inherit", "inherit"] }).exited,
+  readLine: () => string = readLineSync,
+): Promise<boolean> {
+  if (!isTTY) return false;
+  process.stdout.write(
+    "Cover THIS terminal now? Beagle can start a refreshed shell here ('exit' returns). [Y/n] ",
+  );
+  const line = readLine().trim();
+  if (line !== "" && !/^y(es)?$/i.test(line)) return false;
+  console.log(`(refreshed ${shell} — watched agents resolve to their shims here)`);
+  await spawnShell(shell);
+  return true;
 }
 
 export async function cmdUnwatch(stateDir: string, agent: string, force = false): Promise<string> {

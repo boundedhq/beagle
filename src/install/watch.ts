@@ -62,6 +62,9 @@ export interface WatchResult {
   /** unwatch only: the shared background service was torn down too (this was
    *  the last watched agent) — the caller may also stop a running daemon. */
   serviceRemoved?: boolean;
+  /** The rc PATH block was (re)applied this run: NEW shells are covered but
+   *  the CALLING shell is stale — the CLI can offer to spawn a refreshed one. */
+  shellReloadHint?: boolean;
 }
 
 /** How a watched agent is captured. "auto" resolves per agent: telemetry when
@@ -258,6 +261,7 @@ export function watchAgent(agent: string, env: WatchEnv, requested: WatchModeReq
   const verdict = parseCoverageVerdict(agent, plan.shimPath, env.runType(agent));
   const modeTag = mode === "telemetry" ? " (agent telemetry — subscription-safe)" : "";
   let msg: string;
+  let shellReloadHint = false;
   if (verdict.covered) {
     msg = `watching ${agent}${modeTag} — verified: ${verdict.reason}. New shells are covered; run 'rehash' or open a new terminal for existing ones.`;
   } else {
@@ -290,11 +294,16 @@ export function watchAgent(agent: string, env: WatchEnv, requested: WatchModeReq
       // every shim, so it lives and dies with the LAST watched agent.
       manifest.recordReplacing({ kind: "shellrc", agent: null, path: rc.path, backup: null });
       const r = installPathBlock(rc.path, rc.line);
-      msg = r.ok
-        ? `shim placed. PATH updated in ${rc.path} — a guarded block Beagle owns and removes on unwatch/uninstall.\n` +
-          `This terminal predates the change: open a new one (or run 'source ${rc.path}'), then 'beagle status' to re-verify.`
-        : `shim placed, but ${rc.path} has a malformed beagle block (a begin marker with no end) — not touching it.\n` +
+      if (r.ok) {
+        shellReloadHint = true;
+        msg =
+          `shim placed. PATH updated in ${rc.path} — a guarded block Beagle owns and removes on unwatch/uninstall.\n` +
+          `New terminals are covered automatically.`;
+      } else {
+        msg =
+          `shim placed, but ${rc.path} has a malformed beagle block (a begin marker with no end) — not touching it.\n` +
           `Remove the stray '# >>> beagle shims >>>' line, or apply the fix by hand:\n${manual}`;
+      }
     }
   }
   if (svcSkippedTmp) {
@@ -302,7 +311,7 @@ export function watchAgent(agent: string, env: WatchEnv, requested: WatchModeReq
       `\nNote: background service NOT installed — the state dir (${env.stateDir}) is a temporary path ` +
       `(test context); a login service must never be pointed at one.`;
   }
-  return { applied: true, message: msg, verdict };
+  return { applied: true, message: msg, verdict, shellReloadHint };
 }
 
 export function unwatchAgent(agent: string, env: WatchEnv): WatchResult {
