@@ -680,6 +680,7 @@ function buildWatchEnv(stateDir: string, yes: boolean): WatchEnv {
     shell: process.env.SHELL ?? "/bin/sh",
     platform: process.platform,
     home: homedir(),
+    zdotdir: process.env.ZDOTDIR,
     resolveReal: (agent) => resolveRealBinary(stateDir, agent),
     runType: (agent) => {
       try {

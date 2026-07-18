@@ -5,7 +5,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export interface ChangeEntry {
-  kind: "shim" | "config-backup" | "config-redirect" | "service";
+  kind: "shim" | "config-backup" | "config-redirect" | "service" | "shellrc";
   agent: string | null;
   path: string; // the file created/edited
   backup: string | null; // where the original was backed up, if any

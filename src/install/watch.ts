@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { AGENTS } from "../cli/agents";
 import { ChangeManifest } from "./manifest";
 import { isBeagleShim, shimScript, parseCoverageVerdict, type CoverageVerdict } from "./shim";
+import { installPathBlock, rcTargetFor, removePathBlock } from "./shellrc";
 import {
   installService,
   removeService,
@@ -24,6 +25,8 @@ export interface WatchEnv {
   shell: string; // $SHELL
   platform: NodeJS.Platform;
   home: string;
+  /** zsh's rc dir override, when set — .zshrc lives there, not in $HOME. */
+  zdotdir?: string;
   resolveReal: (agent: string) => string | null; // where the real binary is
   runType: (agent: string) => string; // `$SHELL -ic 'type <agent>'` output
   confirm: (diff: string) => boolean; // interactive y/N (or --yes)
@@ -199,13 +202,41 @@ export function watchAgent(agent: string, env: WatchEnv, requested: WatchModeReq
   if (verdict.covered) {
     msg = `watching ${agent}${modeTag} — verified: ${verdict.reason}. New shells are covered; run 'rehash' or open a new terminal for existing ones.`;
   } else {
-    // Never report a failure without the fix (R2: name the exact cause AND
-    // how to close it) — the usual cause is the shim dir not being on PATH.
-    msg =
-      `shim placed, but coverage is NOT yet active: ${verdict.reason}\n` +
+    // Never report a failure without the fix (R2) — and when the fix is a
+    // PATH-order problem, OFFER to apply it rather than dictating homework:
+    // one marker-guarded block in the shell rc, recorded in the manifest,
+    // removed by unwatch-of-last-agent/uninstall. An alias bypass is the one
+    // cause a PATH edit can't fix, so it keeps the manual explanation. An
+    // unknown shell (or a declined offer / malformed prior block) falls back
+    // to the printed instructions.
+    const aliasCase = verdict.reason.startsWith("an alias bypasses");
+    const rc = aliasCase
+      ? null
+      : rcTargetFor(env.shell, env.home, env.platform, env.shimDir, env.zdotdir);
+    const manual =
       `To fix, add Beagle's shim directory to the FRONT of your PATH — put this line in your shell rc (~/.zshrc or ~/.bashrc):\n` +
       `  export PATH="${env.shimDir}:$PATH"\n` +
       `then open a new terminal and run 'beagle status' to re-verify.`;
+    msg = `shim placed, but coverage is NOT yet active: ${verdict.reason}\n${manual}`;
+    if (
+      rc &&
+      env.confirm(
+        `Coverage isn't active yet: ${verdict.reason}\n` +
+          `Beagle can fix this by adding one guarded block to ${rc.path}:\n` +
+          `  ${rc.line}\n` +
+          `(removed automatically by 'beagle unwatch' / 'beagle uninstall')`,
+      )
+    ) {
+      // Record BEFORE mutating (§6.12). agent null: one PATH block serves
+      // every shim, so it lives and dies with the LAST watched agent.
+      manifest.recordReplacing({ kind: "shellrc", agent: null, path: rc.path, backup: null });
+      const r = installPathBlock(rc.path, rc.line);
+      msg = r.ok
+        ? `shim placed. PATH updated in ${rc.path} — a guarded block Beagle owns and removes on unwatch/uninstall.\n` +
+          `This terminal predates the change: open a new one (or run 'source ${rc.path}'), then 'beagle status' to re-verify.`
+        : `shim placed, but ${rc.path} has a malformed beagle block (a begin marker with no end) — not touching it.\n` +
+          `Remove the stray '# >>> beagle shims >>>' line, or apply the fix by hand:\n${manual}`;
+    }
   }
   return { applied: true, message: msg, verdict };
 }
@@ -232,16 +263,22 @@ export function unwatchAgent(agent: string, env: WatchEnv): WatchResult {
     }
   });
 
-  // The daemon service is shared across watched agents; tear it down only when
-  // the last one is unwatched (no shim/config-redirect entries remain).
+  // The daemon service and the shell-rc PATH block are shared across watched
+  // agents; tear them down only when the last one is unwatched (no
+  // shim/config-redirect entries remain). The rc edit removes exactly the
+  // marker-guarded block Beagle added — the user's file is otherwise theirs.
   const remaining = manifest.list();
   const anyAgentLeft = remaining.some((e) => e.kind === "shim" || e.kind === "config-redirect");
   let serviceRemoved = false;
+  let rcCleaned: string | null = null;
   if (!anyAgentLeft) {
     manifest.removeFor(null, (e) => {
       if (e.kind === "service") {
         removeService(e.path, (e.backup as ServiceKind) ?? "systemd", runner);
         serviceRemoved = true;
+      }
+      if (e.kind === "shellrc" && removePathBlock(e.path)) {
+        rcCleaned = e.path;
       }
     });
   }
@@ -252,7 +289,8 @@ export function unwatchAgent(agent: string, env: WatchEnv): WatchResult {
     serviceRemoved,
     message:
       `unwatched ${agent} — shim removed, config restored.` +
-      (serviceRemoved ? " Background service removed (no agents left watched)." : ""),
+      (serviceRemoved ? " Background service removed (no agents left watched)." : "") +
+      (rcCleaned ? ` PATH block removed from ${rcCleaned}.` : ""),
   };
 }
 
