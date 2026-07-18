@@ -103,6 +103,22 @@ describe("quiet-tier fallbacks", () => {
     expect(hit?.tier).toBe("possible");
   });
 
+  test("base64-wrapped documentation key is suppressed like the plaintext one", () => {
+    // base64("AKIAIOSFODNN7EXAMPLE") — the direct rule drops it on the
+    // "example" stopword; the decode probe must apply the same gate.
+    const f = scanText("blob = 'QUtJQUlPU0ZPRE5ON0VYQU1QTEU='");
+    expect(f.some((x) => x.detector === "base64-wrapped-secret")).toBe(false);
+  });
+
+  test("a real wrapped secret is still found after many benign base64 blobs", () => {
+    // Probe budget is a deadline backstop, not a detection cap: a genuine
+    // wrapped AKIA key must survive a wall of benign high-entropy base64.
+    const noise = Array.from({ length: 2000 }, (_, i) =>
+      `"t":"${Buffer.from(`benign-token-${i}-xyz`).toString("base64")}"`).join(",");
+    const f = scanText(`{${noise},"real":"QUtJQTJFMEE4RjNCOUMxRDdLNFA="}`);
+    expect(f.some((x) => x.detector === "base64-wrapped-secret")).toBe(true);
+  });
+
   test("base64 of innocent text stays silent", () => {
     // "hello world, this is a plain sentence."
     const f = scanText("data = 'aGVsbG8gd29ybGQsIHRoaXMgaXMgYSBwbGFpbiBzZW50ZW5jZS4='");

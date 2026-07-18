@@ -40,6 +40,19 @@ describe("redact-on-capture (R11)", () => {
     expect(out.values[0]?.value).toBe("AKIAZQ3DRSTUVWXY2345");
   });
 
+  test("overlapping findings on the same span don't corrupt the body", () => {
+    // Two quiet-tier rules can flag the same 40-char value (generic-assignment
+    // + aws-secret-shape). A naive double-splice ate the bytes after the span.
+    const body = '{"secret":"wJa1rXUtnF3MI4K7MDENGbPxRf9CYZ8qLm2Vt0Bn","next":"keepme"}';
+    const start = body.indexOf("wJa1");
+    const span = finding(start, start + 40, "aws-secret-shape");
+    const dup = finding(start, start + 40, "generic-api-key");
+    const out = dec(redactBody(enc(body), [span, dup]).bytes);
+    expect(out).not.toContain("wJa1rXUtnF3MI4K7MDENGbPxRf9CYZ8qLm2Vt0Bn");
+    expect(out).toContain('"next":"keepme"}'); // bytes after the span survive intact
+    expect(out.startsWith('{"secret":"[REDACTED:')).toBe(true);
+  });
+
   test("redactValues scrubs an echoed secret from another body", () => {
     const secret = "AKIAZQ3DRSTUVWXY2345";
     const resp = enc(`the model says your key ${secret} is set`);

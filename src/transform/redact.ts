@@ -19,10 +19,18 @@ export function redactBody(bytes: Uint8Array, findings: Finding[]): { bytes: Uin
   const ordered = [...findings].sort((a, b) => b.start - a.start);
   const values: Array<{ value: string; type: string }> = [];
   let out = text;
+  // Splicing assumes non-overlapping spans; two quiet-tier rules can flag the
+  // same bytes (e.g. a 40-char value matched by both the generic-assignment
+  // and the aws-secret-shape rule), and a double splice would corrupt the
+  // surrounding text. Skip any finding overlapping one already redacted —
+  // its value is still recorded, so echo-scrubbing below removes every copy.
+  let lastStart = Infinity;
   for (const f of ordered) {
     const value = text.slice(f.start, f.end);
     values.push({ value, type: f.secretType });
+    if (f.end > lastStart) continue;
     out = out.slice(0, f.start) + redactionPlaceholder(f.secretType, value) + out.slice(f.end);
+    lastStart = f.start;
   }
   return { bytes: new TextEncoder().encode(out), values };
 }

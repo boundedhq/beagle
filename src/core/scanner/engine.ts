@@ -53,11 +53,13 @@ export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): 
     if (spec.keywords.length > 0 && !spec.keywords.some((k) => lower.includes(k))) continue;
     re.lastIndex = 0;
     // probeBudget: decode-probe attempts are capped per rule pass because
-    // rejected candidates don't count toward MAX_FINDINGS_PER_RULE — without
-    // a cap, a body padded with thousands of high-entropy runs (git SHAs,
-    // wrapped base64) could ride the probe past the scan deadline and get the
-    // whole scan killed, suppressing every OTHER finding in the body.
-    let ruleFindings = 0, probeBudget = 512;
+    // rejected candidates don't count toward MAX_FINDINGS_PER_RULE. The cap is
+    // a deadline backstop, not a detection limit: a probe is ~0.35µs, so even
+    // an 8 MB body (the capture cap) full of ~134k base64 runs adds well under
+    // 50ms — the cap is set far above any realistic blob count so a genuine
+    // wrapped secret isn't lost behind a wall of benign base64, while a truly
+    // pathological body still can't ride the probe past the scan deadline.
+    let ruleFindings = 0, probeBudget = 1 << 16;
     let m: RegExpExecArray | null;
     while (ruleFindings < MAX_FINDINGS_PER_RULE && (m = re.exec(text)) !== null) {
       if (m[0].length === 0) { re.lastIndex++; continue; } // zero-width guard
@@ -71,13 +73,15 @@ export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): 
       // base64-secret validator: the blob only counts if it DECODES to
       // something a structured rule recognizes — base64 of anything else stays
       // silent, which is what keeps this rule viable on agent traffic full of
-      // benign base64. Validator-bearing rules are excluded from the probe, so
-      // it can't recurse and the base64 rule's own in-flight cursor is never
-      // touched; probed regexes need no lastIndex restore because this loop
-      // resets lastIndex before every rule's scan.
+      // benign base64. The decoded text runs the SAME stopword gate as a direct
+      // match, so a wrapped documentation key (base64 of AKIA…EXAMPLE) is
+      // suppressed just like the plaintext one. Validator-bearing rules are
+      // excluded from the probe, so it can't recurse and the base64 rule's own
+      // in-flight cursor is never touched; probed regexes need no lastIndex
+      // restore because this loop resets lastIndex before every rule's scan.
       if (spec.validators?.includes("base64-secret")) {
         const decoded = --probeBudget >= 0 ? Buffer.from(secret, "base64").toString("utf8") : "";
-        if (decoded.length < 8 || !compiled.rules.some(({ spec: s, re: r }) =>
+        if (decoded.length < 8 || STOPWORDS.some((w) => decoded.toLowerCase().includes(w)) || !compiled.rules.some(({ spec: s, re: r }) =>
           s.tier === "structured" && !s.validators?.length && ((r.lastIndex = 0), r.test(decoded)))) continue;
       }
       // Span the capture group, not the whole match: consumed leading
