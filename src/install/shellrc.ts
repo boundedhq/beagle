@@ -54,8 +54,12 @@ function exportLine(shimDir: string): string {
   return `export PATH="${escapeInQuotes(shimDir)}:$PATH"`;
 }
 
+// Inside double quotes, POSIX shells (and fish ≥3.4) still expand `$var` and
+// execute `$(…)` / backticks — so a shim dir literally named `/tmp/x$(cmd)`
+// would run `cmd` on every shell start. Escape all four active characters;
+// `$PATH` rides outside this (added by the template, not the dir).
 function escapeInQuotes(s: string): string {
-  return s.replace(/(["\\`])/g, "\\$1");
+  return s.replace(/(["\\`$])/g, "\\$1");
 }
 
 // fish: the dir is its own quoted token; $PATH is a separate list variable.
@@ -69,6 +73,30 @@ export function pathBlock(line: string): string {
     line,
     RC_END,
   ].join("\n");
+}
+
+// Find a marker only where it starts a line — so a user who COMMENTS OUT the
+// block (`## >>> beagle shims >>>`) or pastes the marker text into a comment
+// doesn't create a false boundary that install/remove would then act on
+// mid-line, silently re-activating or deleting user content.
+function lineAnchoredIndex(text: string, marker: string, from = 0): number {
+  let i = text.indexOf(marker, from);
+  while (i !== -1) {
+    if (i === 0 || text[i - 1] === "\n") return i;
+    i = text.indexOf(marker, i + 1);
+  }
+  return -1;
+}
+
+/** True when the rc has a begin marker with no matching end — an ambiguous
+ *  block installPathBlock refuses to touch. Exposed so the caller can decide
+ *  (and record the manifest entry) BEFORE attempting the mutation, instead of
+ *  recording an edit that then gets refused. */
+export function pathBlockMalformed(rcPath: string): boolean {
+  if (!existsSync(rcPath)) return false;
+  const current = readFileSync(rcPath, "utf8");
+  const begin = lineAnchoredIndex(current, RC_BEGIN);
+  return begin !== -1 && lineAnchoredIndex(current, RC_END, begin) === -1;
 }
 
 /** Append (or replace) the guarded block. Creates the rc file/dirs if absent.
@@ -85,9 +113,9 @@ export function installPathBlock(rcPath: string, line: string): { ok: boolean; c
     writeFileSync(rcPath, block + "\n", { mode: 0o644 });
     return { ok: true, changed: true };
   }
-  const begin = current.indexOf(RC_BEGIN);
+  const begin = lineAnchoredIndex(current, RC_BEGIN);
   if (begin !== -1) {
-    const endMark = current.indexOf(RC_END, begin);
+    const endMark = lineAnchoredIndex(current, RC_END, begin);
     if (endMark === -1) return { ok: false, changed: false }; // malformed — hands off
     const end = endMark + RC_END.length;
     const replaced = current.slice(0, begin) + block + current.slice(end);
@@ -100,17 +128,24 @@ export function installPathBlock(rcPath: string, line: string): { ok: boolean; c
   return { ok: true, changed: true };
 }
 
-/** Strip the guarded block. Missing file / no markers → no-op (false). */
-export function removePathBlock(rcPath: string): boolean {
+/** Strip the guarded block. Missing file / no markers → no-op (false).
+ *  `mustReference` (this install's shim dir) scopes the removal: if the block
+ *  on disk references a DIFFERENT shim dir — another state dir re-took the
+ *  shared rc file — leave it alone rather than delete the other install's
+ *  coverage. */
+export function removePathBlock(rcPath: string, mustReference?: string): boolean {
   if (!existsSync(rcPath)) return false;
   const current = readFileSync(rcPath, "utf8");
-  const begin = current.indexOf(RC_BEGIN);
+  const begin = lineAnchoredIndex(current, RC_BEGIN);
   if (begin === -1) return false;
-  const endMark = current.indexOf(RC_END, begin);
+  const endMark = lineAnchoredIndex(current, RC_END, begin);
   // A begin marker with no end: don't guess at boundaries — leave the file
   // alone rather than delete user content.
   if (endMark === -1) return false;
   let end = endMark + RC_END.length;
+  if (mustReference !== undefined && !current.slice(begin, end).includes(escapeInQuotes(mustReference))) {
+    return false; // block belongs to a different install — not ours to remove
+  }
   if (current[end] === "\n") end++;
   // Also absorb the blank separator line the install added, if present.
   let start = begin;

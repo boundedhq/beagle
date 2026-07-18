@@ -63,9 +63,11 @@ wrong guess ever slips through, a session that captured nothing prints a
 warning afterwards naming the fix.
 
 `beagle watch` shows you the changes it wants to make before making them — a
-PATH shim for that agent, plus (the first time only) a background service so
-watched agents stay covered across reboots — and `beagle unwatch <agent>`
-reverts both.
+PATH shim for that agent, a background service so watched agents stay covered
+across reboots, and, if the shim isn't winning your PATH, one guarded block in
+your shell rc (`~/.zshrc` / `~/.bash_profile` / `config.fish`). Each is
+marker-owned and recorded; `beagle unwatch` (name it, pick from a list, or
+`--all`) reverts every one.
 
 **What's telemetry capture?** A subscription login only works over the
 vendor's own connection, so a proxy can't sit on that wire. Instead, Beagle
@@ -126,7 +128,7 @@ beagle search [string]     # was this exact string ever sent? (no arg → reads 
 beagle show <id>           # one captured call, summarized
 beagle ui                  # open the dashboard (loopback, one-time link)
 beagle purge [all|panic]   # erase captured data (panic = secure wipe)
-beagle stop                # stop the background daemon
+beagle stop                # stop the daemon; pause always-on until next watch
 beagle uninstall           # remove everything Beagle installed (see Uninstall)
 beagle config [...]        # redact-on-capture, exclusions, per-agent run-mode
 ```
@@ -170,9 +172,10 @@ in one sitting: start at [`src/core/`](src/core/).
 - **Local only.** The only outbound connections are the ones your agent was
   already making, forwarded verbatim.
 - **Your setup, untouched.** `beagle run` mutates nothing. `beagle watch`
-  adds a PATH shim (plus a one-time background service on first use) after
-  showing you the diff, records every change in a manifest, and reverts
-  cleanly on `unwatch`/uninstall.
+  adds a PATH shim, a background service, and — only if the shim isn't
+  winning your PATH — one guarded block in your shell rc, each after showing
+  you the diff. Every change is recorded in a manifest and reverts cleanly on
+  `unwatch`/uninstall.
 - **Your API key never rests.** Auth headers are scrubbed before anything
   is written; the credential exists only in memory, in flight.
 - **The store is the liability, minimized.** `0600` files, 7-day rolling

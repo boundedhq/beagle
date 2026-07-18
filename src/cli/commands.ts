@@ -189,7 +189,7 @@ export function cmdStatus(
       const baked = serviceStateDir(readFileSync(svcEntry.path, "utf8"));
       if (baked !== null && resolvePath(baked) !== resolvePath(stateDir)) {
         lines.push(
-          cont(`▲ background service keeps a daemon alive for ${baked} (a stale/test path),`),
+          cont(`▲ background service keeps a daemon alive for ${stripControlChars(baked)} (a stale/test path),`),
           cont(`  not this store — re-run \`beagle watch ${agentHint}\` to repair it`),
         );
       } else if (!isServiceActive((svcEntry.backup as ServiceKind) ?? "systemd", svcEntry.path)) {
@@ -535,7 +535,15 @@ export function findInstalledService(
 ): { kind: ServiceKind; path: string } | null {
   const entry = new ChangeManifest(stateDir).list().find((e) => e.kind === "service");
   if (entry && existsSync(entry.path)) {
-    return { kind: (entry.backup as ServiceKind) ?? "systemd", path: entry.path };
+    // Scope like the canonical fallback: if the unit has since been re-baked
+    // for a DIFFERENT state dir (another install re-took the shared canonical
+    // slot), it's no longer ours to pause/remove. A unit we can't parse but
+    // that WE recorded is still ours (baked === null → keep).
+    const baked = serviceStateDir(readFileSync(entry.path, "utf8"));
+    if (baked === null || resolvePath(baked) === resolvePath(stateDir)) {
+      return { kind: (entry.backup as ServiceKind) ?? "systemd", path: entry.path };
+    }
+    return null;
   }
   const plan = servicePlan(process.platform, homedir(), process.execPath, stateDir);
   if (plan && existsSync(plan.path)) {
@@ -552,47 +560,66 @@ export async function cmdStop(
   force = false,
   runner: ServiceRunner = osServiceRunner,
 ): Promise<string> {
+  // Act on OBSERVED reality, not bookkeeping: an orphaned unit at the canonical
+  // path (manifest emptied by an older CLI's unwatch, etc.) must still be paused
+  // or KeepAlive wins and stop is a silent restart.
+  const svc = findInstalledService(stateDir);
+  // Pause the always-on service and REPORT truthfully — verify with isActive
+  // (deactivate is best-effort spawnQuiet) rather than assuming it worked.
+  const pauseService = (): string => {
+    if (!svc) return "";
+    runner.deactivate(svc);
+    const paused = runner.isActive ? !runner.isActive(svc) : true;
+    return paused
+      ? `\nBackground service paused — always-on resumes at the next \`beagle watch\` (shims still start a daemon on demand).`
+      : `\nWARNING: tried to pause the background service but it still reports active — check \`beagle status\`.`;
+  };
+
   const daemon = await pingDaemon(stateDir);
-  if (!daemon) return "no beagle daemon is running.";
-  // Client-side pre-check for a friendly message; the daemon re-checks
-  // authoritatively at shutdown (closing the read-then-act race).
-  const status = await controlRequest(daemon.socketPath, { cmd: "status" });
-  const leases = (status.data as { leases?: number } | undefined)?.leases ?? 0;
-  if (leases > 0 && !force) {
+  if (!daemon) {
+    // No daemon now — but an always-on service resurrects one within seconds,
+    // so a stop that leaves it enabled is a silent no-op. Pause it anyway.
+    return svc ? `no daemon was running.${pauseService()}` : "no beagle daemon is running.";
+  }
+
+  // Authoritative lease check right before we touch anything. If the daemon's
+  // status can't be read we CANNOT confirm it's safe to pause the service
+  // (whose teardown SIGTERMs the daemon lease-unaware) — refuse unforced
+  // rather than risk dropping a live capture.
+  let leases: number | null;
+  try {
+    const status = await controlRequest(daemon.socketPath, { cmd: "status" });
+    leases = status.ok ? ((status.data as { leases?: number } | undefined)?.leases ?? 0) : null;
+  } catch {
+    leases = null;
+  }
+  if (!force && leases === null) {
+    return "couldn't confirm capture state from the daemon — not stopping. Retry, or force with: beagle stop --force";
+  }
+  if (!force && leases! > 0) {
     return (
       `the daemon is capturing for ${leases} live agent session${leases === 1 ? "" : "s"} — ` +
       `stopping now would drop that capture.\nFinish those sessions first, or force with: beagle stop --force`
     );
   }
-  // An always-on service (KeepAlive) resurrects a stopped daemon within a
-  // second — a `stop` that silently turns into a restart is a broken promise.
-  // Pause the service FIRST (its teardown also kills the managed daemon),
-  // then stop whatever daemon remains. Leases were checked above.
-  // Act on OBSERVED reality, not bookkeeping: an orphaned unit at the
-  // canonical path (manifest emptied by an older CLI's unwatch, etc.) must
-  // still be paused, or KeepAlive wins and stop is a silent restart.
-  const svc = findInstalledService(stateDir);
-  let svcPaused = false;
-  if (svc) {
-    runner.deactivate(svc);
-    svcPaused = true;
-  }
+
+  // Pause the KeepAlive service FIRST (its teardown also kills the managed
+  // daemon; leaving it enabled resurrects the daemon we're about to stop).
+  // Leases were just confirmed 0 (or forced).
+  const pausedNote = pauseService();
   if (await pingDaemon(stateDir)) {
     const r = await controlRequest(daemon.socketPath, { cmd: "shutdown", args: { force } });
-    if (!r.ok && !svcPaused) {
-      // The daemon refused — a capture started between our check and now.
-      return `a capture started just now — daemon not stopped (${r.error}). Retry, or force with: beagle stop --force`;
+    if (!r.ok) {
+      // A capture started between the check and now (only possible unforced).
+      return `a capture started just now — daemon not stopped (${r.error}).${pausedNote}\nRetry, or force with: beagle stop --force`;
     }
   }
-  const pausedNote = svcPaused
-    ? `\nBackground service paused — always-on resumes at the next \`beagle watch\` (shims still start a daemon on demand).`
-    : "";
   // confirm it actually went down (the shutdown is async on the daemon side)
   for (let i = 0; i < 20; i++) {
     await Bun.sleep(100);
     if (!(await pingDaemon(stateDir))) return `daemon stopped (pid ${daemon.pid}).${pausedNote}`;
   }
-  return `asked the daemon (pid ${daemon.pid}) to stop, but it is still responding — check \`beagle status\`.`;
+  return `asked the daemon (pid ${daemon.pid}) to stop, but it is still responding — check \`beagle status\`.${pausedNote}`;
 }
 
 /** Full, safe teardown in one command: unwatch every watched agent (restoring
@@ -861,21 +888,43 @@ export function cmdWatch(
  *  a fresh shell that read the updated rc — so the terminal they are sitting
  *  in (where they'll type the agent's name next) is covered immediately.
  *  Interactive-TTY only: scripts and --yes runs must never grow a subshell. */
+function defaultSpawnShell(sh: string): Promise<unknown> {
+  // Login + interactive: bash then reads ~/.bash_profile (where rcTargetFor
+  // writes on macOS), zsh ~/.zprofile+~/.zshrc, fish config.fish — so the
+  // shims are actually on PATH. `-i` alone gives a NON-login bash that reads
+  // only ~/.bashrc and would miss the block on macOS.
+  // Strip BEAGLE_STATE_DIR/BEAGLE_EPHEMERAL so a one-shot `BEAGLE_STATE_DIR=…
+  // beagle watch` doesn't silently pin every later command in the new shell to
+  // that override (an intentional, profile-set value comes back via login).
+  const env = { ...process.env };
+  delete env.BEAGLE_STATE_DIR;
+  delete env.BEAGLE_EPHEMERAL;
+  return Bun.spawn([sh, "-l", "-i"], { stdio: ["inherit", "inherit", "inherit"], env }).exited;
+}
+
 export async function offerRefreshedShell(
   isTTY = Boolean(process.stdin.isTTY),
   shell = process.env.SHELL ?? "/bin/sh",
-  spawnShell: (sh: string) => Promise<unknown> = (sh) =>
-    Bun.spawn([sh, "-i"], { stdio: ["inherit", "inherit", "inherit"] }).exited,
+  spawnShell: (sh: string) => Promise<unknown> = defaultSpawnShell,
   readLine: () => string = readLineSync,
 ): Promise<boolean> {
   if (!isTTY) return false;
   process.stdout.write(
     "Cover THIS terminal now? Beagle can start a refreshed shell here ('exit' returns). [Y/n] ",
   );
-  const line = readLine().trim();
+  const raw = readLine();
+  if (raw === "") return false; // EOF (Ctrl-D) — an abort, distinct from plain Enter
+  const line = raw.trim();
   if (line !== "" && !/^y(es)?$/i.test(line)) return false;
-  console.log(`(refreshed ${shell} — watched agents resolve to their shims here)`);
-  await spawnShell(shell);
+  console.log(`(refreshed ${stripControlChars(shell)} — watched agents resolve to their shims here)`);
+  try {
+    await spawnShell(shell);
+  } catch {
+    // A bogus $SHELL (deleted binary) must not crash a watch that already
+    // succeeded — fall back to the manual hint.
+    console.log("couldn't start a refreshed shell — open a new terminal, or run 'exec $SHELL -l'.");
+    return false;
+  }
   return true;
 }
 
@@ -928,9 +977,11 @@ export async function cmdUnwatch(stateDir: string, agent: string, force = false)
 }
 
 /** Unwatch every agent in one shot — "stop watching, keep my data"
- *  (uninstall is this plus erasing the store). One lease check up front,
- *  then each per-agent unwatch runs forced so a partial teardown can't
- *  strand the shared service on a manifest that says no agents remain. */
+ *  (uninstall is this plus erasing the store). One friendly lease check up
+ *  front; each per-agent unwatch then passes `force` THROUGH, so an unforced
+ *  --all re-checks per agent and a capture that starts mid-loop still refuses
+ *  (rather than the last agent force-tearing down a live daemon). Error-
+ *  isolated like uninstall: one agent's failure can't abort the rest. */
 export async function cmdUnwatchAll(stateDir: string, force = false): Promise<string> {
   const agents = watchedAgents(stateDir);
   if (!agents.length) return "nothing is watched.";
@@ -945,7 +996,13 @@ export async function cmdUnwatchAll(stateDir: string, force = false): Promise<st
     }
   }
   const out: string[] = [];
-  for (const a of agents) out.push(await cmdUnwatch(stateDir, a, true));
+  for (const a of agents) {
+    try {
+      out.push(await cmdUnwatch(stateDir, a, force));
+    } catch (e) {
+      out.push(`failed to unwatch ${a}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
   return out.join("\n");
 }
 
@@ -960,17 +1017,20 @@ export async function cmdUnwatchSelect(
 ): Promise<string> {
   const agents = watchedAgents(stateDir);
   if (!agents.length) return "nothing is watched.";
+  // Agent names come from the manifest (0600, user-owned) — sanitize before
+  // echoing so a doctored entry can't inject terminal escapes. Matching below
+  // still uses the raw value.
   if (!isTTY) {
-    return `beagle unwatch <agent> — watched: ${agents.join(", ")} (or: beagle unwatch --all)`;
+    return `beagle unwatch <agent> — watched: ${agents.map(stripControlChars).join(", ")} (or: beagle unwatch --all)`;
   }
   if (agents.length === 1) {
-    process.stdout.write(`Unwatch ${agents[0]}? [y/N] `);
+    process.stdout.write(`Unwatch ${stripControlChars(agents[0]!)}? [y/N] `);
     if (!/^y(es)?$/i.test(readLine().trim())) return "cancelled — nothing changed.";
     return cmdUnwatch(stateDir, agents[0]!, force);
   }
   process.stdout.write(
     "watched agents:\n" +
-      agents.map((a, i) => `  ${i + 1}. ${a}`).join("\n") +
+      agents.map((a, i) => `  ${i + 1}. ${stripControlChars(a)}`).join("\n") +
       `\nUnwatch which? [1-${agents.length}, name, or 'all'] `,
   );
   const ans = readLine().trim();

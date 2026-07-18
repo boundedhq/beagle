@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, existsSync, readFileSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, mkdirSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { watchAgent, unwatchAgent, type WatchEnv } from "../src/install/watch";
@@ -70,7 +70,9 @@ describe("watchAgent", () => {
     // consent (confirm → true) → the fix is APPLIED, not dictated
     const rcPath = join(env.home, ".zshrc");
     expect(r.message).toContain(`PATH updated in ${rcPath}`);
-    expect(r.message).toContain("New terminals are covered automatically");
+    // this fake env's runType never reflects the rc edit, so the re-probe still
+    // reads not-covered → the honest "new login shells" wording, not "verified"
+    expect(r.message).toContain("New login shells will pick it up");
     // the CLI offers a refreshed shell for THIS terminal — signalled via the hint
     expect(r.shellReloadHint).toBe(true);
     const rc = readFileSync(rcPath, "utf8");
@@ -79,6 +81,19 @@ describe("watchAgent", () => {
     expect(rc).toContain("# <<< beagle shims <<<");
     const kinds = new ChangeManifest(env.stateDir).list().map((e) => e.kind).sort();
     expect(kinds).toEqual(["service", "shellrc", "shim"]);
+  });
+
+  test("PATH-order fix, re-probe now covered → the message EARNS its 'verified' claim", () => {
+    // The realistic zsh case: the `-ic` probe can't see the shim until the rc
+    // block is written, then it can. Key the fake probe on the rc file existing
+    // — not-covered on the first (pre-install) call, covered on the re-probe.
+    const env = makeEnv({});
+    const rcPath = join(env.home, ".zshrc");
+    env.runType = (agent) =>
+      existsSync(rcPath) ? `${agent} is ${join(env.shimDir, agent)}` : `${agent} is /opt/homebrew/bin/${agent}`;
+    const r = watchAgent("claude", env);
+    expect(r.message).toContain("verified: new terminals are covered");
+    expect(r.shellReloadHint).toBe(true);
   });
 
   test("PATH-order non-coverage: declining the rc offer keeps the manual instructions", () => {
@@ -346,7 +361,7 @@ describe("unwatchAgent", () => {
 
 // The rc-block primitives themselves: idempotence, replacement, safe removal,
 // per-shell targets.
-import { installPathBlock, removePathBlock, rcTargetFor } from "../src/install/shellrc";
+import { installPathBlock, pathBlockMalformed, removePathBlock, rcTargetFor } from "../src/install/shellrc";
 
 describe("shellrc PATH block", () => {
   let dir: string;
@@ -408,6 +423,56 @@ describe("shellrc PATH block", () => {
     expect(fish?.line).toBe('set -gx PATH "/s" $PATH');
     expect(rcTargetFor("/usr/bin/nushell", "/h", "linux", "/s")).toBeNull();
   });
+
+  test("a `$(…)` in the shim path is escaped — no command substitution on shell start", () => {
+    // A dir literally named with a command substitution must be inert in the
+    // rc line, not executed on every login (the reported injection).
+    const evil = rcTargetFor("/bin/zsh", "/h", "linux", "/tmp/x$(touch /tmp/pwned)");
+    expect(evil?.line).toBe('export PATH="/tmp/x\\$(touch /tmp/pwned):$PATH"');
+    // and the value is written escaped, so `$(` never reaches the shell live
+    const rc = join(dir, ".zshrc");
+    installPathBlock(rc, evil!.line);
+    expect(readFileSync(rc, "utf8")).toContain('\\$(touch /tmp/pwned)');
+    // fish gets the same treatment
+    const evilFish = rcTargetFor("/usr/bin/fish", "/h", "linux", "/tmp/x$(evil)");
+    expect(evilFish?.line).toBe('set -gx PATH "/tmp/x\\$(evil)" $PATH');
+  });
+
+  test("markers are line-anchored: a commented-out block is NOT a false boundary", () => {
+    const rc = join(dir, ".zshrc");
+    // user disabled Beagle's block by commenting every line
+    writeFileSync(rc, "## >>> beagle shims >>> managed by beagle\n## export PATH=x\n## <<< beagle shims <<<\nmine\n");
+    // install must treat this as "no block present" → append a fresh one, not
+    // splice mid-line into the commented text
+    const r = installPathBlock(rc, 'export PATH="/s":$PATH');
+    expect(r.ok).toBe(true);
+    const s = readFileSync(rc, "utf8");
+    expect(s).toContain("## >>> beagle shims >>> managed by beagle"); // commented line untouched
+    expect(s.match(/^# >>> beagle shims >>>/gm)?.length).toBe(1); // exactly one real block
+    // removal likewise ignores the commented markers and strips only the real block
+    expect(removePathBlock(rc)).toBe(true);
+    expect(readFileSync(rc, "utf8")).toContain("## >>> beagle shims >>>");
+  });
+
+  test("pathBlockMalformed detects a begin marker with no end", () => {
+    const rc = join(dir, ".zshrc");
+    expect(pathBlockMalformed(rc)).toBe(false); // missing file
+    writeFileSync(rc, "# >>> beagle shims >>>\nexport PATH=oops\n");
+    expect(pathBlockMalformed(rc)).toBe(true);
+    writeFileSync(rc, "# >>> beagle shims >>>\nx\n# <<< beagle shims <<<\n");
+    expect(pathBlockMalformed(rc)).toBe(false);
+  });
+
+  test("scoped removal leaves another install's block alone", () => {
+    const rc = join(dir, ".zshrc");
+    installPathBlock(rc, 'export PATH="/other/shims:$PATH"'); // written by state dir B
+    // state dir A tries to remove, scoped to ITS shim dir — must not touch B's
+    expect(removePathBlock(rc, "/mine/shims")).toBe(false);
+    expect(readFileSync(rc, "utf8")).toContain("/other/shims");
+    // scoped to the block's OWN dir → removes
+    expect(removePathBlock(rc, "/other/shims")).toBe(true);
+    expect(readFileSync(rc, "utf8")).not.toContain("beagle shims");
+  });
 });
 
 // Service verify/repair: an installed unit pointing at the wrong state dir is
@@ -449,6 +514,42 @@ describe("watchAgent — service verify/repair", () => {
     expect(r.message).toContain("background service NOT installed");
     const kinds = new ChangeManifest(env.stateDir).list().map((e) => e.kind);
     expect(kinds).not.toContain("service");
+  });
+
+  test("poison combo ALSO skips the shell-rc edit — no /tmp path in a real rc", () => {
+    const env = makeEnv({
+      home: "/Users/nonexistent-real-home",
+      runType: () => "claude is /opt/homebrew/bin/claude", // not covered
+    });
+    const r = watchAgent("claude", env);
+    expect(r.verdict?.covered).toBe(false);
+    // no rc mutation — falls back to the printed manual instructions
+    expect(new ChangeManifest(env.stateDir).list().some((e) => e.kind === "shellrc")).toBe(false);
+    expect(r.message).toContain('export PATH="');
+    expect(existsSync(join("/Users/nonexistent-real-home", ".zshrc"))).toBe(false);
+  });
+
+  test("a hand-edited unit is never adopted, so unwatch-of-last-agent never deletes it", () => {
+    const env = makeEnv();
+    const plan = servicePlan(env.platform, env.home, env.beagleBinary, env.stateDir)!;
+    mkdirSync(join(env.home, ".config", "systemd", "user"), { recursive: true });
+    writeFileSync(plan.path, "# my custom unit\n[Service]\nExecStart=/somewhere/else\n");
+    watchAgent("claude", env);
+    // not adopted — an unparseable unit is the user's
+    expect(new ChangeManifest(env.stateDir).list().some((e) => e.kind === "service")).toBe(false);
+    unwatchAgent("claude", env); // last agent gone
+    expect(existsSync(plan.path)).toBe(true); // the hand-edited unit survives
+    expect(readFileSync(plan.path, "utf8")).toContain("my custom unit");
+  });
+
+  test("re-watch after the unit file was deleted doesn't duplicate the manifest entry", () => {
+    const env = makeEnv();
+    const plan = servicePlan(env.platform, env.home, env.beagleBinary, env.stateDir)!;
+    watchAgent("claude", env); // installs + records the service
+    rmSync(plan.path, { force: true }); // file deleted out from under the manifest
+    watchAgent("claude", env); // svcInstall path again — must recordReplacing, not stack
+    const svcEntries = new ChangeManifest(env.stateDir).list().filter((e) => e.kind === "service");
+    expect(svcEntries.length).toBe(1);
   });
 });
 
