@@ -354,20 +354,8 @@ button.linklike:hover { text-decoration: underline; }
   border-left: 2px dashed var(--border);
 }
 .detail .history-fold:hover { color: var(--accent); border-left-color: var(--accent); }
-.detail .msg { margin: 10px 0; padding: 6px 10px; border-left: 2px solid var(--border); }
-/* Role labels: same typography as the transcript's .mc-name — the two
-   screens must read as one product. */
-.detail .msg .role {
-  color: var(--accent); font-family: var(--sans); font-size: 10.5px;
-  font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em;
-  margin-bottom: 3px;
-}
-.detail .msg.assistant .role, .detail .msg.response .role { color: var(--ok); }
-/* bodies keep their newlines — pretty-printed JSON must not re-collapse —
-   and match the transcript/feed content size */
-.detail .msg > div:last-child {
-  white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--content);
-}
+/* (detail messages render through the transcript's TMsg cards — one card
+   system for both screens; the old .detail .msg styles are gone with Msg) */
 /* Raw payload / stream. Wrap at token boundaries, not mid-token: break-all
    turned indented JSON into a wall of characters. overflow-wrap only breaks a
    genuinely-unbreakable long token (e.g. a minified line) as a last resort. */
@@ -483,6 +471,18 @@ button.danger:hover:not(:disabled) { background: #4a1a28; }
 .turn-rail .err { color: var(--leak-fg); }
 .turn-rail .turn-toggle { margin-left: auto; }
 .turn-empty { color: var(--muted); font-style: italic; font-size: 12px; padding: 6px 0; }
+/* Per-turn direction labels: every turn reads as a ⇢ sent block then a
+   ⇠ received block. Role cards (USER/RESPONSE) already carry direction in
+   their names — these make the TOOL cards' direction just as explicit
+   (results ride up with the request; calls come back in the response).
+   Colors reuse the existing direction code: accent = outbound, ok = inbound. */
+.dir-label {
+  font-family: var(--sans); font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted);
+  margin: 8px 0 3px; user-select: none;
+}
+.dir-label.sent { color: var(--accent); opacity: 0.75; }
+.dir-label.recv { color: var(--ok); opacity: 0.75; }
 
 /* uniform message cards: every message — user, assistant, tool, request —
    sits in the same shell; only the colored role label in the header differs */
@@ -518,8 +518,6 @@ button.danger:hover:not(:disabled) { background: #4a1a28; }
    pointer (which earns the warn tint). */
 .turn-note { color: var(--muted); font-style: italic; font-size: 12px; padding: 2px 0 6px; }
 .turn-note.warn { color: var(--warn, #e0b050); font-style: normal; }
-/* Folded run of fc-echoes the request resent from the previous response. */
-.resent-note { color: var(--muted); font-size: 11.5px; font-style: italic; padding: 2px 0; }
 .mc-chev { flex: none; color: var(--muted); font-size: 11px; margin-left: auto; }
 .mc-body {
   padding: 4px 12px 9px; line-height: 1.55; font-size: var(--content);

@@ -369,7 +369,7 @@ describe("buildSessionTurns — the conversation delta", () => {
     store.close();
   });
 
-  test("openai-responses tool flow: calls land on their OWN turn's response; echoes stamp resent; results get names (turn clarity)", () => {
+  test("openai-responses tool flow: calls land on their OWN turn's response; matched echoes drop; results get names (turn clarity)", () => {
     const store = Store.open(dir);
     // Turn 1: user asks; the model responds with a bash function_call.
     const req1 = { input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "run the tests" }] }] };
@@ -395,18 +395,49 @@ describe("buildSessionTurns — the conversation delta", () => {
     expect(turns[0]!.responseCalls).toEqual([
       { tool: "bash", detail: "bun test", callId: "c1", args: '{"command":"bun test"}' },
     ]);
-    // Turn 2: the fc echo is stamped resent (folds in the UI, never dropped);
-    // the result knows which tool produced it.
+    // Turn 2: the fc echo is DROPPED — the call card sits at the end of the
+    // previous turn's response, adjacent to this result across the boundary.
+    // The result keeps the call's name and detail so the pair stays legible.
     const t2 = turns[1]!.messages;
-    expect(t2.map((m) => [m.kind, m.tool, m.resent ?? false])).toEqual([
-      ["call", "bash", true],
-      ["result", "bash", false],
+    expect(t2.map((m) => [m.kind, m.tool, m.detail])).toEqual([
+      ["result", "bash", "bun test"],
     ]);
     expect(turns[1]!.responseText).toBe("All green.");
     store.close();
   });
 
-  test("an fc echo whose previous response did NOT parse stays unstamped (visible, not folded)", () => {
+  test("an fc echo carrying a LEAK is never dropped — the request copy is the scanned occurrence (R7)", () => {
+    const SECRET = "AKIAZQ3DRSTUVWXY2345";
+    const store = Store.open(dir);
+    const req1 = { input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "go" }] }] };
+    const resp1 = { output: [{ type: "function_call", call_id: "c1", name: "bash", arguments: `{"command":"x ${SECRET}"}` }] };
+    store.insertCall(call({
+      id: ulid(1000), tsRequest: 1000, endpoint: "/v1/responses",
+      requestBody: enc(JSON.stringify(req1)), responseBody: enc(JSON.stringify(resp1)),
+    }));
+    const req2str = JSON.stringify({ input: [
+      ...req1.input,
+      { type: "function_call", call_id: "c1", name: "bash", arguments: `{"command":"x ${SECRET}"}` },
+      { type: "function_call_output", call_id: "c1", output: "done" },
+    ] });
+    const id2 = ulid(2000);
+    store.insertCall(call({
+      id: id2, tsRequest: 2000, endpoint: "/v1/responses",
+      requestBody: enc(req2str), responseBody: enc(JSON.stringify({ output: [] })),
+    }));
+    const at = req2str.indexOf(SECRET);
+    store.upsertLeakEvent({
+      fingerprint: "fp", sessionId: "sess-1", detector: "aws-access-key-id",
+      secretType: "aws-access-key-id", severity: "high", confidenceTier: "structured",
+      destination: "openai", callId: id2, ts: 2000, spanStart: at, spanEnd: at + SECRET.length,
+    });
+    const turns = buildSessionTurns(store, "sess-1").turns;
+    // matched echo, but leak-bearing → stays visible (and highlightable)
+    expect(turns[1]!.messages.some((m) => m.kind === "call" && String(m.content).includes(SECRET))).toBe(true);
+    store.close();
+  });
+
+  test("an fc echo whose previous response did NOT parse is kept (a wrong drop must be impossible)", () => {
     const store = Store.open(dir);
     const req1 = { input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "go" }] }] };
     store.insertCall(call({
@@ -425,8 +456,8 @@ describe("buildSessionTurns — the conversation delta", () => {
     }));
     const turns = buildSessionTurns(store, "sess-1").turns;
     expect(turns[0]!.responseCalls).toEqual([]); // nothing parsed
-    // no prev responseCalls to match → the echo must NOT be marked resent
-    expect(turns[1]!.messages[0]!.resent).toBeUndefined();
+    // no prev responseCalls to match → the echo must stay a visible card
+    expect(turns[1]!.messages.some((m) => m.kind === "call")).toBe(true);
     store.close();
   });
 
