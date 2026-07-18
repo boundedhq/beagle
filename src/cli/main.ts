@@ -77,9 +77,7 @@ export async function run(argv: string[]): Promise<number> {
       if (r.ok && r.shellReloadHint) {
         const launched = parsed.yes ? false : await offerRefreshedShell();
         if (!launched)
-          console.log(
-            "(this terminal keeps its old PATH — open a new one, or run `exec $SHELL -l` to refresh in place)",
-          );
+          console.log("  (open a new terminal, or run `exec $SHELL -l` here, to pick up the change)");
       }
       return r.ok ? 0 : 1;
     }
