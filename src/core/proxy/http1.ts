@@ -51,7 +51,10 @@ export class ResponseReader {
   private remaining = 0; // for length mode, bytes left; for chunked, bytes left in current chunk
   private chunkStage: "size" | "data" | "trailer" = "size";
 
-  constructor(private onBody: (chunk: Buffer) => void) {}
+  constructor(
+    private onBody: (chunk: Buffer) => void,
+    private method: string = "GET",
+  ) {}
 
   headerValue(name: string): string | undefined {
     return this.headers.find(([n]) => n.toLowerCase() === name)?.[1];
@@ -83,17 +86,33 @@ export class ResponseReader {
     if (end === -1) return;
     const lines = this.buf.subarray(0, end).toString("latin1").split("\r\n");
     const statusLine = lines[0] ?? "";
-    this.status = Number(statusLine.split(" ")[1] ?? 0);
+    const status = Number(statusLine.split(" ")[1] ?? 0);
+    // Interim 1xx (100 Continue, 103 Early Hints): a bodyless head that
+    // precedes the real response. Drop it and parse the next head from the
+    // same buffer — otherwise the final response is mis-read as this one's
+    // body and the reader waits for EOF (up to the socket timeout). 101 can't
+    // reach here: the proxy refuses Upgrade requests before forwarding.
+    if (status >= 100 && status < 200) {
+      this.buf = this.buf.subarray(end + 4);
+      return this.parseHead();
+    }
+    this.status = status;
     for (const line of lines.slice(1)) {
       const i = line.indexOf(":");
       if (i > 0) this.headers.push([line.slice(0, i), line.slice(i + 1).trim()]);
     }
     this.buf = this.buf.subarray(end + 4);
     this.stage = "body";
-    const te = this.headerValue("transfer-encoding");
-    const cl = this.headerValue("content-length");
     const conn = this.headerValue("connection")?.toLowerCase();
     this.keepAlive = conn !== "close";
+    // A HEAD response carries no body, even with a content-length advertising
+    // the GET size — completing here avoids waiting for bytes that never come.
+    if (this.method === "HEAD") {
+      this.done = true;
+      return;
+    }
+    const te = this.headerValue("transfer-encoding");
+    const cl = this.headerValue("content-length");
     if (te?.toLowerCase().includes("chunked")) {
       this.bodyMode = "chunked";
     } else if (cl !== undefined) {

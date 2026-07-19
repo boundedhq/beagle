@@ -147,8 +147,6 @@ export class Daemon {
       onCall: (call) => void d.track(d.captureCall(call)),
       captureBufferCap: 8 << 20,
     });
-    await d.proxy.listen(0);
-    d.proxyPort = d.proxy.port;
     // A per-daemon-session token, minted into the agent's OTEL headers — never
     // the install key (which must not leave the machine).
     d.otlpToken = randomBytes(24).toString("hex");
@@ -156,8 +154,21 @@ export class Daemon {
       token: d.otlpToken,
       onCalls: (exs) => void d.track(d.ingestOtel(exs)),
     });
-    d.otlpPort = await d.otlp.listen(0);
-    d.control = await startControlServer(d.socketPath, (req, sock) => d.handleControl(req, sock));
+    try {
+      // Any bind can fail (EADDRINUSE, etc.). Close everything already open
+      // so a failed start doesn't strand the store handle, scanner worker, or
+      // an earlier listener — the process may retry or exit cleanly.
+      await d.proxy.listen(0);
+      d.proxyPort = d.proxy.port;
+      d.otlpPort = await d.otlp.listen(0);
+      d.control = await startControlServer(d.socketPath, (req, sock) => d.handleControl(req, sock));
+    } catch (e) {
+      d.proxy.close();
+      d.otlp.close();
+      d.scanHost.close();
+      d.store.close();
+      throw e;
+    }
     d.sweep();
     d.sweeper = setInterval(() => d.sweep(), opts.sweepIntervalMs ?? SWEEP_INTERVAL_MS);
     d.sweeper.unref?.();

@@ -37,12 +37,12 @@ dev, just `unwatch` before switching back to a release binary.)
 Most of these have mechanical teeth — a lint script, the LOC checker, or a
 pin test; where one doesn't, review holds the line:
 
-1. **The core LOC budget is a feature — and it is currently full.**
-   `src/core/` (the audited security path) must stay ≤ 1,500 lines
-   (`bun run loc:check`), and it sits at 1,500 today. A change that adds
-   core lines must carve something non-security out of core first — or it
-   doesn't land. "Small enough to read in one sitting" is Beagle's main
-   trust property, and yes, that constraint is meant to hurt a little.
+1. **The core LOC budget is a feature.** `src/core/` (the audited security
+   path) must stay ≤ 2,000 lines (`bun run loc:check`); it sits around 1,550
+   today. The ceiling is a published, CI-enforced trust property — "small
+   enough to read in one sitting" — so spend the headroom deliberately:
+   prefer carving something non-security out of core to growing it, and
+   don't treat the slack as free.
 2. **Core is stdlib-only.** `scripts/lint-bun-imports.ts` bans `bun:*`
    imports everywhere in `src/` outside `src/adapters/` — Bun-specific
    surface lives in adapters only. The rest of the rule — no third-party

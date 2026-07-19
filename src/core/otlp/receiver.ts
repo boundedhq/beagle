@@ -7,6 +7,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { mapHookToCall, mapOtlpLogsToCalls, type OtelCall } from "../../parsers/otlp-map";
+import { listenReady } from "../net/listen";
 
 export interface OtlpReceiverOptions {
   token: string;
@@ -23,13 +24,12 @@ export class OtlpReceiver {
   constructor(private opts: OtlpReceiverOptions) {}
 
   listen(port: number): Promise<number> {
-    return new Promise((resolve) => {
-      this.server = createServer((req, res) => this.handle(req, res));
-      this.server.listen(port, "127.0.0.1", () => {
-        const addr = this.server!.address() as { port: number; address: string };
-        this.boundAddress = addr.address;
-        resolve(addr.port);
-      });
+    const server = createServer((req, res) => this.handle(req, res));
+    this.server = server;
+    return listenReady(server, () => server.listen(port, "127.0.0.1")).then(() => {
+      const addr = server.address() as { port: number; address: string };
+      this.boundAddress = addr.address;
+      return addr.port;
     });
   }
 

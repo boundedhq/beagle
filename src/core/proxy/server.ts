@@ -3,8 +3,16 @@
 // capture buffer, and the pre-forward seam (v1: dispatch scan, don't await).
 import { createServer, type Server, type Socket } from "node:net";
 import { ulid } from "../store/ulid";
+import { listenReady } from "../net/listen";
 import type { Call } from "../call";
 import { decodeBody, scrubAuthHeaders } from "../normalize/normalize";
+
+// Hard ceiling on a single buffered request. Beagle buffers the whole request
+// before forwarding, so an unbounded (or stalled) local request would grow
+// memory without limit — this bounds it. 128 MiB is ~16× the largest plausible
+// model request (a 1M-token context is single-digit MB), so it never trips a
+// legitimate call; over it, reject with 413 rather than keep buffering.
+const MAX_REQUEST_BYTES = 128 << 20;
 import {
   ConnectionPool,
   ResponseReader,
@@ -33,6 +41,9 @@ export interface ProxyOptions {
   scan: (bytes: Uint8Array, ctx: ScanContext) => Promise<unknown>;
   onCall: (call: CapturedCall) => void;
   captureBufferCap: number;
+  /** Max bytes buffered for a single inbound request before a 413. Defaults to
+   *  MAX_REQUEST_BYTES; injectable so tests can trip it without a 128 MiB body. */
+  maxRequestBytes?: number;
 }
 
 interface ParsedRequest {
@@ -54,12 +65,10 @@ export class ProxyServer {
   constructor(private opts: ProxyOptions) {}
 
   listen(port: number): Promise<void> {
-    return new Promise((resolve) => {
-      this.server = createServer((sock) => this.handleConnection(sock));
-      this.server.listen(port, "127.0.0.1", () => {
-        this.port = (this.server!.address() as { port: number }).port;
-        resolve();
-      });
+    const server = createServer((sock) => this.handleConnection(sock));
+    this.server = server;
+    return listenReady(server, () => server.listen(port, "127.0.0.1")).then(() => {
+      this.port = (server.address() as { port: number }).port;
     });
   }
 
@@ -72,7 +81,15 @@ export class ProxyServer {
     let buf: Buffer = Buffer.alloc(0);
     let busy = false;
     client.on("error", () => client.destroy());
+    const maxReq = this.opts.maxRequestBytes ?? MAX_REQUEST_BYTES;
     client.on("data", (d: Buffer) => {
+      if (buf.length + d.length > maxReq) {
+        // Bound memory: refuse rather than keep concatenating an oversized or
+        // stalled request (the client is local, but a bug shouldn't OOM us).
+        client.end("HTTP/1.1 413 Payload Too Large\r\ncontent-length: 0\r\n\r\n");
+        client.destroy();
+        return;
+      }
       buf = Buffer.concat([buf, d]);
       if (busy) return;
       const parsed = parseRequest(buf);
@@ -169,7 +186,7 @@ export class ProxyServer {
       } else {
         truncated = true; // capture sacrificed; client stream never throttled
       }
-    });
+    }, req.method); // method: a HEAD response is bodyless despite content-length
 
     const attempt = (upstream: Socket) =>
       new Promise<void>((resolve, reject) => {

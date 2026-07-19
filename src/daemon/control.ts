@@ -2,6 +2,7 @@
 // JSON. Live actions only — reads go straight to SQLite.
 import { createServer, connect, type Server, type Socket } from "node:net";
 import { chmodSync, rmSync } from "node:fs";
+import { listenReady } from "../core/net/listen";
 
 export interface ControlRequest {
   cmd: string;
@@ -42,11 +43,9 @@ export function startControlServer(socketPath: string, handler: ControlHandler):
     });
     sock.on("error", () => {});
   });
-  return new Promise((resolve) => {
-    server.listen(socketPath, () => {
-      chmodSync(socketPath, 0o600);
-      resolve(server);
-    });
+  return listenReady(server, () => server.listen(socketPath)).then(() => {
+    chmodSync(socketPath, 0o600);
+    return server;
   });
 }
 

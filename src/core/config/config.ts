@@ -37,10 +37,36 @@ export function loadConfig(stateDir: string): BeagleConfig {
     return { ...DEFAULT_CONFIG };
   }
   try {
-    return { ...DEFAULT_CONFIG, ...(JSON.parse(readFileSync(path, "utf8")) as Partial<BeagleConfig>) };
+    return sanitizeConfig(JSON.parse(readFileSync(path, "utf8")) as Partial<BeagleConfig>);
   } catch {
     return { ...DEFAULT_CONFIG }; // corrupt config: defaults, never crash the daemon
   }
+}
+
+/** Merge a parsed config over the defaults, taking each field ONLY when it is
+ *  the right type and range — a hand-edited `payloadWindowDays: "bad"` must not
+ *  become NaN and silently disable retention, and `agentRunMode: null` must not
+ *  crash command paths that enumerate it. Anything off falls back per field to
+ *  the secure default; unknown keys are dropped. */
+export function sanitizeConfig(raw: Partial<BeagleConfig>): BeagleConfig {
+  const c: BeagleConfig = { ...DEFAULT_CONFIG };
+  const posNum = (v: unknown, min: number): number | undefined =>
+    typeof v === "number" && Number.isFinite(v) && v >= min ? v : undefined;
+  c.payloadWindowDays = posNum(raw.payloadWindowDays, 0) ?? c.payloadWindowDays;
+  c.sizeCapMB = posNum(raw.sizeCapMB, 1) ?? c.sizeCapMB;
+  c.eventWindowDays = posNum(raw.eventWindowDays, 0) ?? c.eventWindowDays;
+  if (typeof raw.redactOnCapture === "boolean") c.redactOnCapture = raw.redactOnCapture;
+  if (Array.isArray(raw.excludedAgents)) {
+    c.excludedAgents = raw.excludedAgents.filter((a): a is string => typeof a === "string");
+  }
+  if (raw.agentRunMode && typeof raw.agentRunMode === "object" && !Array.isArray(raw.agentRunMode)) {
+    const modes: Record<string, "wire" | "telemetry"> = {};
+    for (const [k, v] of Object.entries(raw.agentRunMode)) {
+      if (v === "wire" || v === "telemetry") modes[k] = v;
+    }
+    c.agentRunMode = modes;
+  }
+  return c;
 }
 
 export function saveConfig(stateDir: string, config: BeagleConfig): void {

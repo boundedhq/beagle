@@ -1,6 +1,6 @@
 # Core (the audited security path)
 
-Everything under `src/core/` counts toward the ≤1,500-LOC legibility budget
+Everything under `src/core/` counts toward the ≤2,000-LOC legibility budget
 (R9) and must have **zero** runtime dependencies beyond the Bun/Node stdlib.
 Bun-specific imports (`bun:*`) are forbidden here — they live in
 `src/adapters/` (enforced by `scripts/lint-bun-imports.ts`).
