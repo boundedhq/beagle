@@ -531,6 +531,17 @@ describe("proxy hardening (malicious/compromised upstream)", () => {
     expect(r.done).toBe(true);
   });
 
+  test("ResponseReader survives a flood of interim heads without recursing (no stack overflow)", () => {
+    // A compromised upstream sending thousands of 100 Continue heads in one
+    // burst must not blow the stack — the interim-skip iterates, it doesn't
+    // recurse (which would only be safe on engines with proper tail calls).
+    const r = new ResponseReader(() => {});
+    const flood = "HTTP/1.1 100 Continue\r\n\r\n".repeat(20000);
+    expect(() => r.feed(Buffer.from(flood + "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok"))).not.toThrow();
+    expect(r.status).toBe(200); // the real response after the flood
+    expect(r.done).toBe(true);
+  });
+
   test("ResponseReader completes a HEAD response at the head, ignoring content-length", () => {
     const body: Buffer[] = [];
     // HEAD echoes the GET's content-length but sends no body — without the

@@ -6,13 +6,6 @@ import { ulid } from "../store/ulid";
 import { listenReady } from "../net/listen";
 import type { Call } from "../call";
 import { decodeBody, scrubAuthHeaders } from "../normalize/normalize";
-
-// Hard ceiling on a single buffered request. Beagle buffers the whole request
-// before forwarding, so an unbounded (or stalled) local request would grow
-// memory without limit — this bounds it. 128 MiB is ~16× the largest plausible
-// model request (a 1M-token context is single-digit MB), so it never trips a
-// legitimate call; over it, reject with 413 rather than keep buffering.
-const MAX_REQUEST_BYTES = 128 << 20;
 import {
   ConnectionPool,
   ResponseReader,
@@ -20,6 +13,13 @@ import {
   type HeaderList,
 } from "./http1";
 import type { RunRegistry, ResolvedRun } from "./registry";
+
+// Hard ceiling on a single buffered request. Beagle buffers the whole request
+// before forwarding, so an unbounded (or stalled) local request would grow
+// memory without limit — this bounds it. 128 MiB is ~16× the largest plausible
+// model request (a 1M-token context is single-digit MB), so it never trips a
+// legitimate call; over it, reject with 413 rather than keep buffering.
+const MAX_REQUEST_BYTES = 128 << 20;
 
 export interface ScanContext {
   /** Assigned at request start so alerts can reference the call before

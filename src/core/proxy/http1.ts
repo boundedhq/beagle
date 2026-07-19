@@ -82,19 +82,29 @@ export class ResponseReader {
   }
 
   private parseHead(): void {
-    const end = this.buf.indexOf("\r\n\r\n");
-    if (end === -1) return;
-    const lines = this.buf.subarray(0, end).toString("latin1").split("\r\n");
-    const statusLine = lines[0] ?? "";
-    const status = Number(statusLine.split(" ")[1] ?? 0);
-    // Interim 1xx (100 Continue, 103 Early Hints): a bodyless head that
-    // precedes the real response. Drop it and parse the next head from the
-    // same buffer — otherwise the final response is mis-read as this one's
-    // body and the reader waits for EOF (up to the socket timeout). 101 can't
-    // reach here: the proxy refuses Upgrade requests before forwarding.
-    if (status >= 100 && status < 200) {
-      this.buf = this.buf.subarray(end + 4);
-      return this.parseHead();
+    // Loop (not recursion) over any interim 1xx heads: a compromised upstream
+    // could send thousands in one burst, and `return this.parseHead()` would
+    // only be safe on engines with proper tail calls (JSC has them, V8 does
+    // not — don't make crash-safety depend on that). The pre-body buffer stays
+    // bounded by feed()'s cap between chunks.
+    let end = this.buf.indexOf("\r\n\r\n");
+    let lines: string[] = [];
+    let status = 0;
+    for (;;) {
+      if (end === -1) return;
+      lines = this.buf.subarray(0, end).toString("latin1").split("\r\n");
+      status = Number((lines[0] ?? "").split(" ")[1] ?? 0);
+      // Interim 1xx (100 Continue, 103 Early Hints): a bodyless head that
+      // precedes the real response. Drop it and read the next head — otherwise
+      // the final response is mis-read as this one's body and the reader waits
+      // for EOF (up to the socket timeout). 101 can't reach here: the proxy
+      // refuses Upgrade requests before forwarding.
+      if (status >= 100 && status < 200) {
+        this.buf = this.buf.subarray(end + 4);
+        end = this.buf.indexOf("\r\n\r\n");
+        continue;
+      }
+      break;
     }
     this.status = status;
     for (const line of lines.slice(1)) {
