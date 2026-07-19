@@ -227,8 +227,10 @@ describe("Daemon end-to-end", () => {
     expect(call.sessionTier).toBe("prefix");
     expect(call.tokensOut).toBe(3);
     expect(call.scanState).toBe("ok");
-    // response text also searchable
-    expect(store.searchLiteral("done!").length).toBe(1);
+    // search is OUTBOUND-only: `beagle search` answers "was this sent", so a
+    // string that appears only in the provider's RESPONSE ("done!") is not a
+    // hit — the request text ("read main.ts") above is.
+    expect(store.searchLiteral("done!").length).toBe(0);
     store.close();
   });
 

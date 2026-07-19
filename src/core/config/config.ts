@@ -43,6 +43,20 @@ export function loadConfig(stateDir: string): BeagleConfig {
   }
 }
 
+/** Read config WITHOUT creating anything. For read-only callers like `beagle
+ *  status` — loadConfig writes DEFAULT_CONFIG on first run, which would make
+ *  the trust strip's "beagle has modified nothing on this system" a lie by
+ *  the act of checking. Missing/corrupt → in-memory defaults, no file. */
+export function readConfig(stateDir: string): BeagleConfig {
+  const path = join(stateDir, "config.json");
+  if (!existsSync(path)) return { ...DEFAULT_CONFIG };
+  try {
+    return sanitizeConfig(JSON.parse(readFileSync(path, "utf8")) as Partial<BeagleConfig>);
+  } catch {
+    return { ...DEFAULT_CONFIG };
+  }
+}
+
 /** Merge a parsed config over the defaults, taking each field ONLY when it is
  *  the right type and range — a hand-edited `payloadWindowDays: "bad"` must not
  *  become NaN and silently disable retention, and `agentRunMode: null` must not

@@ -64,6 +64,28 @@ describe("ViewerServer hardening (design §6.8)", () => {
     expect(again.status).toBe(401); // invalidated on use
   });
 
+  test("an oversized /api/session body is capped, not buffered unbounded (pre-auth DoS)", async () => {
+    // /api/session reads the body BEFORE the bootstrap token is checked, so an
+    // unbounded reader lets any local process exhaust memory. Over the cap the
+    // reader resolves null → no credential granted, and the valid boot token
+    // buried in the huge body is never honored.
+    const huge = "x".repeat(300 * 1024); // > 256 KiB cap
+    let granted = false;
+    try {
+      const r = await fetch(`${origin()}/api/session`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ boot: bootToken(), pad: huge }),
+      });
+      granted = r.status === 200;
+    } catch {
+      /* connection dropped — also acceptable, still no credential */
+    }
+    expect(granted).toBe(false);
+    // and the token is still valid for a NORMAL request (the abusive one didn't consume it)
+    expect((await getCredential()).length).toBeGreaterThan(20);
+  });
+
   test("api requires the session credential", async () => {
     const noAuth = await fetch(`${origin()}/api/feed`);
     expect(noAuth.status).toBe(401);

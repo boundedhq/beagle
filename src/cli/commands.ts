@@ -1,11 +1,11 @@
 // CLI command surface (design §6.9): the whole product headless. Reads open
 // the store read-only (work daemon-down); live actions ride the socket.
-import { existsSync, readFileSync, rmdirSync, rmSync, statSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve as resolvePath } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { Store, StoreVersionError } from "../core/store/store";
-import { loadConfig, saveConfig } from "../core/config/config";
+import { loadConfig, readConfig, saveConfig } from "../core/config/config";
 import { controlRequest, openLease } from "../daemon/control";
 import { Notifier, stripControlChars } from "../notifier/notifier";
 import { GraduationTracker } from "../install/graduation";
@@ -125,20 +125,49 @@ async function ensureDaemon(stateDir: string): Promise<DaemonInfo | null> {
     script && /\.(ts|js|mjs)$/.test(script)
       ? [process.execPath, script, "daemon"]
       : [process.execPath, "daemon"];
+  // Send the daemon's stderr to a log file rather than /dev/null, so a startup
+  // failure (store init, listener bind, scanner spawn) leaves a trace instead
+  // of an unexplained "monitoring unavailable" after a 4 s wait.
+  const logPath = join(stateDir, "daemon.log");
+  let errStdio: number | "ignore" = "ignore";
+  try {
+    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    errStdio = openSync(logPath, "a", 0o600);
+  } catch {
+    /* couldn't open the log — fall back to discarding, never block the run */
+  }
   const child = Bun.spawn(argv, {
     // BEAGLE_EPHEMERAL: this auto-started daemon idle-exits once no agent
     // holds a lease and no viewer is open (§6.7), so a trial run leaves
     // nothing behind. An explicit `beagle daemon` or the service unit does not
     // set it and stays up.
     env: { ...process.env, BEAGLE_STATE_DIR: stateDir, BEAGLE_EPHEMERAL: "1" },
-    stdio: ["ignore", "ignore", "ignore"],
+    stdio: ["ignore", "ignore", errStdio],
   });
   child.unref();
+  if (typeof errStdio === "number") closeSync(errStdio); // the child holds its own dup
   for (let i = 0; i < 40 && !daemon; i++) {
     await Bun.sleep(100);
     daemon = await pingDaemon(stateDir);
   }
+  if (!daemon) {
+    const tail = daemonLogTail(logPath);
+    process.stderr.write(
+      `beagle ▲ the background monitor didn't come up` +
+        (tail ? ` — its last output:\n${tail}\n` : `; no output was captured (see ${logPath}).\n`),
+    );
+  }
   return daemon;
+}
+
+/** Last few lines of the daemon log — surfaced when startup fails so the user
+ *  sees the real cause, not a generic "unavailable". Bounded, best-effort. */
+function daemonLogTail(path: string, lines = 15): string {
+  try {
+    return readFileSync(path, "utf8").trimEnd().split("\n").slice(-lines).join("\n");
+  } catch {
+    return "";
+  }
 }
 
 // Two-column trust strip: an 11-char label gutter, values (and their wrapped
@@ -232,7 +261,7 @@ export function cmdStatus(
   store?.close();
   const dbPath = join(stateDir, "beagle.db");
   const sizeMb = existsSync(dbPath) ? (statSync(dbPath).size / (1 << 20)).toFixed(1) : "0.0";
-  const cfg = loadConfig(stateDir);
+  const cfg = readConfig(stateDir); // read-only: status must not create config.json
 
   lines.push(
     row("leaks", leaks === 0
@@ -268,7 +297,12 @@ export function cmdStatus(
 export function cmdSearch(stateDir: string, term: string): string {
   const store = openStore(stateDir);
   if (isStoreError(store)) return store.error;
-  if (!store) return "no capture store yet — nothing has been recorded, so: no matches (never sent).";
+  if (!store) {
+    // No store = nothing captured yet. Don't claim "never sent" — Beagle has
+    // observed no traffic and can't make that claim (finding: misleading on a
+    // fresh install where a user is checking whether monitoring works).
+    return "no captured traffic yet — nothing has been recorded to search.\nWrap a session with `beagle run <agent>` first, then search.";
+  }
   const hits = store.searchLiteral(term);
   store.close();
   if (hits.length === 0) return "no matches — that string was never sent through Beagle.";
@@ -746,7 +780,7 @@ export async function cmdUninstall(
 const BEAGLE_STATE_ENTRIES = [
   "beagle.db", "beagle.db-wal", "beagle.db-shm", // SQLite + its WAL sidecars
   "config.json", "install.key", "changes.json", "daemon.json", "control.sock",
-  "graduation.json", "shims", "agent-config", "quarantine",
+  "graduation.json", "daemon.log", "shims", "agent-config", "quarantine",
 ];
 
 // One agent's two lines: the COMMAND on its own arrowed line (it must read as

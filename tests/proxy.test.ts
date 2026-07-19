@@ -162,6 +162,51 @@ describe("proxy", () => {
     }
   });
 
+  test("a connection that never completes its request is reaped after the receive timeout", async () => {
+    const p = new ProxyServer({
+      registry, scan: () => new Promise(() => {}), onCall: () => {},
+      captureBufferCap: 1 << 20, receiveTimeoutMs: 150,
+    });
+    await p.listen(0);
+    try {
+      const { connect } = require("node:net") as typeof import("node:net");
+      const sock = connect(p.port, "127.0.0.1");
+      await new Promise<void>((r) => sock.on("connect", () => r()));
+      sock.write("POST /run/x/v1/messages HTTP/1.1\r\n"); // partial — never completes
+      const reaped = await new Promise<boolean>((res) => {
+        sock.on("close", () => res(true));
+        setTimeout(() => res(false), 1500);
+      });
+      expect(reaped).toBe(true); // server dropped the stalled connection
+    } finally {
+      p.close();
+    }
+  });
+
+  test("over the concurrency cap, a new connection is refused (aggregate memory bound)", async () => {
+    const p = new ProxyServer({
+      registry, scan: () => new Promise(() => {}), onCall: () => {},
+      captureBufferCap: 1 << 20, maxConnections: 1, receiveTimeoutMs: 60_000,
+    });
+    await p.listen(0);
+    const { connect } = require("node:net") as typeof import("node:net");
+    const a = connect(p.port, "127.0.0.1");
+    try {
+      await new Promise<void>((r) => a.on("connect", () => r()));
+      a.write("POST /run/x/v1/messages HTTP/1.1\r\n"); // hold conn 1 open (partial)
+      const b = connect(p.port, "127.0.0.1");
+      await new Promise<void>((r) => b.on("connect", () => r()));
+      const refused = await new Promise<boolean>((res) => {
+        b.on("close", () => res(true));
+        setTimeout(() => res(false), 800);
+      });
+      expect(refused).toBe(true); // 2nd connection dropped: over the cap of 1
+    } finally {
+      a.destroy();
+      p.close();
+    }
+  });
+
   test("parseUpstream keeps the base path; bare hosts stay prefix-free", () => {
     expect(parseUpstream("https://api.anthropic.com").basePath).toBe("");
     expect(parseUpstream("https://api.openai.com/v1").basePath).toBe("/v1");
