@@ -1,14 +1,26 @@
 # Third-party notices
 
-Beagle's core has zero third-party runtime dependencies. The third-party
-material it does ship is listed here in full.
+Beagle's core has zero third-party runtime *dependencies* — `package.json`'s
+`dependencies` is empty. Everything third-party that Beagle bundles, whether
+in the shipped binary or the source tree, is listed here.
+
+## Runtime (embedded in the binary)
+
+- **Bun** — MIT.
+  `beagle` is a Bun standalone executable (`bun build --compile`), so the
+  distributed binary embeds the Bun runtime. Bun is MIT-licensed and in turn
+  bundles further components (e.g. JavaScriptCore) under their own licenses;
+  the authoritative copyright and license text for all of them lives in the
+  [Bun repository](https://github.com/oven-sh/bun/blob/main/LICENSE.md).
+  (`npm install -g @boundedhq/beagle` ships our prebuilt binary — the binary
+  is in the tarball; Bun is not installed as a dependency.)
 
 ## Detection rules (data)
 
 - **gitleaks ruleset** — MIT, Copyright (c) 2019 Zachary Rice.
   The rule corpus in `rules/beagle-rules.json` is derived from the
   [gitleaks](https://github.com/gitleaks/gitleaks) ruleset, vendored as data
-  (no gitleaks code is included) and pinned by sha256 at build time. Full
+  (no gitleaks code is included) and integrity-checked by sha256 at load. Full
   license text: [`rules/GITLEAKS-LICENSE`](rules/GITLEAKS-LICENSE).
 
 ## Test fixtures (data)
