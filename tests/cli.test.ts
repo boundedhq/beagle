@@ -808,6 +808,33 @@ describe("findInstalledService scoping", () => {
   });
 });
 
+// The stale-daemon warning must recommend the remedy that fits the install:
+// `beagle stop` for a plain daemon (it refuses mid-capture; a raw kill doesn't),
+// but `kill <pid>` for a service-managed one (launchd/systemd respawns it on the
+// new binary; `beagle stop` would pause always-on until the next `beagle watch`).
+import { staleDaemonRemedy } from "../src/cli/commands";
+
+describe("staleDaemonRemedy", () => {
+  test("plain daemon (no installed service) → beagle stop", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-remedy-"));
+    const remedy = staleDaemonRemedy(dir, 4242);
+    expect(remedy).toContain("beagle stop");
+    expect(remedy).not.toContain("kill");
+  });
+
+  test("service-managed daemon → kill <pid>, not beagle stop", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-remedy-"));
+    const unit = join(dir, "beagle.service");
+    writeFileSync(unit, systemdUnit2({ beagleBinary: "/b", stateDir: dir }));
+    writeFileSync(join(dir, "changes.json"), JSON.stringify([
+      { kind: "service", agent: null, path: unit, backup: "systemd" },
+    ]));
+    const remedy = staleDaemonRemedy(dir, 4242);
+    expect(remedy).toContain("kill 4242");
+    expect(remedy).not.toContain("beagle stop");
+  });
+});
+
 // cmdStop must pause the always-on service (KeepAlive) or a stop silently
 // becomes a restart — and report truthfully, verified via isActive.
 import { cmdStop } from "../src/cli/commands";
