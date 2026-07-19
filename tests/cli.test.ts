@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1059,33 +1059,40 @@ import { run } from "../src/cli/main";
 
 describe("main.ts unwatch dispatch", () => {
   const origEnv = process.env.BEAGLE_STATE_DIR;
+  // `run(["unwatch"])` reads the ambient process.stdin.isTTY. Pin it FALSE so
+  // these tests are deterministic wherever they run — under an interactive
+  // `bun run check` (what CONTRIBUTING tells contributors to run), a real TTY
+  // would route the bare `unwatch` into the picker and BLOCK on readLineSync.
+  const origIsTTY = process.stdin.isTTY;
   let logs: string[];
   let errs: string[];
   const origLog = console.log;
   const origErr = console.error;
   beforeEach(() => {
     logs = []; errs = [];
+    (process.stdin as { isTTY?: boolean }).isTTY = false;
     console.log = (...a: unknown[]) => { logs.push(a.join(" ")); };
     console.error = (...a: unknown[]) => { errs.push(a.join(" ")); };
   });
   function restore() {
     console.log = origLog; console.error = origErr;
+    (process.stdin as { isTTY?: boolean }).isTTY = origIsTTY;
     if (origEnv === undefined) delete process.env.BEAGLE_STATE_DIR;
     else process.env.BEAGLE_STATE_DIR = origEnv;
   }
+  // Unconditional restore: process.stdin.isTTY is a process-wide global, so a
+  // future test that throws (or forgets a finally) must not leak isTTY=false
+  // into other tests/files. afterEach runs regardless of pass/throw.
+  afterEach(restore);
 
   test("an unknown flag is rejected with exit 2 (no state touched)", async () => {
-    try {
-      expect(await run(["unwatch", "--froce"])).toBe(2);
-      expect(errs.join("\n")).toContain("unknown flag --froce");
-    } finally { restore(); }
+    expect(await run(["unwatch", "--froce"])).toBe(2);
+    expect(errs.join("\n")).toContain("unknown flag --froce");
   });
 
   test("--all with an agent is rejected with exit 2", async () => {
-    try {
-      expect(await run(["unwatch", "--all", "claude"])).toBe(2);
-      expect(errs.join("\n")).toContain("takes no agent");
-    } finally { restore(); }
+    expect(await run(["unwatch", "--all", "claude"])).toBe(2);
+    expect(errs.join("\n")).toContain("takes no agent");
   });
 
   test("bare `unwatch` (no TTY) routes to the picker's choice list", async () => {
@@ -1095,11 +1102,9 @@ describe("main.ts unwatch dispatch", () => {
       { kind: "shim", agent: "opencode", path: join(dir, "shims", "opencode"), backup: null },
     ]));
     process.env.BEAGLE_STATE_DIR = dir;
-    try {
-      // non-interactive stdin in the test runner → picker prints choices
-      expect(await run(["unwatch"])).toBe(0);
-      expect(logs.join("\n")).toContain("watched: opencode");
-    } finally { restore(); }
+    // isTTY pinned false (beforeEach) → picker prints choices, never prompts
+    expect(await run(["unwatch"])).toBe(0);
+    expect(logs.join("\n")).toContain("watched: opencode");
   });
 
   test("`unwatch --all` routes to cmdUnwatchAll and removes every shim", async () => {
@@ -1110,9 +1115,7 @@ describe("main.ts unwatch dispatch", () => {
       { kind: "shim", agent: "opencode", path: join(dir, "shims", "opencode"), backup: null },
     ]));
     process.env.BEAGLE_STATE_DIR = dir;
-    try {
-      expect(await run(["unwatch", "--all"])).toBe(0);
-      expect(existsSync(join(dir, "shims", "opencode"))).toBe(false);
-    } finally { restore(); }
+    expect(await run(["unwatch", "--all"])).toBe(0);
+    expect(existsSync(join(dir, "shims", "opencode"))).toBe(false);
   });
 });
