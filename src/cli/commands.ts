@@ -91,10 +91,18 @@ async function ensureDaemon(stateDir: string): Promise<DaemonInfo | null> {
     // registering runs, and scanning. Warn (don't force-restart: it may be
     // serving other agents right now) with the exact remedy.
     if (daemon.runningVersion && daemon.runningVersion !== BEAGLE_VERSION) {
+      // The remedy differs by install: a service-managed daemon should be
+      // plain-killed so launchd/systemd respawns it from the new binary —
+      // `beagle stop` would instead pause always-on until the next `beagle
+      // watch`. A plain daemon gets `beagle stop`, which (unlike a raw kill)
+      // refuses while a capture is live.
+      const remedy = findInstalledService(stateDir)
+        ? `kill ${daemon.pid}   (the service respawns it from the new binary)`
+        : `beagle stop   (the next 'beagle run' starts a fresh one on the new binary)`;
       process.stderr.write(
         `beagle ▲ the running daemon is v${daemon.runningVersion} but this beagle is v${BEAGLE_VERSION} — ` +
           `it won't have this version's fixes until restarted.\n` +
-          `  Restart it: kill ${daemon.pid} && beagle status   (a plain 'beagle run' will start a fresh one)\n`,
+          `  Restart it: ${remedy}\n`,
       );
     }
     return daemon;
