@@ -19,8 +19,13 @@ Especially interested in reports where:
   another local user (file permissions, viewer auth, control socket);
 - the auth-header scrub can be bypassed so a provider credential reaches
   disk;
+- `redact-on-capture` (on by default) can be bypassed, so a detected secret
+  is written to the store unmasked;
 - the viewer can be reached or read cross-origin, or the one-time bootstrap
   token / session credential can be replayed;
+- the Mode-B telemetry receiver (a loopback listener used for subscription
+  capture) can be reached from off-machine, or made to write forged or
+  malformed self-reports into the store;
 - the proxy can be made to alter, drop, or misroute agent traffic;
 - the secret scanner can be trivially and systematically evaded (single-rule
   false negatives are ordinary bugs — file those publicly);
@@ -40,4 +45,7 @@ Especially interested in reports where:
 Release binaries are built in CI from the tagged commit, published with
 sha256 checksums, and the installer verifies the checksum before installing.
 Nothing is fetched or executed post-install. The detection ruleset is
-vendored as data and pinned by hash at build time.
+vendored as data and compiled into the binary; its sha256 pin is verified
+when the rules load, and the daemon refuses to run on a mismatch. Signing
+(cosign/minisign) is on the roadmap — the published checksums are the
+integrity check today.
