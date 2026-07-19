@@ -46,6 +46,8 @@ Release binaries are built in CI from the tagged commit, published with
 sha256 checksums, and the installer verifies the checksum before installing.
 Nothing is fetched or executed post-install. The detection ruleset is
 vendored as data and compiled into the binary; its sha256 pin is verified
-when the rules load, and the daemon refuses to run on a mismatch. Signing
-(cosign/minisign) is on the roadmap — the published checksums are the
-integrity check today.
+when the rules load. On a mismatch the scanner refuses the tampered rules
+and every scan reports `incomplete` rather than a false "clean" — capture
+and forwarding continue, because Beagle never blocks your agent's traffic.
+Signing (cosign/minisign) is on the roadmap — the published checksums are
+the integrity check today.

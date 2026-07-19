@@ -6,13 +6,14 @@ in the shipped binary or the source tree, is listed here.
 
 ## Runtime (embedded in the binary)
 
-- **Bun** — MIT, Copyright (c) Oven, Inc. and contributors.
+- **Bun** — MIT.
   `beagle` is a Bun standalone executable (`bun build --compile`), so the
   distributed binary embeds the Bun runtime. Bun is MIT-licensed and in turn
   bundles further components (e.g. JavaScriptCore) under their own licenses;
-  see the [Bun repository](https://github.com/oven-sh/bun) for the complete
-  set. (`npm install -g @boundedhq/beagle` ships our prebuilt binary; it does
-  not install Bun as a dependency.)
+  the authoritative copyright and license text for all of them lives in the
+  [Bun repository](https://github.com/oven-sh/bun/blob/main/LICENSE.md).
+  (`npm install -g @boundedhq/beagle` ships our prebuilt binary — the binary
+  is in the tarball; Bun is not installed as a dependency.)
 
 ## Detection rules (data)
 
