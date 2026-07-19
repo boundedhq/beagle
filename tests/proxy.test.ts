@@ -140,6 +140,28 @@ describe("proxy", () => {
     expect(line).toBe("POST /v1/responses HTTP/1.1");
   });
 
+  test("an over-cap request is rejected with 413, not buffered without bound", async () => {
+    // Dedicated small-cap proxy so we can trip the limit without a 128 MiB body.
+    const capped = new ProxyServer({
+      registry,
+      scan: () => new Promise(() => {}),
+      onCall: () => {},
+      captureBufferCap: 1 << 20,
+      maxRequestBytes: 512,
+    });
+    await capped.listen(0);
+    try {
+      const body = "x".repeat(2000); // well over the 512-byte cap
+      const raw =
+        `POST /run/run-abc/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\n` +
+        `Content-Length: ${body.length}\r\n\r\n${body}`;
+      const resp = (await sendRaw(capped.port, raw)).toString();
+      expect(resp).toContain("413 Payload Too Large");
+    } finally {
+      capped.close();
+    }
+  });
+
   test("parseUpstream keeps the base path; bare hosts stay prefix-free", () => {
     expect(parseUpstream("https://api.anthropic.com").basePath).toBe("");
     expect(parseUpstream("https://api.openai.com/v1").basePath).toBe("/v1");
@@ -488,5 +510,45 @@ describe("proxy hardening (malicious/compromised upstream)", () => {
     r.feed(Buffer.from("HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok" + "HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nEVIL!"));
     expect(r.done).toBe(true);
     expect(r.keepAlive).toBe(false); // leftover bytes → pool-poisoning defense
+  });
+
+  test("ResponseReader skips an interim 100 Continue and reads the real response", () => {
+    const body: Buffer[] = [];
+    const r = new ResponseReader((b) => body.push(b));
+    // 100 Continue (no body) then the real 200 — arriving together
+    r.feed(Buffer.from("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nhi"));
+    expect(r.status).toBe(200); // not 100
+    expect(r.done).toBe(true);
+    expect(Buffer.concat(body).toString()).toBe("hi"); // real body, not the interim head
+  });
+
+  test("ResponseReader skips an interim head that arrives in a separate chunk", () => {
+    const r = new ResponseReader(() => {});
+    r.feed(Buffer.from("HTTP/1.1 103 Early Hints\r\nlink: </s.css>\r\n\r\n"));
+    expect(r.done).toBe(false); // still waiting for the real response
+    r.feed(Buffer.from("HTTP/1.1 204 No Content\r\n\r\n"));
+    expect(r.status).toBe(204);
+    expect(r.done).toBe(true);
+  });
+
+  test("ResponseReader survives a flood of interim heads without recursing (no stack overflow)", () => {
+    // A compromised upstream sending thousands of 100 Continue heads in one
+    // burst must not blow the stack — the interim-skip iterates, it doesn't
+    // recurse (which would only be safe on engines with proper tail calls).
+    const r = new ResponseReader(() => {});
+    const flood = "HTTP/1.1 100 Continue\r\n\r\n".repeat(20000);
+    expect(() => r.feed(Buffer.from(flood + "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok"))).not.toThrow();
+    expect(r.status).toBe(200); // the real response after the flood
+    expect(r.done).toBe(true);
+  });
+
+  test("ResponseReader completes a HEAD response at the head, ignoring content-length", () => {
+    const body: Buffer[] = [];
+    // HEAD echoes the GET's content-length but sends no body — without the
+    // method hint the reader would wait for 1000 bytes that never come.
+    const r = new ResponseReader((b) => body.push(b), "HEAD");
+    r.feed(Buffer.from("HTTP/1.1 200 OK\r\ncontent-length: 1000\r\n\r\n"));
+    expect(r.done).toBe(true);
+    expect(body.length).toBe(0);
   });
 });

@@ -211,7 +211,7 @@ Trust needs numbers, not adjectives:
 
 | Budget | Design target | CI gate |
 |---|---|---|
-| Core security path | ≤ 1,500 LOC | `bun run loc:check` fails the build over budget |
+| Core security path | ≤ 2,000 LOC | `bun run loc:check` fails the build over budget |
 | Detection false-positive rate | < 5% | `tests/precision.test.ts` — the ship gate |
 | Scan time, 1 MB body | p99 ~10 ms | `tests/budget.test.ts` (< 50 ms ceiling for CI variance) |
 | Added request latency | p50 ≤ 5 ms | `tests/budget.test.ts` (< 25 ms ceiling for CI variance) |

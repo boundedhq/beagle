@@ -5,6 +5,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { Store } from "../core/store/store";
+import { listenReady } from "../core/net/listen";
 import { feedStats, listCalls, listLeakEvents } from "./feed-query";
 import { buildDetail, detailLeaks, detailMessages, leakSpansFor } from "./detail";
 import { buildSessionTurns, listSessions, wireDeltaIndex } from "./session-view";
@@ -95,14 +96,13 @@ export class ViewerServer {
 
   start(): Promise<string> {
     this.bootToken = randomBytes(24).toString("hex");
-    return new Promise((resolve) => {
-      this.server = createServer((req, res) => this.route(req, res));
-      this.server.listen(0, "127.0.0.1", () => {
-        this.port = (this.server!.address() as { port: number }).port;
-        this.isRunning = true;
-        this.armIdleTimer();
-        resolve(`http://127.0.0.1:${this.port}/?boot=${this.bootToken}`);
-      });
+    const server = createServer((req, res) => this.route(req, res));
+    this.server = server;
+    return listenReady(server, () => server.listen(0, "127.0.0.1")).then(() => {
+      this.port = (server.address() as { port: number }).port;
+      this.isRunning = true;
+      this.armIdleTimer();
+      return `http://127.0.0.1:${this.port}/?boot=${this.bootToken}`;
     });
   }
 

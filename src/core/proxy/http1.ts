@@ -51,7 +51,10 @@ export class ResponseReader {
   private remaining = 0; // for length mode, bytes left; for chunked, bytes left in current chunk
   private chunkStage: "size" | "data" | "trailer" = "size";
 
-  constructor(private onBody: (chunk: Buffer) => void) {}
+  constructor(
+    private onBody: (chunk: Buffer) => void,
+    private method: string = "GET",
+  ) {}
 
   headerValue(name: string): string | undefined {
     return this.headers.find(([n]) => n.toLowerCase() === name)?.[1];
@@ -79,21 +82,47 @@ export class ResponseReader {
   }
 
   private parseHead(): void {
-    const end = this.buf.indexOf("\r\n\r\n");
-    if (end === -1) return;
-    const lines = this.buf.subarray(0, end).toString("latin1").split("\r\n");
-    const statusLine = lines[0] ?? "";
-    this.status = Number(statusLine.split(" ")[1] ?? 0);
+    // Loop (not recursion) over any interim 1xx heads: a compromised upstream
+    // could send thousands in one burst, and `return this.parseHead()` would
+    // only be safe on engines with proper tail calls (JSC has them, V8 does
+    // not — don't make crash-safety depend on that). The pre-body buffer stays
+    // bounded by feed()'s cap between chunks.
+    let end = this.buf.indexOf("\r\n\r\n");
+    let lines: string[] = [];
+    let status = 0;
+    for (;;) {
+      if (end === -1) return;
+      lines = this.buf.subarray(0, end).toString("latin1").split("\r\n");
+      status = Number((lines[0] ?? "").split(" ")[1] ?? 0);
+      // Interim 1xx (100 Continue, 103 Early Hints): a bodyless head that
+      // precedes the real response. Drop it and read the next head — otherwise
+      // the final response is mis-read as this one's body and the reader waits
+      // for EOF (up to the socket timeout). 101 can't reach here: the proxy
+      // refuses Upgrade requests before forwarding.
+      if (status >= 100 && status < 200) {
+        this.buf = this.buf.subarray(end + 4);
+        end = this.buf.indexOf("\r\n\r\n");
+        continue;
+      }
+      break;
+    }
+    this.status = status;
     for (const line of lines.slice(1)) {
       const i = line.indexOf(":");
       if (i > 0) this.headers.push([line.slice(0, i), line.slice(i + 1).trim()]);
     }
     this.buf = this.buf.subarray(end + 4);
     this.stage = "body";
-    const te = this.headerValue("transfer-encoding");
-    const cl = this.headerValue("content-length");
     const conn = this.headerValue("connection")?.toLowerCase();
     this.keepAlive = conn !== "close";
+    // A HEAD response carries no body, even with a content-length advertising
+    // the GET size — completing here avoids waiting for bytes that never come.
+    if (this.method === "HEAD") {
+      this.done = true;
+      return;
+    }
+    const te = this.headerValue("transfer-encoding");
+    const cl = this.headerValue("content-length");
     if (te?.toLowerCase().includes("chunked")) {
       this.bodyMode = "chunked";
     } else if (cl !== undefined) {

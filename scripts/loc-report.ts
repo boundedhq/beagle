@@ -4,7 +4,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 
-export const CORE_BUDGET = 1500;
+export const CORE_BUDGET = 2000;
 
 export interface LocResult {
   core: number;

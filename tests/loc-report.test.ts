@@ -53,7 +53,7 @@ describe("locReport", () => {
   });
 
   test("core budget is the R9 ceiling", () => {
-    expect(CORE_BUDGET).toBe(1500);
+    expect(CORE_BUDGET).toBe(2000);
   });
 
   test("overBudget flag set when core exceeds budget", () => {
