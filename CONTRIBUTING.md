@@ -70,10 +70,16 @@ pin test; where one doesn't, review holds the line:
   catch: `ui` reuses any daemon that's already up, old assets and all — so
   `beagle stop` first, then `bun src/cli/main.ts ui` spawns one from your
   working tree. (On a watch-managed machine, `beagle stop` pauses always-on
-  until your next `beagle watch` — re-run it when you're done.) To have
-  data to look at, populate a scratch store first:
-  `BEAGLE_STATE_DIR=/tmp/beagle-dev bun src/cli/main.ts run <agent>` for a
-  session or two, then point `ui` at the same `BEAGLE_STATE_DIR`.
+  until your next `beagle watch` — re-run it when you're done.)
+- **Need dashboard data without a real agent?** `bun scripts/seed-dev-store.ts`
+  fills a scratch store (`/tmp/beagle-dev-store`) with synthetic sessions —
+  including a masked leak, so the highlight/alert UI actually has something to
+  render — then `BEAGLE_STATE_DIR=/tmp/beagle-dev-store bun src/cli/main.ts ui`.
+  (`beagle run <agent>` gives you *real* capture, but it needs one of the four
+  agents installed and signed in and makes a live provider call — a fresh
+  session also has no leaks unless one is actually sent, so it's not a data
+  generator. Never paste a real key to make one; the seed script or a
+  fake-shaped string is the way.)
 - **Never let a test touch the real service.** The launchd/systemd unit
   label (`com.boundedhq.beagle`) is per-user global — a test that calls the
   real `osServiceRunner` can unload the *developer's actual service* (this
