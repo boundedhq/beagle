@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1080,19 +1080,19 @@ describe("main.ts unwatch dispatch", () => {
     if (origEnv === undefined) delete process.env.BEAGLE_STATE_DIR;
     else process.env.BEAGLE_STATE_DIR = origEnv;
   }
+  // Unconditional restore: process.stdin.isTTY is a process-wide global, so a
+  // future test that throws (or forgets a finally) must not leak isTTY=false
+  // into other tests/files. afterEach runs regardless of pass/throw.
+  afterEach(restore);
 
   test("an unknown flag is rejected with exit 2 (no state touched)", async () => {
-    try {
-      expect(await run(["unwatch", "--froce"])).toBe(2);
-      expect(errs.join("\n")).toContain("unknown flag --froce");
-    } finally { restore(); }
+    expect(await run(["unwatch", "--froce"])).toBe(2);
+    expect(errs.join("\n")).toContain("unknown flag --froce");
   });
 
   test("--all with an agent is rejected with exit 2", async () => {
-    try {
-      expect(await run(["unwatch", "--all", "claude"])).toBe(2);
-      expect(errs.join("\n")).toContain("takes no agent");
-    } finally { restore(); }
+    expect(await run(["unwatch", "--all", "claude"])).toBe(2);
+    expect(errs.join("\n")).toContain("takes no agent");
   });
 
   test("bare `unwatch` (no TTY) routes to the picker's choice list", async () => {
@@ -1102,11 +1102,9 @@ describe("main.ts unwatch dispatch", () => {
       { kind: "shim", agent: "opencode", path: join(dir, "shims", "opencode"), backup: null },
     ]));
     process.env.BEAGLE_STATE_DIR = dir;
-    try {
-      // isTTY pinned false (beforeEach) → picker prints choices, never prompts
-      expect(await run(["unwatch"])).toBe(0);
-      expect(logs.join("\n")).toContain("watched: opencode");
-    } finally { restore(); }
+    // isTTY pinned false (beforeEach) → picker prints choices, never prompts
+    expect(await run(["unwatch"])).toBe(0);
+    expect(logs.join("\n")).toContain("watched: opencode");
   });
 
   test("`unwatch --all` routes to cmdUnwatchAll and removes every shim", async () => {
@@ -1117,9 +1115,7 @@ describe("main.ts unwatch dispatch", () => {
       { kind: "shim", agent: "opencode", path: join(dir, "shims", "opencode"), backup: null },
     ]));
     process.env.BEAGLE_STATE_DIR = dir;
-    try {
-      expect(await run(["unwatch", "--all"])).toBe(0);
-      expect(existsSync(join(dir, "shims", "opencode"))).toBe(false);
-    } finally { restore(); }
+    expect(await run(["unwatch", "--all"])).toBe(0);
+    expect(existsSync(join(dir, "shims", "opencode"))).toBe(false);
   });
 });
