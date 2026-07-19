@@ -44,23 +44,21 @@ subscription here; yours may say *"captured on the wire"* instead (the
 difference is explained under **Capture modes**). Either way, you run the
 exact command it prints.
 
-`beagle run` wraps **one** session. It touches no files or config — the only
-thing it starts is a local capture daemon that idle-exits when unused:
+`beagle run` wraps **one** session. It touches none of *your* files or
+config — captures land in Beagle's own store (`~/.local/state/beagle`), and
+the only thing it starts is a local capture daemon that idle-exits when
+unused.
 
-```sh
-beagle run claude          # wrap one session — that's it
-```
+Every model call is captured locally, and every captured call is scanned.
+If a secret goes out you get an OS notification — dashboard open or not,
+and one per distinct secret, not one per call, even as the agent re-sends
+its history every turn. Afterwards:
 
-Every model call is captured locally, and every outbound body is scanned as
-it happens. If a secret goes out you get an OS notification — one per
-distinct secret, not one per call, even as the agent re-sends its history
-every turn. Afterwards:
-
-```sh
+```console
 $ beagle leaks             # did anything leak? every call was already scanned
 1 leak event across 1 session — newest first:
 
-  Fix the deploy script — claude · session 01KXAK6K2P
+  Fix the deploy script — opencode · session 01KXAK6K2P
       Jul 17 at 11:57 PM   AWS access key → anthropic   ×1   call 01KXT07ZKK7RB6Y12N51Y8NNJX
 
 $ beagle ui                # or browse it all in the dashboard — leaks highlighted inline
@@ -80,9 +78,10 @@ agent's own report — see **Capture modes**.)
   captured request — including the full `tools` array, names, descriptions,
   and JSON schemas — as foldable JSON.
 - **What's new this turn vs. re-sent history?** Transcripts show each turn's
-  delta instead of re-printing the whole conversation, and calls record
-  tokens in/out whenever the provider reports usage — between the two, you
-  can usually answer "why was that turn 50k tokens?"
+  delta instead of re-printing the whole conversation; each call gets a
+  one-line "what this turn did" summary and records tokens in/out whenever
+  the provider reports usage — usually enough to answer "why was that turn
+  50k tokens?"
 - **What came back?** Responses reassembled from the stream: the model's
   text, then its tool calls, each in the order emitted.
 - **Did that internal hostname ever leave?** `beagle search` checks every
@@ -118,10 +117,12 @@ to change it; `--wire` / `--telemetry` force a mode for one run). And if a
 wrong guess ever slips through, Beagle warns you when a session ends with
 nothing captured — and tells you which mode to force.
 
-**What's telemetry capture?** Claude Code and Codex pin their endpoint when
-signed in with a subscription and ignore proxy overrides, so Beagle can't sit
-on that wire for them. Instead, it captures those sessions from the agent's
-own usage reporting. Your prompts, tool inputs, and tool outputs (including
+**What's telemetry capture?** Two agents can't be wire-redirected when signed
+in with a subscription: Codex's ChatGPT login is locked to its built-in
+provider (the endpoint override Beagle uses for API-key Codex doesn't reach
+it), and Anthropic restricts Claude.ai subscription OAuth to its official
+client. So for those two, Beagle captures sessions from the agent's own
+usage reporting instead. Your prompts, tool inputs, and tool outputs (including
 files the agent reads) are still scanned — but it's the agent's self-report,
 not observed wire bytes. Those rows are badged **self-reported** in the
 dashboard (wire rows say **observed**), and alerts can lag a few seconds.
@@ -133,11 +134,11 @@ of the run — your collector won't receive events from that session.
 (opencode's and pi's ChatGPT sign-ins need none of this — their traffic
 proxies normally at full fidelity.)
 
-### Always-on
+## Always-on (`beagle watch`)
 
 `beagle watch <agent>` makes that agent captured on every run, not just ones
-you remember to wrap. It walks you through each change and asks `y/N` before
-making it:
+you remember to wrap. It shows you each change — the exact shim path, service
+definition, and rc line — and asks `y/N` before making it:
 
 - a **PATH shim** for that agent,
 - a **background service** so coverage survives reboots,
@@ -195,7 +196,7 @@ beagle search [string]     # was this string sent? searches the local store
                            # (no arg → reads stdin, keeps it out of history)
 beagle show <id>           # one captured call, summarized
 beagle ui                  # open the dashboard (loopback, one-time link)
-beagle purge [all|panic]   # erase captured data (panic = overwrite first)
+beagle purge [all|panic]   # erase captured data (panic = zero records in place)
 beagle stop                # stop the daemon; pause always-on until next watch
 beagle uninstall           # remove everything Beagle installed (see Uninstall)
 beagle config [...]        # redact-on-capture, exclusions, per-agent run-mode
@@ -203,11 +204,6 @@ beagle config [...]        # redact-on-capture, exclusions, per-agent run-mode
 
 `beagle help` lists them all. The whole loop works headless — a skeptic never
 has to start the viewer.
-
-**What's scanning for?** The vendored gitleaks ruleset (data, not code) run
-through a small homegrown matcher. Structured detectors (AWS/GitHub/Stripe/
-private keys, Luhn-checked cards) alert loudly; entropy-only matches stay a
-quiet "possible" tier.
 
 ## Budgets (published, enforced in CI)
 
@@ -241,9 +237,10 @@ in one sitting: start at [`src/core/`](src/core/).
   is masked (`[REDACTED:type:hash]`) before it is ever written, so Beagle never
   becomes a plaintext store of the very secrets it catches. Turn it off
   (`beagle config redact-on-capture off`) for the raw-fidelity view.
-  One-command panic purge overwrites the store before deleting it
-  (best-effort on SSDs and copy-on-write filesystems — full-disk encryption
-  is the real backstop there).
+  One-command panic purge zeroes every record in place and compacts the
+  store (SQLite `secure_delete` + VACUUM) rather than just dropping rows —
+  best-effort on SSDs and copy-on-write filesystems, where full-disk
+  encryption is the real backstop.
 - **Auditable.** Found a hole? See [SECURITY.md](SECURITY.md) for private
   reporting.
 
@@ -300,11 +297,13 @@ beagle ▲ the running daemon is v0.1.0 but this beagle is v0.2.0 — it won't h
   Restart it: kill <pid> && beagle status   (a plain 'beagle run' will start a fresh one)
 ```
 
-- **Plain use:** `kill <pid>` (from the warning, or `beagle status`) — the
-  next `beagle run` / `beagle ui` starts a fresh daemon on the new binary.
-- **Service-installed** (via `beagle watch`): `kill <pid>` is enough by
-  itself — launchd/systemd respawns the daemon immediately from the updated
-  binary path.
+- **Plain use:** `beagle stop` — safer than the raw `kill` in the warning,
+  because it refuses while another agent's capture is live. The next
+  `beagle run` / `beagle ui` starts a fresh daemon on the new binary.
+- **Service-installed** (via `beagle watch`): here `kill <pid>` really is
+  the right move — launchd/systemd respawns the daemon immediately from the
+  updated binary path. (Don't use `beagle stop` for updates: it pauses
+  always-on until the next `beagle watch`.)
 
 If the update changed the store schema, the new daemon migrates it in place
 on startup (additive, data-preserving). Read commands against a
@@ -324,12 +323,12 @@ npm uninstall -g @boundedhq/beagle   # (npm)   or:   rm /usr/local/bin/beagle   
 ```
 
 `beagle uninstall` restores your PATH and config before deleting anything,
-and overwrites the store before unlinking it, rather than a bare `rm -rf`
-(best-effort — on SSDs and copy-on-write filesystems full physical erasure
-can't be guaranteed from userspace; full-disk encryption is the backstop).
-It's different from `beagle purge`, which clears the *data* while keeping
-you set up. Everything Beagle ever changed is listed by `beagle status`
-while it's installed.
+and — when the store is readable — zeroes its contents before unlinking it,
+rather than a bare `rm -rf` (best-effort — on SSDs and copy-on-write
+filesystems full physical erasure can't be guaranteed from userspace;
+full-disk encryption is the backstop). It's different from `beagle purge`,
+which clears the *data* while keeping you set up. Everything Beagle ever
+changed is listed by `beagle status` while it's installed.
 
 ## FAQ
 
@@ -362,7 +361,8 @@ It's the gitleaks ruleset (vendored as data, sha256-pinned) run through a
 matcher of ~200 lines you can read in one sitting
 ([`src/core/scanner/`](src/core/scanner/)), with a published <5%
 false-positive gate in CI. Detection tiers are honest: structured hits
-alert loudly; entropy-only hits stay a quiet "possible."
+(AWS/GitHub/Stripe/private keys, Luhn-checked cards) alert loudly;
+entropy-only hits stay a quiet "possible."
 
 **What happens if Beagle crashes mid-run?**
 The proxy fails open for observation, never blocking your agent: if
