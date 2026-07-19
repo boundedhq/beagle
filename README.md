@@ -294,16 +294,17 @@ back (it may be mid-capture for another agent), but `beagle run` and
 
 ```
 beagle ▲ the running daemon is v0.1.0 but this beagle is v0.2.0 — it won't have this version's fixes until restarted.
-  Restart it: kill <pid> && beagle status   (a plain 'beagle run' will start a fresh one)
+  Restart it: beagle stop   (the next 'beagle run' starts a fresh one on the new binary)
 ```
 
-- **Plain use:** `beagle stop` — safer than the raw `kill` in the warning,
-  because it refuses while another agent's capture is live. The next
-  `beagle run` / `beagle ui` starts a fresh daemon on the new binary.
-- **Service-installed** (via `beagle watch`): here `kill <pid>` really is
-  the right move — launchd/systemd respawns the daemon immediately from the
-  updated binary path. (Don't use `beagle stop` for updates: it pauses
-  always-on until the next `beagle watch`.)
+- **Plain use:** `beagle stop` — safer than a raw `kill`, because it refuses
+  while another agent's capture is live. The next `beagle run` / `beagle ui`
+  starts a fresh daemon on the new binary.
+- **Service-installed** (via `beagle watch`): here the warning says
+  `kill <pid>` instead, and that really is the right move — launchd/systemd
+  respawns the daemon immediately from the updated binary path. (Don't use
+  `beagle stop` for updates: it pauses always-on until the next
+  `beagle watch`.)
 
 If the update changed the store schema, the new daemon migrates it in place
 on startup (additive, data-preserving). Read commands against a

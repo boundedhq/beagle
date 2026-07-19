@@ -82,6 +82,25 @@ async function pingDaemon(stateDir: string): Promise<DaemonInfo | null> {
   }
 }
 
+// The "Restart it:" remedy for a stale (old-version) running daemon. It differs
+// by install: a service-managed daemon should be plain-killed so launchd/systemd
+// respawns it from the new binary — `beagle stop` would instead pause always-on
+// until the next `beagle watch`. A plain daemon gets `beagle stop`, which (unlike
+// a raw kill) refuses while a capture is live. Service detection reads files and
+// can throw; since this only feeds a non-fatal advisory, a failure falls back to
+// the plain-daemon remedy rather than crash `beagle run`/`beagle ui`.
+export function staleDaemonRemedy(stateDir: string, pid: number): string {
+  let serviceManaged = false;
+  try {
+    serviceManaged = findInstalledService(stateDir) !== null;
+  } catch {
+    // detection I/O failed — treat as plain; advice must never abort the run.
+  }
+  return serviceManaged
+    ? `kill ${pid}   (the service respawns it from the new binary)`
+    : `beagle stop   (the next 'beagle run' starts a fresh one on the new binary)`;
+}
+
 // Ensure a daemon is up, spawning one if needed. Shared by run and ui.
 async function ensureDaemon(stateDir: string): Promise<DaemonInfo | null> {
   let daemon = await pingDaemon(stateDir);
@@ -94,7 +113,7 @@ async function ensureDaemon(stateDir: string): Promise<DaemonInfo | null> {
       process.stderr.write(
         `beagle ▲ the running daemon is v${daemon.runningVersion} but this beagle is v${BEAGLE_VERSION} — ` +
           `it won't have this version's fixes until restarted.\n` +
-          `  Restart it: kill ${daemon.pid} && beagle status   (a plain 'beagle run' will start a fresh one)\n`,
+          `  Restart it: ${staleDaemonRemedy(stateDir, daemon.pid)}\n`,
       );
     }
     return daemon;
