@@ -40,6 +40,9 @@ interface AttrValue {
 export interface OtelCall extends Call {
   convId?: string;
   runToken?: string;
+  /** Claude Code's per-turn prompt.id — the daemon stitches a later-batch
+   *  response back onto its turn row with it. */
+  promptId?: string;
 }
 
 function attrMap(attrs: Array<{ key: string; value: AttrValue }> | undefined): Map<string, AttrValue> {
@@ -112,6 +115,7 @@ function flattenPromptText(raw: string): string {
 interface Turn {
   order: number; // first-seen index, for stable output ordering
   sessionId?: string;
+  promptId?: string;
   tsNano?: number;
   prompt?: string;
   tools: Array<{ name?: string; input: string }>;
@@ -132,6 +136,20 @@ interface OtlpRecord {
 // emits (hook_*, mcp_server_connection, plugin_loaded, tool_decision,
 // api_refusal, …) is operational noise with no leak surface.
 const CONTENT_EVENTS = new Set(["user_prompt", "tool_result", "assistant_response", "api_request"]);
+
+// Claude Code fires internal side-calls that REUSE the user turn's session.id +
+// prompt.id but carry a non-user query_source. Verified live (raw OTLP dumps
+// from real interactive sessions):
+//   generate_session_title — haiku call, response `{"title": …}`
+//   prompt_suggestion      — the input-box ghost-text suggestion, emitted
+//                            co-batched AFTER the real answer
+// Left in, they fold into the turn: their tokens sum in, their model can win,
+// and under last-write-wins their response CLOBBERS the real reply — a
+// prompt_suggestion overwriting the answer is exactly why interactive turns
+// stored a next-prompt-looking sentence (or title JSON) instead of the reply.
+// Skip them by source. A denylist, not an allowlist: an unrecognized source is
+// kept as real content, so we never silently drop a genuine reply.
+const INTERNAL_QUERY_SOURCES = new Set(["generate_session_title", "prompt_suggestion"]);
 
 // Every level is array-guarded: a non-array container (object instead of []) is
 // treated as empty rather than throwing and discarding the whole payload.
@@ -193,14 +211,16 @@ function buildTurnCall(t: Turn, ctx: OtlpContext): OtelCall {
     },
     meta: { tsRequest: ts, tsResponse: ts, tokensIn: t.tokensIn, tokensOut: t.tokensOut },
     convId: t.sessionId,
+    promptId: t.promptId,
   };
 }
 
 // Reassemble Claude Code's split event stream into one Call per user turn.
 // Malformed input degrades to [] (R3). Correlation is per DELIVERED PAYLOAD:
 // a turn whose events span multiple OTLP POST batches yields a partial Call
-// per batch (prompt-only, then response-only) — the scanner + fingerprint
-// dedup make that harmless (all content is scanned, no double alert).
+// per batch (prompt-only, then response-only). Scanning stays sound either way
+// (all content scanned, fingerprint dedup); the daemon rejoins a response-only
+// partial to its stored turn row via promptId (store.attachOtelResponse).
 export function mapOtlpLogsToCalls(payload: unknown, ctx: OtlpContext): OtelCall[] {
   try {
     const records = collectRecords(payload);
@@ -219,6 +239,9 @@ export function mapOtlpLogsToCalls(payload: unknown, ctx: OtlpContext): OtelCall
         const a = attrMap(rec.attributes);
         const name = str(a.get("event.name"));
         if (!name || !CONTENT_EVENTS.has(name)) continue;
+        // Drop internal side-calls before they touch the turn (response, model,
+        // and token counts all mis-attribute otherwise).
+        if (INTERNAL_QUERY_SOURCES.has(str(a.get("query_source")) ?? "")) continue;
         const sessionId = str(a.get("session.id"));
         const promptId = str(a.get("prompt.id"));
         // Group by turn. A content record with no prompt.id still gets its own
@@ -226,7 +249,7 @@ export function mapOtlpLogsToCalls(payload: unknown, ctx: OtlpContext): OtelCall
         const key = promptId ? `${sessionId ?? ""}::${promptId}` : `${sessionId ?? ""}::orphan-${i}`;
         let turn = turns.get(key);
         if (!turn) {
-          turn = { order: i, sessionId, tools: [] };
+          turn = { order: i, sessionId, promptId, tools: [] };
           turns.set(key, turn);
         }
         const ns = recordNano(rec);

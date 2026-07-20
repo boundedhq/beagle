@@ -128,6 +128,7 @@ describe("Store lifecycle", () => {
     raw.exec("ALTER TABLE leak_occurrences DROP COLUMN span_start");
     raw.exec("ALTER TABLE leak_occurrences DROP COLUMN span_end");
     raw.exec("ALTER TABLE payloads DROP COLUMN display_messages"); // v3 column
+    raw.exec("ALTER TABLE exchanges DROP COLUMN prompt_key"); // v5 column
     raw.exec("ALTER TABLE exchanges DROP COLUMN one_shot"); // v4 column
     raw.exec("PRAGMA user_version=1");
     raw.close();
@@ -140,11 +141,12 @@ describe("Store lifecycle", () => {
     expect(listLeakEvents(migrated).length).toBe(1);
     // The re-added columns now accept writes: the redact flag (v2) and the
     // Mode B display messages (v3) both round-trip through the migrated schema.
-    const ex2 = fakeCall({ redacted: true, displayMessages: [{ role: "user", content: "hi" }], oneShot: true });
+    const ex2 = fakeCall({ redacted: true, displayMessages: [{ role: "user", content: "hi" }], oneShot: true, promptKey: "p-77" });
     migrated.insertCall(ex2);
     expect(migrated.getCall(ex2.id)?.redacted).toBe(true);
     expect(migrated.getCall(ex2.id)?.displayMessages).toEqual([{ role: "user", content: "hi" }]);
     expect(migrated.getCall(ex2.id)?.oneShot).toBe(true); // v4 column round-trips post-migration
+    expect(migrated.getCall(ex2.id)?.promptKey).toBe("p-77"); // v5 column round-trips post-migration
     expect(migrated.getCall(call.id)?.oneShot).toBe(false); // pre-migration row reads false, not undefined
     migrated.close();
   });
@@ -191,6 +193,135 @@ describe("Call write/read", () => {
     store.insertCall(fakeCall({ searchText: `leading ${cred} trailing` }));
     const hits = store.searchLiteral(cred);
     expect(hits.length).toBe(1);
+    store.close();
+  });
+});
+
+describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
+  let dir: string;
+  beforeEach(() => (dir = tmpRoot()));
+
+  // A Mode B prompt-only partial as ingestOtel stores it: no response yet.
+  const promptRow = (overrides: Partial<CallRecord> = {}) =>
+    fakeCall({
+      source: "otel", endpoint: "otel:claude_code.turn", promptKey: "prompt-1",
+      model: undefined, tokensIn: undefined, tokensOut: undefined,
+      tsResponse: undefined, bytesResp: undefined, responseBody: null,
+      summary: "how does memory work?", searchText: "how does memory work?",
+      ...overrides,
+    });
+
+  test("a later-batch response rejoins its turn row: body, model, tokens, summary, search", () => {
+    const store = Store.open(dir);
+    const turn = promptRow();
+    store.insertCall(turn);
+    const attached = store.attachOtelResponse({
+      sessionId: "sess-1", promptKey: "prompt-1", tsResponse: turn.tsRequest + 18_000,
+      model: "claude-opus-4-8", tokensIn: 4182, tokensOut: 1128,
+      composeSummary: (existing) => `"${existing}" → Memory works like this…`,
+      responseBody: new TextEncoder().encode("Memory works like this — the long answer"),
+      searchAppend: "\nMemory works like this — the long answer",
+    });
+    expect(attached).toBe(true);
+    const got = store.getCall(turn.id)!;
+    expect(new TextDecoder().decode(got.responseBody!)).toContain("the long answer");
+    expect(got.model).toBe("claude-opus-4-8");
+    expect(got.tokensIn).toBe(4182);
+    expect(got.tokensOut).toBe(1128);
+    expect(got.tsResponse).toBe(turn.tsRequest + 18_000);
+    // composed from the row's own question + the answer, so a stitched turn
+    // reads like a one-batch one instead of showing the answer alone
+    expect(got.summary).toBe('"how does memory work?" → Memory works like this…');
+    // one row, findable by BOTH its question and its answer
+    const byAnswer = store.searchLiteral("the long answer");
+    expect(byAnswer.length).toBe(1);
+    expect(byAnswer[0]!.callId).toBe(turn.id);
+    expect(store.searchLiteral("how does memory work")[0]!.callId).toBe(turn.id);
+    store.close();
+  });
+
+  test("tokens SUM when the turn row already has some (api_request split across batches)", () => {
+    const store = Store.open(dir);
+    const turn = promptRow({ tokensIn: 50, tokensOut: 4 });
+    store.insertCall(turn);
+    store.attachOtelResponse({
+      sessionId: "sess-1", promptKey: "prompt-1", tsResponse: Date.now(),
+      tokensIn: 50, tokensOut: 4, responseBody: new TextEncoder().encode("ok"), searchAppend: "\nok",
+    });
+    const got = store.getCall(turn.id)!;
+    expect(got.tokensIn).toBe(100);
+    expect(got.tokensOut).toBe(8);
+    expect(got.model).toBe(undefined); // COALESCE: absent on both sides stays absent
+    store.close();
+  });
+
+  test("the answer lands on the QUESTION row, not a later tool row sharing the prompt id", () => {
+    // A turn whose tool_results arrived in their own OTLP batch has several
+    // rows sharing prompt_key. Taking the NEWEST hung the answer off the tool
+    // row and left the question unanswered — the exact split this feature
+    // exists to remove. The turn's FIRST partial is the one with the question.
+    const store = Store.open(dir);
+    // Explicit timestamps, as the real batches arrive: the question first, the
+    // tool result seconds later (ULID ids alone can't order same-ms rows).
+    const t0 = Date.now();
+    const question = promptRow({ id: ulid(t0), tsRequest: t0, summary: "how does memory work?", searchText: "how does memory work?" });
+    store.insertCall(question);
+    const toolRow = promptRow({ id: ulid(t0 + 4000), tsRequest: t0 + 4000, summary: "Bash: ls -la", searchText: "Bash: ls -la" });
+    store.insertCall(toolRow);
+    store.attachOtelResponse({
+      sessionId: "sess-1", promptKey: "prompt-1", tsResponse: Date.now(),
+      responseBody: new TextEncoder().encode("THE ANSWER"), searchAppend: "\nTHE ANSWER",
+    });
+    expect(new TextDecoder().decode(store.getCall(question.id)!.responseBody!)).toBe("THE ANSWER");
+    expect(store.getCall(toolRow.id)!.responseBody).toBe(null); // tool row untouched
+    store.close();
+  });
+
+  test("no matching turn row → false (caller inserts the partial as its own row)", () => {
+    const store = Store.open(dir);
+    store.insertCall(promptRow());
+    const wrongPrompt = store.attachOtelResponse({
+      sessionId: "sess-1", promptKey: "other-prompt", tsResponse: Date.now(),
+      responseBody: new TextEncoder().encode("x"), searchAppend: "\nx",
+    });
+    const wrongSession = store.attachOtelResponse({
+      sessionId: "sess-9", promptKey: "prompt-1", tsResponse: Date.now(),
+      responseBody: new TextEncoder().encode("x"), searchAppend: "\nx",
+    });
+    expect(wrongPrompt).toBe(false);
+    expect(wrongSession).toBe(false);
+    store.close();
+  });
+
+  test("an already-answered turn is never overwritten (double-attach guard)", () => {
+    const store = Store.open(dir);
+    const turn = promptRow();
+    store.insertCall(turn);
+    const first = store.attachOtelResponse({
+      sessionId: "sess-1", promptKey: "prompt-1", tsResponse: Date.now(),
+      responseBody: new TextEncoder().encode("the real answer"), searchAppend: "\nthe real answer",
+    });
+    const second = store.attachOtelResponse({
+      sessionId: "sess-1", promptKey: "prompt-1", tsResponse: Date.now(),
+      responseBody: new TextEncoder().encode("an impostor"), searchAppend: "\nan impostor",
+    });
+    expect(first).toBe(true);
+    expect(second).toBe(false);
+    expect(new TextDecoder().decode(store.getCall(turn.id)!.responseBody!)).toBe("the real answer");
+    store.close();
+  });
+
+  test("a wire row is never a stitch target, even with a colliding prompt_key", () => {
+    // Defense in depth: stitching is a Mode B concept; the source='otel' guard
+    // keeps a hypothetical wire row with the same session/key untouched.
+    const store = Store.open(dir);
+    store.insertCall(fakeCall({ promptKey: "prompt-1", tsResponse: undefined, bytesResp: undefined, responseBody: null }));
+    expect(
+      store.attachOtelResponse({
+        sessionId: "sess-1", promptKey: "prompt-1", tsResponse: Date.now(),
+        responseBody: new TextEncoder().encode("x"), searchAppend: "\nx",
+      }),
+    ).toBe(false);
     store.close();
   });
 });

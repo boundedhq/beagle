@@ -115,6 +115,66 @@ describe("OTLP → Call mapping — Claude Code's real event schema (Mode B)", (
     expect(decode(c.request.bodyBytes)).toBe('check the tz\n{"cmd":"date"}'); // prompt + tool input
   });
 
+  test("an internal title-generation side-call (same prompt.id) never folds into the turn", () => {
+    // Claude Code emits a `generate_session_title` api_request + assistant_response
+    // that REUSE the user turn's session.id + prompt.id (verified live against a
+    // real `-p` capture: haiku title call, response `{"title": …}`, tokens 511/12).
+    // It must not touch the turn's response, model, or token counts.
+    const recs = [
+      event("user_prompt", { "session.id": "s", "prompt.id": "p", prompt: "the real question" }, "1720000000000000000"),
+      event("api_request", { "session.id": "s", "prompt.id": "p", model: "claude-haiku-4-5", input_tokens: 511, output_tokens: 12, query_source: "generate_session_title" }, "1720000000100000000"),
+      event("assistant_response", { "session.id": "s", "prompt.id": "p", model: "claude-haiku-4-5", response: '{"title": "A Title"}', query_source: "generate_session_title" }, "1720000000150000000"),
+      event("api_request", { "session.id": "s", "prompt.id": "p", model: "claude-opus-4-8", input_tokens: 3024, output_tokens: 13, query_source: "sdk" }, "1720000000200000000"),
+      event("assistant_response", { "session.id": "s", "prompt.id": "p", model: "claude-opus-4-8", response: "the real answer", query_source: "sdk" }, "1720000000250000000"),
+    ];
+    const c = mapOtlpLogsToCalls(logs(recs), ctx)[0]!;
+    expect(c.response.text).toBe("the real answer"); // NOT the title JSON
+    expect(c.model).toBe("claude-opus-4-8"); // NOT the haiku title model
+    expect(c.meta.tokensIn).toBe(3024); // the title call's 511 excluded
+    expect(c.meta.tokensOut).toBe(13); // the title call's 12 excluded
+  });
+
+  test("the side-call can't clobber the answer even when emitted LAST (the dangerous order)", () => {
+    // The bug hid in `-p` only because the real answer happened to come last, so
+    // last-write-wins kept it. Batching/interactive ordering can put the title
+    // side-call last — this is the case that silently corrupted real turns.
+    const recs = [
+      event("user_prompt", { "session.id": "s", "prompt.id": "p", prompt: "real question" }, "1720000000000000000"),
+      event("assistant_response", { "session.id": "s", "prompt.id": "p", model: "claude-opus-4-8", response: "the real answer", query_source: "sdk" }, "1720000000100000000"),
+      event("assistant_response", { "session.id": "s", "prompt.id": "p", model: "claude-haiku-4-5", response: '{"title": "X"}', query_source: "generate_session_title" }, "1720000000200000000"),
+    ];
+    const c = mapOtlpLogsToCalls(logs(recs), ctx)[0]!;
+    expect(c.response.text).toBe("the real answer");
+    expect(c.model).toBe("claude-opus-4-8");
+  });
+
+  test("a prompt_suggestion side-call (emitted AFTER the answer, same batch) can't clobber the reply", () => {
+    // Verified live: interactively, Claude Code generates ghost-text input
+    // suggestions from the answer and emits them as assistant_response with
+    // query_source=prompt_suggestion — same session.id + prompt.id, co-batched
+    // AFTER the real reply, even carrying the same model. Under last-write-wins
+    // the stored "response" became the 27-char suggestion ("show me what's in
+    // my memory") instead of the 2000+-char answer — the exact interactive
+    // response-loss users hit.
+    const recs = [
+      event("user_prompt", { "session.id": "s", "prompt.id": "p", prompt: "how does your memory work?" }, "1720000000000000000"),
+      event("assistant_response", { "session.id": "s", "prompt.id": "p", model: "claude-opus-4-8", response: "the full multi-paragraph answer", query_source: "repl_main_thread" }, "1720000000100000000"),
+      event("assistant_response", { "session.id": "s", "prompt.id": "p", model: "claude-opus-4-8", response: "show me what's in my memory", query_source: "prompt_suggestion" }, "1720000000200000000"),
+    ];
+    const c = mapOtlpLogsToCalls(logs(recs), ctx)[0]!;
+    expect(c.response.text).toBe("the full multi-paragraph answer"); // NOT the suggestion
+  });
+
+  test("an unrecognized query_source is kept (denylist, never drop a real reply)", () => {
+    // Forward-safety: only KNOWN-internal sources are skipped. A future/unknown
+    // source must fall through as real content, not vanish.
+    const c = mapOtlpLogsToCalls(logs([
+      event("user_prompt", { "session.id": "s", "prompt.id": "p", prompt: "hi" }),
+      event("assistant_response", { "session.id": "s", "prompt.id": "p", response: "kept anyway", query_source: "some_future_source" }),
+    ]), ctx)[0]!;
+    expect(c.response.text).toBe("kept anyway");
+  });
+
   test("operational events (hooks, mcp, plugin, tool_decision) produce no calls", () => {
     const noise = logs([
       event("hook_execution_start", { "session.id": "s", hook_event: "SessionStart" }),

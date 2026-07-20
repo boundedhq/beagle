@@ -551,6 +551,51 @@ export class Daemon {
             role: m.role,
             content: redaction ? redactValuesInText(String(m.content), redaction.values) : String(m.content),
           }));
+      // Cross-batch turn stitching: Claude Code flushes the prompt in one OTLP
+      // batch and the response seconds later in another. A response-only
+      // partial rejoins its stored turn row instead of landing as a detached
+      // answer the feed can't line up with its question.
+      //
+      // STRICTLY response-only (no messages, zero request bytes) is required,
+      // and the emptiness check is what makes skipping the rest of the loop
+      // safe: this branch `continue`s past alertEngine.process, so a partial
+      // carrying ANY outbound content (a tool_input — a real leak surface)
+      // must fall through to its own row and its own alert pass. Do not relax
+      // this to merge tool-bearing batches without moving alerting first; a
+      // secret in a tool input would stop firing. A turn whose answer shares a
+      // batch with its tool_result therefore stays two rows by design.
+      //
+      // Held-out redaction also falls through: its "[REDACTION INCOMPLETE]"
+      // placeholder must not overwrite the turn row's real summary.
+      if (
+        call.promptId &&
+        !call.request.messages?.length &&
+        call.request.bodyBytes.byteLength === 0 &&
+        call.response.text &&
+        !redaction?.heldOut &&
+        this.store.attachOtelResponse({
+          sessionId: resolution.sessionId,
+          promptKey: call.promptId,
+          tsResponse: call.meta.tsResponse ?? call.meta.tsRequest,
+          model: call.model,
+          tokensIn: call.meta.tokensIn,
+          tokensOut: call.meta.tokensOut,
+          // Read like a turn that arrived in ONE batch: `"question" → answer`
+          // (buildSummary's wire order). Without this the stitched row would
+          // show only the answer, dropping the question the row is about.
+          // Both halves come from already-scrubbed text — `summary` went
+          // through buildSummary's secretValues pass and the stored summary
+          // was scrubbed when its row was written; never re-derive from the
+          // raw call.response.text here, which would undo the redaction.
+          composeSummary: (existing) =>
+            existing ? `"${firstLine(existing, 40)}" → ${firstLine(summary, 80)}` : summary,
+          redacted: redaction?.redacted ?? false,
+          responseBody: redaction ? redaction.responseBody : (call.response.bodyBytes ?? null),
+          searchAppend: searchText,
+        })
+      ) {
+        continue;
+      }
       this.store.insertCall({
         id: call.id,
         sessionId: resolution.sessionId,
@@ -579,6 +624,7 @@ export class Daemon {
         sseRaw: null,
         displayMessages: displayMessages?.length ? displayMessages : null,
         searchText,
+        promptKey: call.promptId,
       });
       this.alertEngine.process(
         {

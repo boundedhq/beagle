@@ -1,6 +1,6 @@
 // Schema from design §4. Version stamped in PRAGMA user_version; every
 // reader checks it before querying (two binaries share this file).
-export const SCHEMA_VERSION = 4; // v4: exchanges.one_shot (stateless utility turns)
+export const SCHEMA_VERSION = 5; // v5: exchanges.prompt_key (Mode B cross-batch turn stitching)
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS exchanges (
@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS exchanges (
   scan_state    TEXT NOT NULL DEFAULT 'ok',
   capture_state TEXT NOT NULL DEFAULT 'ok',
   session_tier  TEXT NOT NULL,
+  prompt_key    TEXT, -- Mode B: per-turn prompt id, lets a later-batch response rejoin its turn row
   redacted      INTEGER, -- 1 when redact-on-capture rewrote the body (viewer highlight)
   one_shot      INTEGER -- 1: stateless utility turn (e.g. title-gen), no conversation identity
 );
