@@ -48,14 +48,20 @@ export function redactBody(bytes: Uint8Array, findings: Finding[]): { bytes: Uin
 // yields no variant and behaves exactly as before.
 //
 // BOUNDARY, so the next reader knows what this does NOT cover: it re-encodes a
-// value, it does not re-scan the text. A match that spans JSON STRUCTURE — a
-// PEM whose BEGIN and END sit in two different messages of a serialized list,
-// so the value carries a literal `"},{"role":"user","content":"` the flattened
-// display drops — matches in neither form and survives in derived text (the
-// body is still offset-redacted, and the leak still alerts). Closing that needs
-// the derived text scanned on its own so its own offsets drive its own
-// redaction; a value-scrub structurally cannot. Verified reachable, filed
-// separately — do not assume this function makes derived text secret-free.
+// value, it does not re-scan the text. Two cases escape it — both verified
+// reachable, neither fixable by adding more forms here, because in each the
+// display and the scanned bytes disagree about more than escaping:
+//   - A match SPANNING JSON STRUCTURE (a PEM whose BEGIN and END sit in two
+//     messages of a serialized list) carries a literal `"},{"role":…` that the
+//     flattened display drops, so neither form matches. The body is still
+//     offset-redacted and the leak still alerts; only derived text keeps it.
+//   - Worse, and NOT covered by that reassurance: flattenPromptText joins
+//     adjacent content blocks with no separator, so a secret split across two
+//     blocks is MANUFACTURED in the display out of bytes the scanner never saw
+//     as a secret. There is no value to scrub and no alert fires at all.
+// Both need the derived text scanned on its own so its own offsets drive its
+// own redaction; a value-scrub structurally cannot. Filed separately — do not
+// read this function as a guarantee that derived text is secret-free.
 function jsonUnescaped(value: string): string | null {
   if (!value.includes("\\")) return null; // no escapes: decoded form is identical
   try {
@@ -72,8 +78,13 @@ function jsonUnescaped(value: string): string | null {
 // The 8-char floor avoids mangling unrelated text on common substrings; a
 // shorter value is still span-redacted from the body it was found in but
 // would survive here — no rule matches anything that short today, so revisit
-// the floor before adding one that does. The floor is re-checked per form
-// because decoding only ever shortens.
+// the floor before adding one that does. Re-checked per form, because decoding
+// only shortens — but note the floor is a weaker guarantee for a decoded form
+// than for a raw one: 48 chars of \uXXXX escapes decode to the 8-char word
+// "password", and scrubbing that would blank the word wherever it appears.
+// Over-redaction, i.e. the fail-safe direction, and it needs a client that
+// escapes ASCII letters — no standard serializer does (Python's ensure_ascii
+// escapes only non-ASCII) — so it is documented rather than guarded against.
 export function redactValuesInText(
   text: string,
   values: Array<{ value: string; type: string }>,
