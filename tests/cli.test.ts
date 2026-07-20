@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, cmdUninstall, countPossibleLeaksSince, detectLine, interpretAskAnswer, otelCallsArrivedSince, parseRunArgs, readCodexApiKey, resolveRunMode, runCallsArrived } from "../src/cli/commands";
+import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, cmdUninstall, countPossibleLeaksSince, detectLine, interpretAskAnswer, isLoopbackHookEndpoint, otelCallsArrivedSince, parseRunArgs, readCodexApiKey, resolveRunMode, runCallsArrived } from "../src/cli/commands";
 import { buildRunEnv, AGENTS } from "../src/cli/agents";
 import { Store, type CallRecord } from "../src/core/store/store";
 import { ulid } from "../src/core/store/ulid";
@@ -485,6 +485,78 @@ describe("__hook forwarder safety (Mode B tool-output hook)", () => {
     expect(code).toBe(0); // exited on its own (not the 6s kill fallback)
     expect(Date.now() - t0).toBeLessThan(5000); // bounded by the 1.5s stdin deadline + fetch
   });
+
+  test("isLoopbackHookEndpoint: exact loopback allowlist over the parsed hostname", () => {
+    // the one format cmdRun actually constructs, plus the other canonical loopback names
+    expect(isLoopbackHookEndpoint("http://127.0.0.1:38211/v1/hook")).toBe(true);
+    expect(isLoopbackHookEndpoint("http://localhost:38211/v1/hook")).toBe(true);
+    expect(isLoopbackHookEndpoint("http://[::1]:38211/v1/hook")).toBe(true);
+    // the URL parser canonicalizes equivalent spellings before the exact match
+    expect(isLoopbackHookEndpoint("http://127.1:9/v1/hook")).toBe(true); // → 127.0.0.1
+    expect(isLoopbackHookEndpoint("http://LOCALHOST:9/v1/hook")).toBe(true); // lowercased
+    expect(isLoopbackHookEndpoint("http://[0:0:0:0:0:0:0:1]:9/v1/hook")).toBe(true); // → [::1]
+    // everything else is refused — including hosts that merely RESOLVE to loopback
+    expect(isLoopbackHookEndpoint("http://192.168.1.7:38211/v1/hook")).toBe(false);
+    expect(isLoopbackHookEndpoint("http://evil.example/v1/hook")).toBe(false);
+    expect(isLoopbackHookEndpoint("http://127.0.0.1.evil.example/v1/hook")).toBe(false); // prefix spoof
+    expect(isLoopbackHookEndpoint("http://localhost.:9/v1/hook")).toBe(false); // trailing-dot form
+    expect(isLoopbackHookEndpoint("not a url")).toBe(false);
+  });
+
+  test("loopback endpoint: payload IS delivered (the allowlist doesn't break capture)", async () => {
+    const hits: { path: string; token: string | null; body: string }[] = [];
+    const srv = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        hits.push({ path: new URL(req.url).pathname, token: req.headers.get("x-beagle-run"), body: await req.text() });
+        return new Response("ok");
+      },
+    });
+    try {
+      const payload = '{"session_id":"s","tool_name":"Bash","tool_response":"out"}';
+      const proc = Bun.spawn(bin(), {
+        stdin: new TextEncoder().encode(payload),
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, BEAGLE_HOOK_ENDPOINT: `http://127.0.0.1:${srv.port}/v1/hook`, BEAGLE_HOOK_TOKEN: "tok" },
+      });
+      expect(await proc.exited).toBe(0);
+      expect(hits).toEqual([{ path: "/v1/hook", token: "tok", body: payload }]);
+    } finally {
+      srv.stop(true);
+    }
+  }, 10_000);
+
+  test("non-loopback endpoint host: nothing is sent (captured output never leaves loopback)", async () => {
+    // `localhost.` (trailing FQDN dot) still RESOLVES to loopback on dev/CI
+    // platforms — so if the forwarder ever skipped its allowlist, this fetch
+    // would connect and the receiver below would record a hit. The exact-match
+    // allowlist refuses the non-canonical spelling instead of resolving it.
+    let hits = 0;
+    const srv = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        hits++;
+        return new Response("ok");
+      },
+    });
+    try {
+      const proc = Bun.spawn(bin(), {
+        stdin: new TextEncoder().encode('{"tool_response":"AKIAZQ3DRSTUVWXY2345"}'),
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, BEAGLE_HOOK_ENDPOINT: `http://localhost.:${srv.port}/v1/hook`, BEAGLE_HOOK_TOKEN: "t" },
+      });
+      expect(await proc.exited).toBe(0);
+      expect(await new Response(proc.stdout).text()).toBe(""); // still silent
+      expect(await new Response(proc.stderr).text()).toBe("");
+      expect(hits).toBe(0); // the promise itself: no POST to a non-allowlisted host
+    } finally {
+      srv.stop(true);
+    }
+  }, 10_000);
 });
 
 describe("readCodexApiKey (fail-open: supply codex's key from auth.json)", () => {
