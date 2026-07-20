@@ -501,15 +501,18 @@ describe("__hook forwarder safety (Mode B tool-output hook)", () => {
     expect(isLoopbackHookEndpoint("http://127.0.0.1.evil.example/v1/hook")).toBe(false); // prefix spoof
     expect(isLoopbackHookEndpoint("http://localhost.:9/v1/hook")).toBe(false); // trailing-dot form
     expect(isLoopbackHookEndpoint("not a url")).toBe(false);
+    // scheme is pinned to the one cmdRun emits — non-http loopback is refused too
+    expect(isLoopbackHookEndpoint("https://127.0.0.1:38211/v1/hook")).toBe(false);
+    expect(isLoopbackHookEndpoint("file://localhost/etc/hosts")).toBe(false);
   });
 
   test("loopback endpoint: payload IS delivered (the allowlist doesn't break capture)", async () => {
-    const hits: { path: string; token: string | null; body: string }[] = [];
+    const hits: { method: string; path: string; token: string | null; body: string }[] = [];
     const srv = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
       async fetch(req) {
-        hits.push({ path: new URL(req.url).pathname, token: req.headers.get("x-beagle-run"), body: await req.text() });
+        hits.push({ method: req.method, path: new URL(req.url).pathname, token: req.headers.get("x-beagle-run"), body: await req.text() });
         return new Response("ok");
       },
     });
@@ -522,7 +525,7 @@ describe("__hook forwarder safety (Mode B tool-output hook)", () => {
         env: { ...process.env, BEAGLE_HOOK_ENDPOINT: `http://127.0.0.1:${srv.port}/v1/hook`, BEAGLE_HOOK_TOKEN: "tok" },
       });
       expect(await proc.exited).toBe(0);
-      expect(hits).toEqual([{ path: "/v1/hook", token: "tok", body: payload }]);
+      expect(hits).toEqual([{ method: "POST", path: "/v1/hook", token: "tok", body: payload }]);
     } finally {
       srv.stop(true);
     }
@@ -555,6 +558,46 @@ describe("__hook forwarder safety (Mode B tool-output hook)", () => {
       expect(hits).toBe(0); // the promise itself: no POST to a non-allowlisted host
     } finally {
       srv.stop(true);
+    }
+  }, 10_000);
+
+  test("redirecting receiver: the payload is NOT re-POSTed to the Location target", async () => {
+    // The allowlist vets only the FIRST hop. Bun's fetch default (`follow`)
+    // re-sends a 307'd POST — body and all — to an arbitrary Location, which
+    // could be off-machine; `redirect: "manual"` must stop it. `target` below
+    // is loopback only so the test can observe it; it stands in for anywhere.
+    let leaked = 0;
+    const target = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        leaked++;
+        return new Response("gotcha");
+      },
+    });
+    let firstHop = 0;
+    const redirector = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        firstHop++;
+        return new Response(null, { status: 307, headers: { location: `http://127.0.0.1:${target.port}/exfil` } });
+      },
+    });
+    try {
+      const proc = Bun.spawn(bin(), {
+        stdin: new TextEncoder().encode('{"tool_response":"AKIAZQ3DRSTUVWXY2345"}'),
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, BEAGLE_HOOK_ENDPOINT: `http://127.0.0.1:${redirector.port}/v1/hook`, BEAGLE_HOOK_TOKEN: "t" },
+      });
+      expect(await proc.exited).toBe(0);
+      expect(await new Response(proc.stdout).text()).toBe(""); // still silent
+      expect(firstHop).toBe(1); // the allowlisted hop happened
+      expect(leaked).toBe(0); // the redirect was NOT followed
+    } finally {
+      redirector.stop(true);
+      target.stop(true);
     }
   }, 10_000);
 });

@@ -1662,20 +1662,21 @@ function beagleHookCommand(): string {
     : `"${self}" __hook`;
 }
 
-// The hook receiver is ALWAYS loopback — cmdRun constructs BEAGLE_HOOK_ENDPOINT
-// from `http://127.0.0.1:<otlpPort>` and nothing else sets it legitimately. If
-// the env var names any other host (misconfiguration, or a hostile parent env
-// trying to redirect the capture), POSTing the tool output there would itself
-// be the leak Beagle exists to prevent — so the forwarder refuses to send.
-// Exact match on the parsed hostname: the URL parser canonicalizes equivalent
-// spellings (`127.1`, `LOCALHOST`, long-form `::1`) first, and anything left
-// non-canonical (`localhost.`, `127.0.0.1.evil.example`) is refused rather
-// than resolved — a sub-2s best-effort hook must never do DNS to find out
-// where a name points. Exported for tests.
+// The hook receiver is ALWAYS plain-http loopback — cmdRun constructs
+// BEAGLE_HOOK_ENDPOINT from `http://127.0.0.1:<otlpPort>` and nothing else
+// sets it legitimately. If the env var names any other scheme or host
+// (misconfiguration, or a hostile parent env trying to redirect the capture),
+// POSTing the tool output there would itself be the leak Beagle exists to
+// prevent — so the forwarder refuses to send. Exact match on the parsed
+// hostname: the URL parser canonicalizes equivalent spellings (`127.1`,
+// `LOCALHOST`, long-form `::1`) first, and anything left non-canonical
+// (`localhost.`, `127.0.0.1.evil.example`) is refused rather than resolved —
+// a sub-2s best-effort hook must never do DNS to find out where a name
+// points. Exported for tests.
 export function isLoopbackHookEndpoint(endpoint: string): boolean {
   try {
-    const host = new URL(endpoint).hostname;
-    return host === "127.0.0.1" || host === "[::1]" || host === "localhost";
+    const u = new URL(endpoint);
+    return u.protocol === "http:" && (u.hostname === "127.0.0.1" || u.hostname === "[::1]" || u.hostname === "localhost");
   } catch {
     return false; // unparseable → refuse (and stay silent, per the hook contract)
   }
@@ -1699,10 +1700,14 @@ export async function cmdHookForward(): Promise<number> {
       if (body) {
         // Hard timeout: PostToolUse runs synchronously inside the agent's loop,
         // so a hung/slow receiver must NEVER stall the agent. Best-effort.
+        // redirect "manual": the loopback allowlist only vets the FIRST hop —
+        // following a 307/308 would re-POST the captured body to an arbitrary
+        // Location, possibly off-machine. The real receiver never redirects.
         await fetch(endpoint, {
           method: "POST",
           headers: { "content-type": "application/json", "x-beagle-run": token },
           body,
+          redirect: "manual",
           signal: AbortSignal.timeout(2000),
         }).catch(() => {});
       }
