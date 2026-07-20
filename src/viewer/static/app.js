@@ -311,7 +311,7 @@ function Row({ x, onToggle, onSession }) {
         : x.status >= 400 ? `error ${x.status}` : "ok"}</span></span>
       <span class="time">${t}</span>
       <span class="agent">${x.agent ?? "?"}</span>
-      <span class="model${x.model ? "" : " none"}">${x.model || "no model used"}</span>
+      <span class="model${x.model ? "" : " none"}">${x.model || "none"}</span>
       <span class="summary">${summaryParts(x.summary).map(([text, muted], i) =>
         muted ? html`<span key=${i} class="sum-suffix">${text}</span>` : text)}</span>
       ${x.hasLeak && html`<span class="chip leak">leak</span>`}
@@ -808,7 +808,7 @@ function Detail({ id, onSession }) {
         <div class="meta-primary">
           <span class="agent-name">${detail.agent ?? "?"}</span>
           <span class="arrow" aria-hidden="true">→</span>
-          <span class="to">${detail.provider ?? "?"}${detail.model ? " · " + detail.model : " · no model used"}</span>
+          <span class="to">${detail.provider ?? "?"}${detail.model ? " · " + detail.model : " · no model"}</span>
           ${detail.source === "wire"
             ? html`<span class="chip wire"
                 title="Beagle's proxy saw these exact bytes go to the provider">✓ observed</span>`

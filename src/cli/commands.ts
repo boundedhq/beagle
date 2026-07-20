@@ -485,7 +485,7 @@ export function cmdShow(stateDir: string, idPrefix: string, opts: ShowOptions = 
     : "";
   const lines = [
     `call ${call.id}   ${prov}${err}`,
-    `  ${clean(call.agent ?? "?")} → ${clean(call.provider ?? "?")}${call.model ? ` · ${clean(call.model)}` : " · no model used"}`,
+    `  ${clean(call.agent ?? "?")} → ${clean(call.provider ?? "?")}${call.model ? ` · ${clean(call.model)}` : " · no model"}`,
     `  ${fmtWhen(call.tsRequest)}${toks}`,
     `  session ${clean(call.sessionId)} · grouped by ${groupedByPhrase(clean(call.sessionTier))}`,
   ];
