@@ -1,6 +1,6 @@
 // CLI command surface (design §6.9): the whole product headless. Reads open
 // the store read-only (work daemon-down); live actions ride the socket.
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmdirSync, rmSync, statSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve as resolvePath } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -198,12 +198,29 @@ function daemonWhy(d: DaemonInfo): string | null {
     : "idle — winds down within a few minutes";
 }
 
+// Where codex writes its per-session rollout logs — the source Beagle reads
+// codex's assistant replies from (its OTel self-report omits them). Mirrors
+// codexSessionsRoot() in adapters/codex-rollout-tailer.ts; kept local so the CLI
+// doesn't import the tailer (fs/timers) for one path. Injectable for tests.
+function codexSessionsDir(): string {
+  return join(process.env.CODEX_HOME || join(homedir(), ".codex"), "sessions");
+}
+function hasCodexSessionLogs(dir: string): boolean {
+  try {
+    return existsSync(dir) && readdirSync(dir).length > 0;
+  } catch {
+    return false;
+  }
+}
+
 export function cmdStatus(
   stateDir: string,
   daemonUp: DaemonInfo | null = null,
   // Injectable so tests don't shell out to launchctl/systemctl.
   isServiceActive: (kind: ServiceKind, path: string) => boolean = (kind, path) =>
     osServiceRunner.isActive?.({ kind, path }) ?? true,
+  // Injectable so tests don't depend on the real ~/.codex.
+  codexSessions: string = codexSessionsDir(),
 ): string {
   const row = (label: string, text: string) => label.padEnd(STATUS_GUTTER) + text;
   const cont = (text: string) => " ".repeat(STATUS_GUTTER) + text;
@@ -258,6 +275,11 @@ export function cmdStatus(
   const otelCalls = store?.queryAll<{ n: number }>(
     "SELECT COUNT(*) AS n FROM exchanges WHERE source='otel'",
   )[0]?.n ?? 0;
+  // Codex subscription turns specifically: their answer is recovered from the
+  // rollout log, so a missing log is a codex-only capture gap worth surfacing.
+  const codexOtelCalls = store?.queryAll<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM exchanges WHERE source='otel' AND agent='codex'",
+  )[0]?.n ?? 0;
   store?.close();
   const dbPath = join(stateDir, "beagle.db");
   const sizeMb = existsSync(dbPath) ? (statSync(dbPath).size / (1 << 20)).toFixed(1) : "0.0";
@@ -277,6 +299,13 @@ export function cmdStatus(
       // thought, so the indented block reads as two statements, not a broken one.
       lines.push(cont(`${otelCalls} agent-reported (Mode B): captured from the agent's self-report`));
       lines.push(cont("prompts and tool data still scanned · alerts can lag a few seconds"));
+    }
+    // Codex's self-report omits the model's reply; Beagle recovers it from the
+    // rollout log. If that log is absent, the reply can't be captured — flag it
+    // (with the path, so a wrong CODEX_HOME is self-diagnosing) rather than
+    // leave the turn silently answer-less.
+    if (codexOtelCalls > 0 && !hasCodexSessionLogs(codexSessions)) {
+      lines.push(cont(`▲ codex replies unavailable — no session logs in ${codexSessions} (is codex history logging on?)`));
     }
   }
   lines.push(
