@@ -203,7 +203,6 @@ export class Store {
     composeSummary?: (existing: string | null) => string | null;
     redacted?: boolean;
     responseBody: Uint8Array | null;
-    searchAppend: string;
   }): boolean {
     return this.inTx(() => {
       // The turn's EARLIEST response-less row — the one carrying the question,
@@ -236,10 +235,13 @@ export class Store {
       );
       this.db.run(`UPDATE payloads SET response_body=? WHERE exchange_id=?`,
         [input.responseBody, target.id]);
-      // The turn's search row gains the response text (same shape a one-batch
-      // turn would have been indexed with).
-      this.db.run(`UPDATE exchanges_fts SET content = content || ? WHERE exchange_id=?`,
-        [input.searchAppend, target.id]);
+      // The search index is deliberately NOT touched. `beagle search` is
+      // outbound-only — a hit means the string was SENT — and a stitchable
+      // partial is response-only by construction (the daemon's guard requires
+      // no messages and zero request bytes), so it carries nothing outbound to
+      // index. There is no parameter for it on purpose: with one, a future
+      // caller appending the answer would silently make model-generated text
+      // report as sent, the exact hole the wire path's buildSearchText closes.
       return true;
     });
   }
