@@ -34,6 +34,26 @@ describe("buildDetail — response reassembly (UI fix 1)", () => {
     expect(d.responseText).toBe("plain answer");
   });
 
+  test("a STITCHED Mode B turn renders its question and its answer together", () => {
+    // The shape attachOtelResponse leaves behind: the question rides
+    // display_messages (written with the prompt batch), the answer rides
+    // response_body (written by the later stitch). Both must reach the UI —
+    // the whole point of stitching is a turn that reads as one exchange, and
+    // a row whose answer never rendered is what this feature set out to fix.
+    const d = buildDetail(
+      call({
+        source: "otel", endpoint: "otel:claude_code.turn", requestBody: enc("how does memory work?"),
+        displayMessages: [{ role: "user", content: "how does memory work?" }],
+        responseBody: enc("It works like this — the full answer"),
+        model: "claude-opus-4-8",
+      }),
+      [],
+    );
+    expect(d.messages).toEqual([{ role: "user", content: "how does memory work?" }]);
+    expect(d.responseText).toBe("It works like this — the full answer");
+    expect(d.model).toBe("claude-opus-4-8");
+  });
+
   test("passes capture provenance through so the detail can explain wire vs agent-reported", () => {
     expect(buildDetail(call({ source: "wire" }), []).source).toBe("wire");
     expect(buildDetail(call({ source: "otel" }), []).source).toBe("otel");
