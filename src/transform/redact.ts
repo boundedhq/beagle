@@ -35,20 +35,47 @@ export function redactBody(bytes: Uint8Array, findings: Finding[]): { bytes: Uin
   return { bytes: new TextEncoder().encode(out), values };
 }
 
+// The scanner reads the RAW bytes, but the surfaces scrubbed below render a
+// DECODED view of them: a Mode B prompt attribute carrying a serialized message
+// list is JSON.parse'd for the transcript, and the wire path's summary comes
+// from messages parsed out of the provider JSON. So a multi-line secret's
+// matched value holds the two-char escape `\n` while the text to scrub holds a
+// real newline — `includes` misses, the scrub silently no-ops, and the secret
+// survives in the transcript and the search index even though the body was
+// masked. Decode the value the same way the display did and scrub that form
+// too. JSON.parse is the arbiter: a value that isn't a well-formed string body
+// (a match that cut an escape in half, a non-JSON body with raw control chars)
+// yields no variant and behaves exactly as before.
+function jsonUnescaped(value: string): string | null {
+  if (!value.includes("\\")) return null; // no escapes: decoded form is identical
+  try {
+    const out: unknown = JSON.parse(`"${value}"`);
+    return typeof out === "string" && out !== value ? out : null;
+  } catch {
+    return null; // not a JSON string body — nothing was escaped, nothing to add
+  }
+}
+
 // Scrub known secret values by literal match wherever they appear — used on
 // derived text (summary, search text) built from parsed messages rather than
 // the stored bytes, so a body-side redaction can't be undone by a re-derive.
 // The 8-char floor avoids mangling unrelated text on common substrings; a
 // shorter value is still span-redacted from the body it was found in but
 // would survive here — no rule matches anything that short today, so revisit
-// the floor before adding one that does.
+// the floor before adding one that does. The floor is re-checked per form
+// because decoding only ever shortens.
 export function redactValuesInText(
   text: string,
   values: Array<{ value: string; type: string }>,
 ): string {
   for (const { value, type } of values) {
-    if (value.length >= 8 && text.includes(value)) {
-      text = text.split(value).join(redactionPlaceholder(type, value));
+    // Both forms hash the RAW value, so one secret reads as one placeholder
+    // whichever form was found — the viewer highlights body and transcript alike.
+    const placeholder = redactionPlaceholder(type, value);
+    for (const form of [value, jsonUnescaped(value)]) {
+      if (form !== null && form.length >= 8 && text.includes(form)) {
+        text = text.split(form).join(placeholder);
+      }
     }
   }
   return text;

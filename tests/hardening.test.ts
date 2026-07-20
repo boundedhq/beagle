@@ -74,6 +74,37 @@ describe("redact-on-capture (R11)", () => {
     expect(out).toContain("[REDACTED:aws-access-key-id:");
   });
 
+  // The scanner matches the RAW bytes; the transcript, summary and Mode B
+  // search index render a JSON-DECODED view of them. A value matched inside a
+  // JSON string carries the two-char escape `\n`, so a literal-match scrub of
+  // the decoded text found nothing and silently no-opped — the body was masked
+  // while the raw key stayed readable in the viewer and searchable by `beagle
+  // search`. Every escaping form of a value must scrub.
+  test("redactValuesInText scrubs the JSON-decoded form of an escaped value", () => {
+    const escaped = "-----BEGIN RSA PRIVATE KEY-----\\nMIIBOgIBAAJBAKj34\\n-----END RSA PRIVATE KEY-----";
+    const decoded = JSON.parse(`"${escaped}"`) as string; // what the display shows
+    const out = redactValuesInText(`deploy:\n${decoded}`, [{ value: escaped, type: "private-key" }]);
+    expect(out).not.toContain("MIIBOgIBAAJBAKj34");
+    expect(out).toContain("[REDACTED:private-key:");
+    // One secret reads as ONE placeholder whichever form was found, so the
+    // viewer highlights the transcript and the body identically.
+    expect(out).toContain(redactionPlaceholder("private-key", escaped));
+  });
+
+  test("redactValuesInText still scrubs the raw escaped form (stored bodies keep their escapes)", () => {
+    const escaped = "-----BEGIN RSA PRIVATE KEY-----\\nMIIBOgIBAAJBAKj34\\n-----END RSA PRIVATE KEY-----";
+    const out = redactValuesInText(`{"prompt":"${escaped}"}`, [{ value: escaped, type: "private-key" }]);
+    expect(out).not.toContain("MIIBOgIBAAJBAKj34");
+    expect(out).toContain("[REDACTED:private-key:");
+  });
+
+  test("redactValuesInText leaves text alone when a value's escapes are malformed", () => {
+    // A match that cut an escape in half is not a well-formed JSON string body;
+    // decoding must fail closed (no variant) rather than throw out of the scrub.
+    const text = "nothing sensitive here at all";
+    expect(redactValuesInText(text, [{ value: "trailing-backslash\\", type: "x" }])).toBe(text);
+  });
+
   test("applyCaptureRedaction holds all content out on an incomplete scan", () => {
     const out = applyCaptureRedaction({
       incomplete: true,
