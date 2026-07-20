@@ -119,9 +119,10 @@ describe("Mode B end-to-end through the daemon", () => {
     await settled(daemon.socketPath);
     const store = Store.openReadOnly(stateDir);
     expect(store.searchLiteral("zqxjkvbrwn")).toEqual([]); // response-only token: never sent
-    expect(store.searchLiteral("what is in the readme?").length).toBe(1); // the prompt was
+    const byPrompt = store.searchLiteral("what is in the readme?");
+    expect(byPrompt.length).toBe(1); // the prompt was
     // The answer is still captured — withheld from the index, not from the row.
-    const call = store.getCall(store.searchLiteral("what is in the readme?")[0]!.callId)!;
+    const call = store.getCall(byPrompt[0]!.callId)!;
     expect(new TextDecoder().decode(call.responseBody!)).toContain("zqxjkvbrwn");
     store.close();
   });
@@ -320,7 +321,9 @@ describe("Mode B end-to-end through the daemon", () => {
     expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
     // Located by row, not by search: this batch sent nothing, so it is indexed
     // under nothing — its content is response-side only.
-    const call = store.getCall(listCalls(store, 50)[0]!.id)!;
+    const rows = listCalls(store, 50);
+    expect(rows.length).toBe(1); // pin the row this assertion is about
+    const call = store.getCall(rows[0]!.id)!;
     expect(call.redacted).toBe(true);
     expect(new TextDecoder().decode(call.responseBody!)).toContain("[REDACTED:aws-access-key-id:");
     expect(call.summary).not.toContain("AKIAZQ3DRSTUVWXY2345");

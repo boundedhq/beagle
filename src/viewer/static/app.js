@@ -205,8 +205,8 @@ function App() {
             <path d="M20 20l-4.6-4.6"></path>
           </svg>
           <input ref=${searchBox} type="search" placeholder="was this ever sent?"
-            aria-label="search everything captured"
-            title="literal search over everything captured — exact text, not fuzzy" />
+            aria-label="search everything your agents sent"
+            title="literal search over everything SENT — prompts and tool inputs, not model replies. Exact text, not fuzzy." />
         </form>
         <button class=${leaksOnly ? "toggle active" : "toggle"}
           aria-pressed=${leaksOnly ? "true" : "false"}
