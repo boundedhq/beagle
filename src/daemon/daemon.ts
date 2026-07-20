@@ -518,11 +518,35 @@ export class Daemon {
             responseFindings: respScan?.findings,
           })
         : null;
-      let searchText =
-        (call.request.messages?.map((m) => m.content).join("\n") ?? "") + "\n" + (call.response.text ?? "");
-      // searchText and summary both derive from the display messages (already
-      // flattened plain text, not raw JSON), so both scrub by value — not by
-      // the scanned-byte offsets, which don't index this text.
+      // Index the SCANNED bytes, not the display messages. A display message is
+      // a TRUNCATED view: a tool result is built as `${tool}: ${output.slice(0,
+      // 4000)}` and drops the tool INPUT entirely (otlp-map's buildCodexCall /
+      // mapHookToCall). Indexing that copy meant a secret past the cap — or one
+      // that only ever appeared in a command's arguments — was scanned,
+      // alerted and redacted, while `beagle search` answered "never sent": a
+      // false negative on the one question search exists to answer
+      // definitively. Scan and search see the same surface now. Offset-redacted
+      // bytes, the copy the findings' spans index (the wire path does this too,
+      // see the redacted branch above), so the value scrub below no-ops on it.
+      const sent = new TextDecoder().decode(redaction ? redaction.requestBody : call.request.bodyBytes);
+      let searchText = sent + "\n" + (call.response.text ?? "");
+      // Plus a user message whose flattening actually changed the text: it
+      // holds flattenPromptText's plain-text form of a prompt that may sit
+      // \"-escaped as JSON in those bytes — the same parsed-AND-raw tradeoff
+      // buildSearchText documents for the wire path, paid only when the two
+      // differ. And the tool NAME, which a Claude Code turn reports as its own
+      // attribute (buildTurnCall's scanned body is inputs-only) though it rode
+      // the real outbound request. Never a tool message's CONTENT: that is the
+      // truncated prefix the bytes above already cover in full.
+      for (const m of call.request.messages ?? []) {
+        const flat = String(m.content);
+        const tool = (m as DisplayMessage).tool; // a parser label; core's Message carries none
+        if (m.role === "user" && flat && !sent.includes(flat)) searchText += "\n" + flat;
+        else if (tool && !searchText.includes(tool)) searchText += "\n" + tool;
+      }
+      // What's appended above (and the summary) derives from the display
+      // messages — flattened plain text, not the scanned bytes — so it scrubs
+      // by value, not by the offsets, which don't index that text.
       if (redaction) searchText = redaction.heldOut ? "" : redactValuesInText(searchText, redaction.values);
       const summary = redaction?.heldOut
         ? "[REDACTION INCOMPLETE: content withheld]"

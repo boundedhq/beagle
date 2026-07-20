@@ -264,6 +264,11 @@ describe("Mode B end-to-end through the daemon", () => {
     expect(listCalls(store, 50).length).toBe(2);
     // and the secret in the TOOL INPUT still alerted — the whole point
     expect(alerts.some((a) => a.secretType === "aws-access-key-id")).toBe(true);
+    // the input is searchable, and so is the tool NAME: a Claude Code turn
+    // reports the name as its own attribute, outside the scanned body the
+    // index is built from, but it rode the real outbound request.
+    expect(store.searchLiteral("deploy --key").length).toBe(1);
+    expect(store.searchLiteral("Bash").length).toBe(1);
     store.close();
   });
 
@@ -477,6 +482,27 @@ describe("Codex Mode B end-to-end through the daemon", () => {
     expect(alerts[0]!.secretType).toBe("aws-access-key-id");
     const store = Store.openReadOnly(stateDir);
     expect(listLeakEvents(store).length).toBe(1);
+    store.close();
+  });
+
+  test("search covers the WHOLE tool result, past the display truncation", async () => {
+    // The display copy of a tool result is capped (`${tool}: ${output.slice(0,
+    // 4000)}`) and carries no arguments at all. Indexing that copy made search
+    // lie by omission: a string genuinely sent — scanned, and redacted if it
+    // were a secret — came back "never sent through Beagle" purely because it
+    // sat past the cap. Search is meant to be a definitive answer, so it is
+    // built from the scanned bytes, which are neither truncated nor
+    // output-only.
+    const marker = "zqxjkvbrwn-past-the-cap";
+    await post(codexBody("codex.tool_result", {
+      tool_name: "exec_command",
+      arguments: '{"cmd":"cat big.log"}',
+      output: "x".repeat(5000) + marker,
+    }));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    expect(store.searchLiteral(marker).length).toBe(1); // past char 4000 — was a miss
+    expect(store.searchLiteral("cat big.log").length).toBe(1); // arguments — never displayed at all
     store.close();
   });
 });
