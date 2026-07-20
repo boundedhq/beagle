@@ -46,6 +46,16 @@ export function redactBody(bytes: Uint8Array, findings: Finding[]): { bytes: Uin
 // too. JSON.parse is the arbiter: a value that isn't a well-formed string body
 // (a match that cut an escape in half, a non-JSON body with raw control chars)
 // yields no variant and behaves exactly as before.
+//
+// BOUNDARY, so the next reader knows what this does NOT cover: it re-encodes a
+// value, it does not re-scan the text. A match that spans JSON STRUCTURE — a
+// PEM whose BEGIN and END sit in two different messages of a serialized list,
+// so the value carries a literal `"},{"role":"user","content":"` the flattened
+// display drops — matches in neither form and survives in derived text (the
+// body is still offset-redacted, and the leak still alerts). Closing that needs
+// the derived text scanned on its own so its own offsets drive its own
+// redaction; a value-scrub structurally cannot. Verified reachable, filed
+// separately — do not assume this function makes derived text secret-free.
 function jsonUnescaped(value: string): string | null {
   if (!value.includes("\\")) return null; // no escapes: decoded form is identical
   try {
@@ -70,10 +80,15 @@ export function redactValuesInText(
 ): string {
   for (const { value, type } of values) {
     // Both forms hash the RAW value, so one secret reads as one placeholder
-    // whichever form was found — the viewer highlights body and transcript alike.
-    const placeholder = redactionPlaceholder(type, value);
+    // whichever form was found — the viewer highlights body and transcript
+    // alike. Hashed lazily, on the first form that actually hits: buildSummary
+    // scrubs once per message plus once per action, so hashing every value up
+    // front would run sha256 O(values x messages) times per captured call to
+    // throw nearly all of it away.
+    let placeholder: string | null = null;
     for (const form of [value, jsonUnescaped(value)]) {
       if (form !== null && form.length >= 8 && text.includes(form)) {
+        placeholder ??= redactionPlaceholder(type, value);
         text = text.split(form).join(placeholder);
       }
     }

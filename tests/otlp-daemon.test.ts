@@ -158,7 +158,10 @@ describe("Mode B end-to-end through the daemon", () => {
     // literal-match scrub silently no-ops — the body was masked while the
     // transcript and the search index still held the raw key.
     await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
-    const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\nKUpRKfFLfRYC9AIKjbJTWit+CqvjWYzvQwEAAQ==\n-----END RSA PRIVATE KEY-----";
+    // Synthetic body, per the fixture convention in scanner/precision tests —
+    // what matters is only that it spans a newline, so the scanned (escaped)
+    // and displayed (decoded) forms differ.
+    const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAderivedTextRegression\n-----END RSA PRIVATE KEY-----";
     const prompt = JSON.stringify([{ role: "user", content: `deploy with this key:\n${pem}` }]);
     await post(otlpBody(token, prompt, "otel-conv-pem", null));
     await settled(daemon.socketPath);
@@ -168,12 +171,12 @@ describe("Mode B end-to-end through the daemon", () => {
     const call = store.getCall(hit.callId)!;
     expect(call.redacted).toBe(true);
     const body = new TextDecoder().decode(call.requestBody!);
-    expect(body).not.toContain("MIIBOgIBAAJBAKj34"); // stored body: offset-redacted
+    expect(body).not.toContain("MIIEowIBAAKCAQEAderivedTextRegression"); // stored body: offset-redacted
     // …and the derived surfaces the hole left raw: the rendered transcript…
-    expect(JSON.stringify(call.displayMessages)).not.toContain("MIIBOgIBAAJBAKj34");
+    expect(JSON.stringify(call.displayMessages)).not.toContain("MIIEowIBAAKCAQEAderivedTextRegression");
     expect(JSON.stringify(call.displayMessages)).toContain("[REDACTED:private-key:");
     // …and the search index, which would otherwise hand the key back.
-    expect(store.searchLiteral("MIIBOgIBAAJBAKj34")).toEqual([]);
+    expect(store.searchLiteral("MIIEowIBAAKCAQEAderivedTextRegression")).toEqual([]);
     expect(store.searchLiteral(pem)).toEqual([]);
     store.close();
   });

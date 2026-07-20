@@ -81,10 +81,13 @@ describe("redact-on-capture (R11)", () => {
   // while the raw key stayed readable in the viewer and searchable by `beagle
   // search`. Every escaping form of a value must scrub.
   test("redactValuesInText scrubs the JSON-decoded form of an escaped value", () => {
-    const escaped = "-----BEGIN RSA PRIVATE KEY-----\\nMIIBOgIBAAJBAKj34\\n-----END RSA PRIVATE KEY-----";
-    const decoded = JSON.parse(`"${escaped}"`) as string; // what the display shows
+    // Both forms written out literally rather than derived from each other: a
+    // test that decodes with the same primitive the fix uses would agree with
+    // a wrong decoding instead of catching it.
+    const escaped = "-----BEGIN RSA PRIVATE KEY-----\\nMIIEowIBAAKCAQEAderivedTextRegression\\n-----END RSA PRIVATE KEY-----";
+    const decoded = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAderivedTextRegression\n-----END RSA PRIVATE KEY-----";
     const out = redactValuesInText(`deploy:\n${decoded}`, [{ value: escaped, type: "private-key" }]);
-    expect(out).not.toContain("MIIBOgIBAAJBAKj34");
+    expect(out).not.toContain("MIIEowIBAAKCAQEAderivedTextRegression");
     expect(out).toContain("[REDACTED:private-key:");
     // One secret reads as ONE placeholder whichever form was found, so the
     // viewer highlights the transcript and the body identically.
@@ -92,9 +95,9 @@ describe("redact-on-capture (R11)", () => {
   });
 
   test("redactValuesInText still scrubs the raw escaped form (stored bodies keep their escapes)", () => {
-    const escaped = "-----BEGIN RSA PRIVATE KEY-----\\nMIIBOgIBAAJBAKj34\\n-----END RSA PRIVATE KEY-----";
+    const escaped = "-----BEGIN RSA PRIVATE KEY-----\\nMIIEowIBAAKCAQEAderivedTextRegression\\n-----END RSA PRIVATE KEY-----";
     const out = redactValuesInText(`{"prompt":"${escaped}"}`, [{ value: escaped, type: "private-key" }]);
-    expect(out).not.toContain("MIIBOgIBAAJBAKj34");
+    expect(out).not.toContain("MIIEowIBAAKCAQEAderivedTextRegression");
     expect(out).toContain("[REDACTED:private-key:");
   });
 
