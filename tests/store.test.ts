@@ -218,7 +218,7 @@ describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
     const attached = store.attachOtelResponse({
       sessionId: "sess-1", promptKey: "prompt-1", tsResponse: turn.tsRequest + 18_000,
       model: "claude-opus-4-8", tokensIn: 4182, tokensOut: 1128,
-      summary: "Memory works like this…",
+      composeSummary: (existing) => `"${existing}" → Memory works like this…`,
       responseBody: new TextEncoder().encode("Memory works like this — the long answer"),
       searchAppend: "\nMemory works like this — the long answer",
     });
@@ -229,7 +229,9 @@ describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
     expect(got.tokensIn).toBe(4182);
     expect(got.tokensOut).toBe(1128);
     expect(got.tsResponse).toBe(turn.tsRequest + 18_000);
-    expect(got.summary).toBe("Memory works like this…"); // response wins the summary
+    // composed from the row's own question + the answer, so a stitched turn
+    // reads like a one-batch one instead of showing the answer alone
+    expect(got.summary).toBe('"how does memory work?" → Memory works like this…');
     // one row, findable by BOTH its question and its answer
     const byAnswer = store.searchLiteral("the long answer");
     expect(byAnswer.length).toBe(1);
@@ -250,6 +252,28 @@ describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
     expect(got.tokensIn).toBe(100);
     expect(got.tokensOut).toBe(8);
     expect(got.model).toBe(undefined); // COALESCE: absent on both sides stays absent
+    store.close();
+  });
+
+  test("the answer lands on the QUESTION row, not a later tool row sharing the prompt id", () => {
+    // A turn whose tool_results arrived in their own OTLP batch has several
+    // rows sharing prompt_key. Taking the NEWEST hung the answer off the tool
+    // row and left the question unanswered — the exact split this feature
+    // exists to remove. The turn's FIRST partial is the one with the question.
+    const store = Store.open(dir);
+    // Explicit timestamps, as the real batches arrive: the question first, the
+    // tool result seconds later (ULID ids alone can't order same-ms rows).
+    const t0 = Date.now();
+    const question = promptRow({ id: ulid(t0), tsRequest: t0, summary: "how does memory work?", searchText: "how does memory work?" });
+    store.insertCall(question);
+    const toolRow = promptRow({ id: ulid(t0 + 4000), tsRequest: t0 + 4000, summary: "Bash: ls -la", searchText: "Bash: ls -la" });
+    store.insertCall(toolRow);
+    store.attachOtelResponse({
+      sessionId: "sess-1", promptKey: "prompt-1", tsResponse: Date.now(),
+      responseBody: new TextEncoder().encode("THE ANSWER"), searchAppend: "\nTHE ANSWER",
+    });
+    expect(new TextDecoder().decode(store.getCall(question.id)!.responseBody!)).toBe("THE ANSWER");
+    expect(store.getCall(toolRow.id)!.responseBody).toBe(null); // tool row untouched
     store.close();
   });
 

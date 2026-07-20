@@ -226,6 +226,73 @@ describe("Mode B end-to-end through the daemon", () => {
     store.close();
   });
 
+  test("a response batch carrying a tool input does NOT stitch — it keeps its own row AND alerts", async () => {
+    // The stitch branch skips alertEngine.process, so it must only ever take
+    // partials with nothing outbound. Here the response shares its batch with a
+    // tool_result whose input holds a secret: stitching it would silently drop
+    // that leak. It must stay its own row and fire the alert. (Verified live:
+    // Claude Code really does co-batch tool_result with the answer.)
+    const withTool = {
+      resourceLogs: [{ scopeLogs: [{ scope: { name: "com.anthropic.claude_code.events" }, logRecords: [
+        {
+          timeUnixNano: String(Date.now() * 1e6),
+          attributes: [
+            { key: "event.name", value: { stringValue: "tool_result" } },
+            { key: "session.id", value: { stringValue: "otel-conv-tooled" } },
+            { key: "prompt.id", value: { stringValue: "prompt-x" } },
+            { key: "tool_name", value: { stringValue: "Bash" } },
+            { key: "tool_input", value: { stringValue: '{"command":"deploy --key AKIAZQ3DRSTUVWXY2345"}' } },
+          ],
+        },
+        {
+          timeUnixNano: String(Date.now() * 1e6),
+          attributes: [
+            { key: "event.name", value: { stringValue: "assistant_response" } },
+            { key: "session.id", value: { stringValue: "otel-conv-tooled" } },
+            { key: "prompt.id", value: { stringValue: "prompt-x" } },
+            { key: "response", value: { stringValue: "deployed it" } },
+          ],
+        },
+      ] }] }],
+    };
+    await post(otlpBody(token, "deploy the app", "otel-conv-tooled", null));
+    await settled(daemon.socketPath, 1);
+    await post(withTool);
+    await settled(daemon.socketPath, 2);
+    const store = Store.openReadOnly(stateDir);
+    // two rows: the question, and the tool+answer partial that could not stitch
+    expect(listCalls(store, 50).length).toBe(2);
+    // and the secret in the TOOL INPUT still alerted — the whole point
+    expect(alerts.some((a) => a.secretType === "aws-access-key-id")).toBe(true);
+    store.close();
+  });
+
+  test("a stitched summary is built from SCRUBBED text, never the raw response", async () => {
+    // The composed `"question" → answer` summary must reuse the already-scrubbed
+    // summary, not re-derive from call.response.text — doing the latter would
+    // reinstate a secret the redaction pass had removed, in the one field the
+    // feed shows by default.
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    await post(otlpBody(token, "what is the key?", "otel-conv-redact-stitch", null));
+    await settled(daemon.socketPath);
+    await post(otlpBody(token, null, "otel-conv-redact-stitch", "the key is AKIAZQ3DRSTUVWXY2345"));
+    await waitFor(async () => {
+      const s = Store.openReadOnly(stateDir);
+      try {
+        return listCalls(s, 50).some((c) => (c.summary ?? "").includes("→"));
+      } finally {
+        s.close();
+      }
+    }, "the response to be stitched in");
+    const store = Store.openReadOnly(stateDir);
+    const row = listCalls(store, 50).find((c) => (c.summary ?? "").includes("→"))!;
+    expect(row.summary).toContain("what is the key?"); // the question half survived
+    expect(row.summary).not.toContain("AKIAZQ3DRSTUVWXY2345"); // the secret did not
+    expect(row.summary).toContain("[REDACTED:aws-access-key-id:");
+    expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
+    store.close();
+  });
+
   test("redact-on-capture scrubs a secret echoed in a response-only batch", async () => {
     await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
     // The prompt that leaked the key rode an earlier batch; this batch carries

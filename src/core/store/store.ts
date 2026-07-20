@@ -197,23 +197,33 @@ export class Store {
     model?: string;
     tokensIn?: number;
     tokensOut?: number;
-    summary?: string;
+    /** Given the turn row's existing summary (the question), return the
+     *  combined one. Kept a callback so summary FORMATTING stays in the daemon
+     *  next to buildSummary, and the store stays a dumb writer. */
+    composeSummary?: (existing: string | null) => string | null;
     redacted?: boolean;
     responseBody: Uint8Array | null;
     searchAppend: string;
   }): boolean {
     return this.inTx(() => {
-      // Newest response-less turn row for this (session, prompt id). bytes_resp
-      // guards double-attach: a second response for an already-answered turn
-      // stays a separate row rather than silently overwriting the first.
-      const target = this.db.get<{ id: string; tokens_in: number | null; tokens_out: number | null }>(
-        `SELECT id, tokens_in, tokens_out FROM exchanges
+      // The turn's EARLIEST response-less row — the one carrying the question,
+      // since a turn's user_prompt always precedes its tool_results. Ordering
+      // matters: a turn whose tool_results arrived in their own batch has
+      // several rows sharing this prompt_key, and picking the newest would hang
+      // the answer off a tool row while the question stayed unanswered. Order
+      // by ts_request, not id: ids are ULIDs, only sortable across distinct
+      // milliseconds (the random suffix decides within one). bytes_resp guards
+      // double-attach: a second response for an already-answered turn stays a
+      // separate row rather than overwriting.
+      const target = this.db.get<{ id: string; tokens_in: number | null; tokens_out: number | null; summary: string | null }>(
+        `SELECT id, tokens_in, tokens_out, summary FROM exchanges
          WHERE session_id=? AND prompt_key=? AND source='otel'
            AND (bytes_resp IS NULL OR bytes_resp=0)
-         ORDER BY id DESC LIMIT 1`,
+         ORDER BY ts_request ASC, id ASC LIMIT 1`,
         [input.sessionId, input.promptKey],
       );
       if (!target) return false;
+      const summary = input.composeSummary ? input.composeSummary(target.summary) : null;
       this.db.run(
         `UPDATE exchanges SET ts_response=?, model=COALESCE(?, model),
            tokens_in=?, tokens_out=?, bytes_resp=?, summary=COALESCE(?, summary),
@@ -221,7 +231,7 @@ export class Store {
          WHERE id=?`,
         [input.tsResponse, input.model ?? null,
          addNullable(target.tokens_in, input.tokensIn), addNullable(target.tokens_out, input.tokensOut),
-         input.responseBody?.byteLength ?? 0, input.summary ?? null,
+         input.responseBody?.byteLength ?? 0, summary,
          input.redacted ? 1 : 0, target.id],
       );
       this.db.run(`UPDATE payloads SET response_body=? WHERE exchange_id=?`,
