@@ -197,10 +197,15 @@ export interface WatcherOptions {
  *  trigger and the authorization to read that one conversation's file. */
 export class CodexRolloutWatcher {
   private readonly tailers = new Map<string, CodexRolloutTailer>();
+  private stopped = false;
 
   constructor(private readonly opts: WatcherOptions) {}
 
   onActivity(convId: string): void {
+    // An ingestOtel that was in flight at shutdown drains AFTER stop() and may
+    // reach here; without this guard it would spawn a poll interval that
+    // outlives the daemon. (stop() runs before the inflight drain in doStop.)
+    if (this.stopped) return;
     const existing = this.tailers.get(convId);
     if (existing) {
       existing.noteActivity();
@@ -224,6 +229,7 @@ export class CodexRolloutWatcher {
   }
 
   stop(): void {
+    this.stopped = true;
     for (const tailer of this.tailers.values()) tailer.stop();
     this.tailers.clear();
   }

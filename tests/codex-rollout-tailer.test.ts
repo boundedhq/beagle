@@ -134,4 +134,15 @@ describe("CodexRolloutWatcher", () => {
     expect(out).toHaveLength(0);
     w.stop();
   });
+
+  test("onActivity after stop() is a no-op (no interval outlives shutdown)", () => {
+    const root = tmp();
+    mkdirSync(join(root, "2026", "07", "20"), { recursive: true });
+    writeFileSync(join(root, "2026", "07", "20", "rollout-2026-07-20T21-00-00-conv-late.jsonl"), turn(PA, "ALPHA111") + "\n");
+    const out: OtelCall[] = [];
+    const w = new CodexRolloutWatcher({ emit: (c) => out.push(...c), sessionsRoot: root, now: () => 1000 });
+    w.stop();
+    w.onActivity("conv-late"); // a late-draining ingest must not spawn a tailer now
+    expect(out).toHaveLength(0);
+  });
 });
