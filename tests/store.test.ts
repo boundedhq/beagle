@@ -485,6 +485,32 @@ describe("Retention & purge", () => {
     expect(onDisk).toBeLessThan(cap * 2);
   });
 
+  test("a mass eviction survives SQLite's bound-parameter ceiling", () => {
+    // The eviction list used to go into one `id IN (...)`, which throws past
+    // 65535 ids — SQLite indexes bound parameters with a 16-bit value. The
+    // daemon's sweeper has no try/catch, so that throw takes the sweep out
+    // entirely. Reachable exactly where this accounting fix bites: a large
+    // over-cap store's first sweep drops everything above the cap at once.
+    // 4500 rows crosses several EVICT_BATCH boundaries in ~a second; the same
+    // loop is what keeps the 65535-id case from ever forming a statement.
+    const store = Store.open(dir);
+    const n = 4500;
+    for (let i = 0; i < n; i++) {
+      store.insertCall(fakeCall({
+        tsRequest: Date.now() - (n - i) * 10,
+        requestBody: new TextEncoder().encode("{}"),
+        responseBody: null,
+        searchText: `row ${i} short search text`,
+      }));
+    }
+    expect(store.countCalls()).toBe(n);
+    store.sweep({ payloadWindowMs: Infinity, eventWindowMs: Infinity, sizeCapBytes: 10_000 });
+    // Evicted down to what the cap holds, and nothing threw on the way.
+    expect(store.countCalls()).toBeLessThan(200);
+    expect(store.countCalls()).toBeGreaterThan(0);
+    store.close();
+  });
+
   test("sweep ages out sessions and runs on the payload window (R11)", () => {
     const store = Store.open(dir);
     const old = Date.now() - 8 * 24 * 3600_000;

@@ -96,6 +96,11 @@ const FTS_DISK_FACTOR = 3;
 // free (~0.01ms), so it can run on every sweep unconditionally.
 const FTS_MERGE_PAGES = 4096;
 
+// Max ids per eviction statement. SQLite indexes bound parameters with a
+// 16-bit value, so one `id IN (...)` carrying more than 65535 of them throws;
+// stay well under, since deleteCallsWhere nests the list inside subqueries.
+const EVICT_BATCH = 2000;
+
 export class Store {
   private constructor(private db: Db) {}
 
@@ -429,13 +434,14 @@ export class Store {
       // a Mode B row (search text ~= request body) outweighs the blobs. The
       // index cost is read from the stamped search_bytes rather than joined
       // from fts5 — see the schema note on why that join is O(n²).
-      const rows = this.db.all<{ id: string; sz: number; ts: number }>(
-        `SELECT e.id AS id, e.ts_request AS ts,
+      const rows = this.db.all<{ id: string; sz: number }>(
+        `SELECT e.id AS id,
                 COALESCE(length(p.request_body),0) + COALESCE(length(p.response_body),0)
                 + COALESCE(length(p.sse_raw),0)
-                + COALESCE(e.search_bytes,0) * ${FTS_DISK_FACTOR} AS sz
+                + COALESCE(e.search_bytes,0) * ? AS sz
          FROM exchanges e LEFT JOIN payloads p ON p.exchange_id = e.id
          ORDER BY e.ts_request DESC`,
+        [FTS_DISK_FACTOR],
       );
       let acc = 0;
       const evict: string[] = [];
@@ -443,9 +449,14 @@ export class Store {
         acc += r.sz;
         if (acc > policy.sizeCapBytes) evict.push(r.id);
       }
-      if (evict.length > 0) {
-        const qs = evict.map(() => "?").join(",");
-        this.deleteCallsWhere(`id IN (${qs})`, evict);
+      // Batched: an over-cap store can evict far more than one statement can
+      // carry (see EVICT_BATCH). That is not a corner case here — a multi-GB
+      // db of small calls is exactly what this accounting fix targets, and its
+      // first sweep drops everything above the cap at once. Each batch is its
+      // own transaction, so a sweep interrupted midway just resumes next pass.
+      for (let i = 0; i < evict.length; i += EVICT_BATCH) {
+        const batch = evict.slice(i, i + EVICT_BATCH);
+        this.deleteCallsWhere(`id IN (${batch.map(() => "?").join(",")})`, batch);
       }
     }
     if (Number.isFinite(policy.eventWindowMs)) {
