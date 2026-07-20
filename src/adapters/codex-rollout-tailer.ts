@@ -4,7 +4,7 @@
 // the daemon stitches onto the turn row (store.attachOtelResponse). Lives in
 // adapters (fs + timers). Pairing/keying is in ../parsers/codex-rollout (pure).
 // See docs/codex-rollout-response-capture-design.md.
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { ulid } from "../core/store/ulid";
@@ -23,8 +23,9 @@ export function codexSessionsRoot(): string {
   return join(process.env.CODEX_HOME || join(homedir(), ".codex"), "sessions");
 }
 
-// Locate a conversation's rollout by filename suffix. Called ONCE per tailer
-// (not per poll) — the sessions tree is date-partitioned and unbounded.
+// Locate a conversation's rollout by filename suffix. Runs on the tailer's poll
+// cadence only until the file is found (then it reads that path directly). The
+// sessions tree is date-partitioned (YYYY/MM/DD) and unbounded over time.
 function locateRollout(root: string, convId: string): string | null {
   const suffix = `-${convId}.jsonl`;
   let bestPath: string | null = null;
@@ -38,14 +39,16 @@ function locateRollout(root: string, convId: string): string | null {
     }
     for (const name of names) {
       const full = join(dir, name);
-      let st: ReturnType<typeof statSync>;
+      let st: ReturnType<typeof lstatSync>;
       try {
-        st = statSync(full);
+        // lstat, not stat: never follow a symlink into a directory, so a stray
+        // symlink loop under the sessions tree can't recurse without bound.
+        st = lstatSync(full);
       } catch {
         continue; // raced unlink — ignore
       }
       if (st.isDirectory()) walk(full);
-      else if (name.startsWith("rollout-") && name.endsWith(suffix) && st.mtimeMs > bestMtime) {
+      else if (st.isFile() && name.startsWith("rollout-") && name.endsWith(suffix) && st.mtimeMs > bestMtime) {
         bestPath = full;
         bestMtime = st.mtimeMs;
       }
@@ -92,6 +95,8 @@ export class CodexRolloutTailer {
   private timer: ReturnType<typeof setInterval> | null = null;
   private filePath: string | null;
   private readonly firstSeen = new Map<number, number>(); // answer index → first-seen ms
+  private answers: RolloutAnswer[] = []; // cache; re-parsed only when the file grows
+  private lastSize = -1;
   private lastChange: number;
   private lastActivity: number;
   private readonly now: () => number;
@@ -129,16 +134,27 @@ export class CodexRolloutTailer {
         return;
       }
     }
-    let text: string;
+    let size: number;
     try {
-      text = readFileSync(this.filePath, "utf8");
+      size = statSync(this.filePath).size;
     } catch {
       this.checkRetire(); // file gone/unreadable — still age toward retirement
       return;
     }
-    const answers = answersFromText(text);
     const now = this.now();
-    if (answers.length > this.firstSeen.size) this.lastChange = now;
+    // The rollout is append-only, so re-read+parse only when it grew. The tailer
+    // polls for the whole session; re-parsing a static multi-MB log every tick
+    // would be pure waste. Retries below still run from the cached `answers`.
+    if (size !== this.lastSize) {
+      try {
+        this.answers = answersFromText(readFileSync(this.filePath, "utf8"));
+      } catch {
+        this.checkRetire();
+        return;
+      }
+      this.lastSize = size;
+      if (this.answers.length > this.firstSeen.size) this.lastChange = now;
+    }
 
     // Emit each answer once when first seen, and re-emit it within the retry
     // window so a raced answer (its turn row not yet written) lands once the
@@ -146,7 +162,7 @@ export class CodexRolloutTailer {
     // turn simply drops in the daemon (design §5.1/§6.1a).
     const window = this.opts.retryWindowMs ?? RETRY_WINDOW_MS;
     const due: OtelCall[] = [];
-    answers.forEach((ans, i) => {
+    this.answers.forEach((ans, i) => {
       let seen = this.firstSeen.get(i);
       if (seen === undefined) {
         seen = now;

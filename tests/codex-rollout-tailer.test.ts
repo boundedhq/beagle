@@ -98,6 +98,20 @@ describe("CodexRolloutTailer", () => {
     const t = new CodexRolloutTailer({ convId: "conv1", filePath: "/no/such/rollout.jsonl", emit: () => { throw new Error("should not emit"); }, now: () => 1000 });
     expect(() => t.poll()).not.toThrow();
   });
+
+  test("locates a rollout that only appears AFTER the tailer starts", () => {
+    const root = tmp();
+    const out: OtelCall[] = [];
+    let clock = 1000;
+    const t = new CodexRolloutTailer({ convId: "conv-late", sessionsRoot: root, emit: (c) => out.push(...c), now: () => clock });
+    t.poll(); // file not there yet — locate finds nothing, nothing emitted
+    expect(out).toHaveLength(0);
+    mkdirSync(join(root, "2026", "07", "20"), { recursive: true });
+    writeFileSync(join(root, "2026", "07", "20", "rollout-2026-07-20T21-00-00-conv-late.jsonl"), turn(PA, "ALPHA111") + "\n");
+    clock = 2000;
+    t.poll(); // now the tailer locates it and emits
+    expect(out.map((c) => c.response.text)).toEqual(["ALPHA111"]);
+  });
 });
 
 describe("CodexRolloutWatcher", () => {
