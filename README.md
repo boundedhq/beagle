@@ -123,8 +123,8 @@ provider (the endpoint override Beagle uses for API-key Codex doesn't reach
 it), and Anthropic restricts Claude.ai subscription OAuth to its official
 client. So for those two, Beagle captures sessions from the agent's own
 usage reporting instead. Your prompts, tool inputs, and tool outputs (including
-files the agent reads) are still scanned — but it's the agent's self-report,
-not observed wire bytes. Those rows are badged **self-reported** in the
+files the agent reads) are still scanned and searchable — but it's the agent's
+self-report, not observed wire bytes. Those rows are badged **self-reported** in the
 dashboard (wire rows say **observed**), and alerts can lag a few seconds.
 Nothing leaves your machine: the report goes to a loopback receiver on
 `127.0.0.1`, and the vendor's reporting flags are set per run, never written

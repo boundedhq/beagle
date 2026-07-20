@@ -182,9 +182,10 @@ function buildTurnCall(t: Turn, ctx: OtlpContext): OtelCall {
   const promptDisplay = t.prompt ? flattenPromptText(t.prompt) : "";
   // Surface tool calls as readable messages (role "tool"), not only in the
   // scanned body — otherwise a tool-call-only turn reads "(no message content)"
-  // in the feed and its input never reaches the search index (searchText is
-  // built from messages). Name-prefixed for display; the leak-surface scanText
-  // stays inputs-only.
+  // in the feed. Name-prefixed for display; the leak-surface scanText stays
+  // inputs-only. The search index is built from scanText, NOT from these
+  // messages (daemon.ts ingestOtel), so a tool input is searchable either way
+  // — but the tool NAME reaches the index only by riding this message.
   const messages: DisplayMessage[] = [];
   if (promptDisplay) messages.push({ role: "user", content: promptDisplay });
   for (const c of t.tools) {

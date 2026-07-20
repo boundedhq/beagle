@@ -529,6 +529,9 @@ export class Daemon {
       // bytes, the copy the findings' spans index (the wire path does this too,
       // see the redacted branch above), so the value scrub below no-ops on it.
       const sent = new TextDecoder().decode(redaction ? redaction.requestBody : call.request.bodyBytes);
+      // The response half is a SEPARATE question — whether search is outbound
+      // only, which buildSearchText argues out for the wire path — and is left
+      // exactly as it was so this coverage fix stays one concern.
       let searchText = sent + "\n" + (call.response.text ?? "");
       // Plus a user message whose flattening actually changed the text: it
       // holds flattenPromptText's plain-text form of a prompt that may sit
@@ -538,6 +541,10 @@ export class Daemon {
       // attribute (buildTurnCall's scanned body is inputs-only) though it rode
       // the real outbound request. Never a tool message's CONTENT: that is the
       // truncated prefix the bytes above already cover in full.
+      // The two guards differ on purpose: a prompt is compared against the
+      // BYTES it may be an escaped copy of, so the test still holds if the
+      // response half ever leaves; a name is compared against everything
+      // appended so far, so a turn's tenth Bash call doesn't re-append it.
       for (const m of call.request.messages ?? []) {
         const flat = String(m.content);
         const tool = (m as DisplayMessage).tool; // a parser label; core's Message carries none

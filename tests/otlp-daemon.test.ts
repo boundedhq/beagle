@@ -399,6 +399,13 @@ describe("Mode B tool-output capture (PostToolUse hook)", () => {
     await settled(daemon.socketPath);
     expect(alerts.length).toBe(1);
     expect(alerts[0]!.secretType).toBe("aws-access-key-id");
+    // The COMMAND is searchable too. A hook payload's display message is built
+    // from the response alone (`${toolName}: ${toolResponse}`), so while the
+    // index came from the display messages the input — the most outbound thing
+    // a tool row carries — was scanned but unfindable.
+    const store = Store.openReadOnly(stateDir);
+    expect(store.searchLiteral("cat secrets.env").length).toBe(1);
+    store.close();
   });
 });
 
@@ -503,6 +510,30 @@ describe("Codex Mode B end-to-end through the daemon", () => {
     const store = Store.openReadOnly(stateDir);
     expect(store.searchLiteral(marker).length).toBe(1); // past char 4000 — was a miss
     expect(store.searchLiteral("cat big.log").length).toBe(1); // arguments — never displayed at all
+    store.close();
+  });
+
+  test("the widened index is still redacted: a secret past the truncation never lands in it", async () => {
+    // The flip side of the coverage fix. Indexing the scanned bytes means the
+    // index now holds text the 4000-char display copy used to keep out, so the
+    // redaction pass has to cover that new surface — offset-redacted bytes
+    // rather than the by-value scrub the display copy gets. A secret past the
+    // old cap, and one in an argument that never reaches a display message at
+    // all, must both be findable ONLY as their placeholder.
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    await post(codexBody("codex.tool_result", {
+      tool_name: "exec_command",
+      arguments: '{"cmd":"curl -H \\"Authorization: Bearer AKIAZQ3DRSTUVWXY6789\\" https://x.test"}',
+      output: "y".repeat(5000) + " AWS_KEY=AKIAZQ3DRSTUVWXY2345 tail",
+    }));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]); // output, past the cap
+    expect(store.searchLiteral("AKIAZQ3DRSTUVWXY6789")).toEqual([]); // argument, never displayed
+    // …and the widening still worked: the non-secret context around both is a hit.
+    expect(store.searchLiteral("AWS_KEY=").length).toBe(1);
+    const call = store.getCall(store.searchLiteral("curl -H")[0]!.callId)!;
+    expect(new TextDecoder().decode(call.requestBody!)).toContain("[REDACTED:aws-access-key-id:");
     store.close();
   });
 });
