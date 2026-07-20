@@ -566,12 +566,11 @@ export class Daemon {
       }
       // What's appended above (and the summary) derives from the display
       // messages — flattened plain text, not the scanned bytes — so it scrubs
-      // by value, not by the offsets, which don't index that text.
-      // KNOWN GAP, pre-dating this and shared with displayMessages below: the
-      // values are the RAW forms the scanner matched, so a secret whose raw
-      // form carries JSON escapes (a PEM's \\n inside a JSON-encoded prompt)
-      // does not literal-match the flattened copy and survives this scrub.
-      // The offset-redacted bytes above are unaffected; only derived text is.
+      // by value, not by the offsets, which don't index that text. The scrub
+      // covers the JSON-decoded form of each value as well as the raw form the
+      // scanner matched, which is what makes it safe on flattened text: a PEM
+      // whose \n arrived escaped inside a JSON-encoded prompt is matched in the
+      // decoded copy too (see redactValuesInText).
       if (redaction) searchText = redaction.heldOut ? "" : redactValuesInText(searchText, redaction.values);
       const summary = redaction?.heldOut
         ? "[REDACTION INCOMPLETE: content withheld]"

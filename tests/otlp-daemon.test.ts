@@ -150,6 +150,37 @@ describe("Mode B end-to-end through the daemon", () => {
     store.close();
   });
 
+  test("redact-on-capture scrubs a JSON-escaped multi-line secret from every derived surface", async () => {
+    // A resumed conversation serializes its whole message list into the prompt
+    // attribute, so the scanned bytes are JSON: a PEM's newlines are the
+    // two-char escape `\n`. The display text is the JSON.parse'd form with REAL
+    // newlines, so the scanner's matched value is not a substring of it and a
+    // literal-match scrub silently no-ops — the body was masked while the
+    // transcript and the search index still held the raw key.
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    // Synthetic body, per the fixture convention in scanner/precision tests —
+    // what matters is only that it spans a newline, so the scanned (escaped)
+    // and displayed (decoded) forms differ.
+    const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAderivedTextRegression\n-----END RSA PRIVATE KEY-----";
+    const prompt = JSON.stringify([{ role: "user", content: `deploy with this key:\n${pem}` }]);
+    await post(otlpBody(token, prompt, "otel-conv-pem", null));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    expect(listLeakEvents(store).length).toBe(1); // the leak still alerts
+    const hit = store.searchLiteral("deploy with this key")[0]!;
+    const call = store.getCall(hit.callId)!;
+    expect(call.redacted).toBe(true);
+    const body = new TextDecoder().decode(call.requestBody!);
+    expect(body).not.toContain("MIIEowIBAAKCAQEAderivedTextRegression"); // stored body: offset-redacted
+    // …and the derived surfaces the hole left raw: the rendered transcript…
+    expect(JSON.stringify(call.displayMessages)).not.toContain("MIIEowIBAAKCAQEAderivedTextRegression");
+    expect(JSON.stringify(call.displayMessages)).toContain("[REDACTED:private-key:");
+    // …and the search index, which would otherwise hand the key back.
+    expect(store.searchLiteral("MIIEowIBAAKCAQEAderivedTextRegression")).toEqual([]);
+    expect(store.searchLiteral(pem)).toEqual([]);
+    store.close();
+  });
+
   test("a leaked secret in an OTel-reported prompt fires the same alert", async () => {
     await post(otlpBody(token, "the key is AKIAZQ3DRSTUVWXY2345"));
     await settled(daemon.socketPath);
