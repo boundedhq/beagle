@@ -310,16 +310,14 @@ carries an `origin:'codex-rollout'` discriminator the daemon branch checks:
   `origin=='codex-rollout'`, a failed attach **drops** (no insert). Combined with
   §5.1's bounded retry, a legitimately-early answer still lands once its row
   exists; a restart re-emit simply drops.
-- **(b) Do NOT index the answer into search.** The OTel path builds `searchText`
-  as request **+ response** (`daemon.ts:521`), unlike the wire path's
-  outbound-only `buildSearchText` — the recent "search is outbound-only" P1 fix
-  corrected the wire path but **not** this one. Reusing it would make the codex
-  model's *answer* matchable by `beagle search` and reported as **sent**, exactly
-  the P1 that fix closed. So for `origin=='codex-rollout'` the response
-  contributes **empty** `searchAppend` (the answer is inbound; it only becomes
-  searchable-as-sent once echoed into the next request, which is itself indexed).
-  *Adjacent pre-existing bug worth its own ticket: Claude Mode B responses are
-  already over-indexed by this same line — out of scope here, but flag it.*
+- **(b) Do NOT index the answer into search — now STRUCTURAL (resolved by PR #92).**
+  The adjacent Mode B bug this design flagged (the OTel path indexed request **+
+  response**, so a codex/Claude answer read as "sent") was fixed on `main` in PR
+  #92: `ingestOtel`'s `searchText` is outbound-only and `attachOtelResponse` no
+  longer has a `searchAppend` parameter at all — a stitch never touches the FTS
+  index. So this deviation needs no per-rollout code: the answer is inbound and
+  simply never indexed, for any stitch. (Earlier drafts passed an empty
+  `searchAppend`; that parameter is gone post-merge.)
 
 ---
 
