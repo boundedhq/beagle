@@ -2,7 +2,25 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_CONFIG, loadConfig, sanitizeConfig } from "../src/core/config/config";
+import { existsSync } from "node:fs";
+import { DEFAULT_CONFIG, loadConfig, readConfig, sanitizeConfig } from "../src/core/config/config";
+
+describe("readConfig (read-only — never writes)", () => {
+  test("missing file → defaults, and no config.json is created", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-rocfg-"));
+    const c = readConfig(dir);
+    expect(c).toEqual(DEFAULT_CONFIG);
+    expect(existsSync(join(dir, "config.json"))).toBe(false); // the whole point
+  });
+
+  test("existing file is read and sanitized, still no write", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-rocfg-"));
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ payloadWindowDays: "bad", redactOnCapture: false }));
+    const c = readConfig(dir);
+    expect(c.payloadWindowDays).toBe(DEFAULT_CONFIG.payloadWindowDays); // sanitized
+    expect(c.redactOnCapture).toBe(false);
+  });
+});
 
 describe("sanitizeConfig (validate-or-default per field)", () => {
   test("a wrong-typed retention value falls back to the default, never NaN", () => {

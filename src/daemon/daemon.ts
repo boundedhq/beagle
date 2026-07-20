@@ -380,7 +380,7 @@ export class Daemon {
     const requestBody = redaction ? redaction.requestBody : call.request.bodyBytes;
     const responseBody = redaction ? redaction.responseBody : (call.response.bodyBytes ?? null);
     let sseRaw: Uint8Array | null = call.response.sseRaw ?? null;
-    let searchText = buildSearchText(parsed, respParsed?.text, call);
+    let searchText = buildSearchText(parsed, call);
     if (redaction?.heldOut) {
       sseRaw = null; // the raw stream could hold the unverified value
       searchText = "";
@@ -395,10 +395,8 @@ export class Daemon {
           v.trim().toLowerCase() !== "identity",
       );
       sseRaw = contentEncoded ? null : redactValues(sseRaw, redaction.values);
-      searchText =
-        new TextDecoder().decode(requestBody) +
-        "\n" +
-        (responseBody ? new TextDecoder().decode(responseBody) : "");
+      // Outbound only (see buildSearchText): index the request, not the response.
+      searchText = new TextDecoder().decode(requestBody);
     }
     const summary = redaction?.heldOut
       ? "[REDACTION INCOMPLETE: content withheld]"
@@ -628,7 +626,15 @@ export class Daemon {
       return;
     }
     this.notifier.notify(msg);
-    process.stderr.write(this.notifier.terminalLine(msg) + "\n");
+    // Terminal backstop ONLY when stderr is a real terminal (foreground
+    // `beagle daemon`). A detached/service daemon's stderr is redirected to
+    // daemon.log — writing leak-alert metadata (secret type, destination,
+    // agent) there would leave a shadow leak ledger that survives
+    // `beagle purge`. The OS notification is the real delivery; `beagle leaks`
+    // is the purge-able alert history.
+    if (process.stderr.isTTY) {
+      process.stderr.write(this.notifier.terminalLine(msg) + "\n");
+    }
   }
 
   private sweep(): void {
@@ -930,22 +936,17 @@ function firstLine(s: string, max: number): string {
   return line.length > max ? line.slice(0, max - 1) + "…" : line;
 }
 
-function buildSearchText(
-  parsed: ParsedRequest | null,
-  responseText: string | undefined,
-  call: CapturedCall,
-): string {
+function buildSearchText(parsed: ParsedRequest | null, call: CapturedCall): string {
+  // OUTBOUND ONLY. `beagle search` answers "was this string SENT" (README:
+  // "did that internal hostname ever leave?"), so a hit is definitive proof it
+  // left the machine. Indexing the provider's RESPONSE would report a
+  // model-generated string as "sent" when the user never sent it. This also
+  // matches R7's request-scoped leak model: response content only matters once
+  // it's echoed back in the NEXT request — which is itself indexed here.
   // Parsed text where a parser ran (finds secrets that appear \"-escaped in
-  // raw JSON); decoded raw text otherwise (R8 / schema note).
+  // raw JSON); decoded raw request bytes otherwise (R8 / schema note).
   if (parsed) {
-    const parts = [parsed.system ?? "", ...parsed.messages.map((m) => m.content)];
-    if (responseText) parts.push(responseText);
-    return parts.join("\n");
+    return [parsed.system ?? "", ...parsed.messages.map((m) => m.content)].join("\n");
   }
-  const dec = new TextDecoder("utf-8", { fatal: false });
-  return (
-    dec.decode(call.request.bodyBytes) +
-    "\n" +
-    (call.response.bodyBytes ? dec.decode(call.response.bodyBytes) : "")
-  );
+  return new TextDecoder("utf-8", { fatal: false }).decode(call.request.bodyBytes);
 }

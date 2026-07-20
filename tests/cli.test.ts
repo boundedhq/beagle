@@ -714,6 +714,23 @@ describe("cmdStatus — daemon wording + service health", () => {
     expect(cmdStatus(dir, null, () => true)).toContain("go DIRECT (unmonitored)");
   });
 
+  test("status is READ-ONLY: it never creates config.json, so 'modified nothing' stays true", () => {
+    // Reproduced bug: cmdStatus → loadConfig created config.json on a pristine
+    // dir, then the trust strip claimed 'modified nothing'. readConfig fixes it.
+    const dir = mkdtempSync(join(tmpdir(), "beagle-status-ro-"));
+    const s = cmdStatus(dir, null, () => true);
+    expect(existsSync(join(dir, "config.json"))).toBe(false);
+    expect(s).toContain("beagle has modified nothing on this system");
+  });
+
+  test("search on a fresh install doesn't claim 'never sent' — nothing was captured", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-search-fresh-"));
+    const out = cmdSearch(dir, "anything");
+    expect(out).not.toContain("never sent"); // can't claim that with zero capture
+    expect(out).toContain("no captured traffic yet");
+    expect(out).toContain("beagle run"); // points the new user at the next step
+  });
+
   test("daemon down + watched agents → starts-on-demand wording, not DIRECT", () => {
     const dir = mkdtempSync(join(tmpdir(), "beagle-status-"));
     writeFileSync(join(dir, "changes.json"), JSON.stringify([shimEntry(dir)]));

@@ -343,10 +343,28 @@ export class ViewerServer {
   }
 
   private readJson(req: IncomingMessage): Promise<unknown> {
+    // Cap the body: /api/session runs this BEFORE the bootstrap token is
+    // checked, so an unbounded reader lets any local process that finds the
+    // loopback port stream gigabytes to exhaust memory. Viewer POSTs are tiny
+    // (a token, a session id) — 256 KiB is orders of magnitude of headroom.
     return new Promise((resolve) => {
       let buf = "";
-      req.on("data", (d) => (buf += d));
+      let over = false;
+      req.on("data", (d) => {
+        if (over) return;
+        buf += d;
+        // Over the cap: stop retaining bytes and resolve null now (the caller
+        // treats null as a bad request → 401/400). Further data is ignored, so
+        // memory is bounded; we don't destroy the socket, so the handler can
+        // still send its response.
+        if (buf.length > 256 * 1024) {
+          over = true;
+          buf = "";
+          resolve(null);
+        }
+      });
       req.on("end", () => {
+        if (over) return;
         try {
           resolve(JSON.parse(buf));
         } catch {

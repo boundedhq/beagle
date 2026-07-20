@@ -20,6 +20,9 @@ import type { RunRegistry, ResolvedRun } from "./registry";
 // model request (a 1M-token context is single-digit MB), so it never trips a
 // legitimate call; over it, reject with 413 rather than keep buffering.
 const MAX_REQUEST_BYTES = 128 << 20;
+// Concurrency cap (aggregate memory bound) and the receive-phase stall deadline.
+const MAX_CONNECTIONS = 512;
+const RECEIVE_TIMEOUT_MS = 30_000;
 
 export interface ScanContext {
   /** Assigned at request start so alerts can reference the call before
@@ -44,6 +47,11 @@ export interface ProxyOptions {
   /** Max bytes buffered for a single inbound request before a 413. Defaults to
    *  MAX_REQUEST_BYTES; injectable so tests can trip it without a 128 MiB body. */
   maxRequestBytes?: number;
+  /** Max concurrent connections (aggregate memory bound). Default MAX_CONNECTIONS. */
+  maxConnections?: number;
+  /** Idle deadline for a connection that hasn't started forwarding a request.
+   *  Default RECEIVE_TIMEOUT_MS; injectable so the reap is testable. */
+  receiveTimeoutMs?: number;
 }
 
 interface ParsedRequest {
@@ -61,6 +69,7 @@ export class ProxyServer {
   port = 0;
   private server: Server | null = null;
   private pool = new ConnectionPool();
+  private activeConnections = 0;
 
   constructor(private opts: ProxyOptions) {}
 
@@ -78,9 +87,28 @@ export class ProxyServer {
   }
 
   private handleConnection(client: Socket): void {
+    // Aggregate bound: the per-request cap limits ONE connection, but a peer
+    // could open many and hold sub-cap partial requests. Cap concurrency, and
+    // reap a connection that stalls before its request forwards (slowloris) —
+    // together these bound total buffered memory. (The proxy is loopback and
+    // daemon.json is 0600, so the port isn't readable cross-user, but a local
+    // process shouldn't be able to OOM the daemon regardless.)
+    const maxConns = this.opts.maxConnections ?? MAX_CONNECTIONS;
+    if (this.activeConnections >= maxConns) { client.destroy(); return; }
+    this.activeConnections++;
+    client.once("close", () => { this.activeConnections--; });
     let buf: Buffer = Buffer.alloc(0);
     let busy = false;
     client.on("error", () => client.destroy());
+    // Drop a connection that goes idle (no bytes) for the deadline before its
+    // request forwards — reaps a silent slowloris. One that dribbles bytes
+    // keeps resetting this idle timer, but its buffer grows ~a byte per
+    // interval (negligible) and the concurrency cap bounds how many can do it.
+    // Cleared once forwarding starts (below) so a slow streaming RESPONSE is
+    // never reaped for being slow.
+    client.setTimeout(this.opts.receiveTimeoutMs ?? RECEIVE_TIMEOUT_MS, () => {
+      if (!busy) client.destroy();
+    });
     const maxReq = this.opts.maxRequestBytes ?? MAX_REQUEST_BYTES;
     client.on("data", (d: Buffer) => {
       if (buf.length + d.length > maxReq) {
@@ -104,6 +132,7 @@ export class ProxyServer {
       }
       buf = buf.subarray(parsed.consumed);
       busy = true;
+      client.setTimeout(0); // request is forwarding; don't reap a slow response
       this.handleRequest(client, parsed.req)
         .catch((e) => {
           if (!(e instanceof StreamAbortedError) && !client.destroyed) {
