@@ -84,9 +84,12 @@ describe("daemon idle-exit (design §6.7)", () => {
     await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", () => r()));
     const upPort = (upstream.address() as { port: number }).port;
 
-    // Wide margin (100ms fire interval vs 500ms idle window, 5x) so a slow
+    // Wide margin (50ms fire interval vs 500ms idle window, 10x) so a slow
     // shared CI runner stalling between fires doesn't idle the daemon out —
     // that would be a runner hiccup, not the lost-lease backstop failing.
+    // This is a "nothing happened within a window" assertion, so the margin is
+    // the only defense available: it can't be made robust by polling the way
+    // the wind-down check below is.
     const d = await start({ idleTimeoutMs: 500 });
     await controlRequest(d.socketPath, {
       cmd: "register-run",
@@ -103,10 +106,10 @@ describe("daemon idle-exit (design §6.7)", () => {
         s.on("error", () => resolve());
       });
 
-    // traffic every ~100ms for ~1.2s, well past the 500ms idle window
-    for (let i = 0; i < 12; i++) {
+    // traffic every ~50ms for ~1.2s, well past the 500ms idle window
+    for (let i = 0; i < 24; i++) {
       await fire();
-      await Bun.sleep(100);
+      await Bun.sleep(50);
     }
     expect(d.isRunning).toBe(true); // traffic held it open without any lease
 
