@@ -220,7 +220,6 @@ describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
       model: "claude-opus-4-8", tokensIn: 4182, tokensOut: 1128,
       composeSummary: (existing) => `"${existing}" → Memory works like this…`,
       responseBody: new TextEncoder().encode("Memory works like this — the long answer"),
-      searchAppend: "\nMemory works like this — the long answer",
     });
     expect(attached).toBe(true);
     const got = store.getCall(turn.id)!;
@@ -232,11 +231,11 @@ describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
     // composed from the row's own question + the answer, so a stitched turn
     // reads like a one-batch one instead of showing the answer alone
     expect(got.summary).toBe('"how does memory work?" → Memory works like this…');
-    // one row, findable by BOTH its question and its answer
-    const byAnswer = store.searchLiteral("the long answer");
-    expect(byAnswer.length).toBe(1);
-    expect(byAnswer[0]!.callId).toBe(turn.id);
+    // The row stays findable by the question it SENT…
     expect(store.searchLiteral("how does memory work")[0]!.callId).toBe(turn.id);
+    // …and the stitch leaves the index alone: search is outbound-only, so the
+    // model's answer never becomes a hit even though it now lives on this row.
+    expect(store.searchLiteral("the long answer")).toEqual([]);
     store.close();
   });
 
@@ -246,7 +245,7 @@ describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
     store.insertCall(turn);
     store.attachOtelResponse({
       sessionId: "sess-1", promptKey: "prompt-1", tsResponse: Date.now(),
-      tokensIn: 50, tokensOut: 4, responseBody: new TextEncoder().encode("ok"), searchAppend: "\nok",
+      tokensIn: 50, tokensOut: 4, responseBody: new TextEncoder().encode("ok"),
     });
     const got = store.getCall(turn.id)!;
     expect(got.tokensIn).toBe(100);
@@ -270,7 +269,7 @@ describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
     store.insertCall(toolRow);
     store.attachOtelResponse({
       sessionId: "sess-1", promptKey: "prompt-1", tsResponse: Date.now(),
-      responseBody: new TextEncoder().encode("THE ANSWER"), searchAppend: "\nTHE ANSWER",
+      responseBody: new TextEncoder().encode("THE ANSWER"),
     });
     expect(new TextDecoder().decode(store.getCall(question.id)!.responseBody!)).toBe("THE ANSWER");
     expect(store.getCall(toolRow.id)!.responseBody).toBe(null); // tool row untouched
@@ -282,11 +281,11 @@ describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
     store.insertCall(promptRow());
     const wrongPrompt = store.attachOtelResponse({
       sessionId: "sess-1", promptKey: "other-prompt", tsResponse: Date.now(),
-      responseBody: new TextEncoder().encode("x"), searchAppend: "\nx",
+      responseBody: new TextEncoder().encode("x"),
     });
     const wrongSession = store.attachOtelResponse({
       sessionId: "sess-9", promptKey: "prompt-1", tsResponse: Date.now(),
-      responseBody: new TextEncoder().encode("x"), searchAppend: "\nx",
+      responseBody: new TextEncoder().encode("x"),
     });
     expect(wrongPrompt).toBe(false);
     expect(wrongSession).toBe(false);
@@ -299,11 +298,11 @@ describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
     store.insertCall(turn);
     const first = store.attachOtelResponse({
       sessionId: "sess-1", promptKey: "prompt-1", tsResponse: Date.now(),
-      responseBody: new TextEncoder().encode("the real answer"), searchAppend: "\nthe real answer",
+      responseBody: new TextEncoder().encode("the real answer"),
     });
     const second = store.attachOtelResponse({
       sessionId: "sess-1", promptKey: "prompt-1", tsResponse: Date.now(),
-      responseBody: new TextEncoder().encode("an impostor"), searchAppend: "\nan impostor",
+      responseBody: new TextEncoder().encode("an impostor"),
     });
     expect(first).toBe(true);
     expect(second).toBe(false);
@@ -319,7 +318,7 @@ describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
     expect(
       store.attachOtelResponse({
         sessionId: "sess-1", promptKey: "prompt-1", tsResponse: Date.now(),
-        responseBody: new TextEncoder().encode("x"), searchAppend: "\nx",
+        responseBody: new TextEncoder().encode("x"),
       }),
     ).toBe(false);
     store.close();
