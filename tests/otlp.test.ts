@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { DisplayMessage } from "../src/parsers/parsers";
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   mapOtlpLogsToCalls,
@@ -685,62 +684,6 @@ describe("OtlpReceiver HTTP endpoint", () => {
     const c = got[0] as { request: { bodyBytes: Uint8Array } };
     // prompt is part of the scanned body for the turn
     expect(decode(c.request.bodyBytes)).toContain(prompt);
-  });
-});
-
-describe("OtlpReceiver — BEAGLE_OTLP_DUMP diagnostic (off by default)", () => {
-  let receiver: OtlpReceiver;
-  let got: unknown[];
-  let port: number;
-  let prev: string | undefined;
-  let dir: string;
-
-  beforeEach(async () => {
-    prev = process.env.BEAGLE_OTLP_DUMP;
-    dir = mkdtempSync(join(tmpdir(), "beagle-otlp-dump-"));
-    got = [];
-    receiver = new OtlpReceiver({ token: "t", onCalls: (exs) => got.push(...exs) });
-    port = await receiver.listen(0);
-  });
-  afterEach(() => {
-    receiver.close();
-    if (prev === undefined) delete process.env.BEAGLE_OTLP_DUMP;
-    else process.env.BEAGLE_OTLP_DUMP = prev;
-  });
-
-  const send = (path: string, body: string) =>
-    fetch(`http://127.0.0.1:${port}${path}`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-beagle-run": "t" },
-      body,
-    });
-
-  test("unset → nothing is written (the default is silent)", async () => {
-    delete process.env.BEAGLE_OTLP_DUMP;
-    await send("/v1/logs", JSON.stringify(logs(turnRecords())));
-    expect(readdirSync(dir)).toEqual([]);
-  });
-
-  test("set → each body is written verbatim, route-tagged and sequenced", async () => {
-    process.env.BEAGLE_OTLP_DUMP = dir;
-    const body1 = JSON.stringify(logs(turnRecords({ prompt: "first turn" })));
-    await send("/v1/logs", body1);
-    await send("/v1/hook", JSON.stringify({ session_id: "s", tool_name: "Bash", tool_input: { command: "x" }, tool_response: "y" }));
-    expect(readdirSync(dir).sort()).toEqual(["otlp-0001-logs.json", "otlp-0002-hook.json"].sort());
-    // verbatim: the dumped bytes equal exactly what was POSTed, so the raw OTLP
-    // stream can be inspected byte-for-byte — the whole point of the diagnostic.
-    expect(readFileSync(join(dir, "otlp-0001-logs.json"), "utf8")).toBe(body1);
-  });
-
-  test("an unwritable dump path never disturbs capture (best-effort, swallowed)", async () => {
-    // parent is a regular file → mkdir/write throws; the POST must still 200 and
-    // the call must still be delivered. Capture never fails because of a dump.
-    const file = join(dir, "not-a-dir");
-    writeFileSync(file, "x");
-    process.env.BEAGLE_OTLP_DUMP = join(file, "nested");
-    const r = await send("/v1/logs", JSON.stringify(logs(turnRecords())));
-    expect(r.status).toBe(200);
-    expect(got.length).toBe(1);
   });
 });
 

@@ -144,8 +144,7 @@ const CONTENT_EVENTS = new Set(["user_prompt", "tool_result", "assistant_respons
 // prompt_suggestion overwriting the answer is exactly why interactive turns
 // stored a next-prompt-looking sentence (or title JSON) instead of the reply.
 // Skip them by source. A denylist, not an allowlist: an unrecognized source is
-// kept as real content, so we never silently drop a genuine reply. The
-// BEAGLE_OTLP_DUMP diagnostic (receiver.ts) is how new ones get identified.
+// kept as real content, so we never silently drop a genuine reply.
 const INTERNAL_QUERY_SOURCES = new Set(["generate_session_title", "prompt_suggestion"]);
 
 // Every level is array-guarded: a non-array container (object instead of []) is
