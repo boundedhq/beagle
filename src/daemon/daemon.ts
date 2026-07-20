@@ -626,7 +626,15 @@ export class Daemon {
       return;
     }
     this.notifier.notify(msg);
-    process.stderr.write(this.notifier.terminalLine(msg) + "\n");
+    // Terminal backstop ONLY when stderr is a real terminal (foreground
+    // `beagle daemon`). A detached/service daemon's stderr is redirected to
+    // daemon.log — writing leak-alert metadata (secret type, destination,
+    // agent) there would leave a shadow leak ledger that survives
+    // `beagle purge`. The OS notification is the real delivery; `beagle leaks`
+    // is the purge-able alert history.
+    if (process.stderr.isTTY) {
+      process.stderr.write(this.notifier.terminalLine(msg) + "\n");
+    }
   }
 
   private sweep(): void {

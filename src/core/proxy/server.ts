@@ -100,9 +100,12 @@ export class ProxyServer {
     let buf: Buffer = Buffer.alloc(0);
     let busy = false;
     client.on("error", () => client.destroy());
-    // Drop a connection that opens but never completes a request by the
-    // deadline. Cleared once forwarding starts (below) so a long streaming
-    // response is never killed for being slow.
+    // Drop a connection that goes idle (no bytes) for the deadline before its
+    // request forwards — reaps a silent slowloris. One that dribbles bytes
+    // keeps resetting this idle timer, but its buffer grows ~a byte per
+    // interval (negligible) and the concurrency cap bounds how many can do it.
+    // Cleared once forwarding starts (below) so a slow streaming RESPONSE is
+    // never reaped for being slow.
     client.setTimeout(this.opts.receiveTimeoutMs ?? RECEIVE_TIMEOUT_MS, () => {
       if (!busy) client.destroy();
     });
