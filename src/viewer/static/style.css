@@ -244,6 +244,9 @@ main { flex: 1; padding: 8px 16px; }
 .row .time { color: var(--muted); flex: 0 0 96px; white-space: nowrap; }
 .row .agent { color: var(--accent); flex: 0 0 100px; overflow: hidden; text-overflow: ellipsis; }
 .row .model { color: var(--muted); flex: 0 0 130px; overflow: hidden; text-overflow: ellipsis; }
+/* Not a model call (a tool result or a local command) — read it as a state,
+   not a model named "no model used". */
+.row .model.none { font-style: italic; opacity: 0.7; }
 .row .summary { flex: 1 1 auto; min-width: 120px; overflow: hidden; text-overflow: ellipsis; }
 /* The summary's "what the agent sent" suffix (— to "…" / — after N x results)
    renders muted, so the row reads two-toned: got-back bright, sent quiet. */
