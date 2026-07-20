@@ -213,7 +213,7 @@ Trust needs numbers, not adjectives:
 |---|---|---|
 | Core security path | ≤ 2,000 LOC | `bun run loc:check` fails the build over budget |
 | Detection false-positive rate | < 5% | `tests/precision.test.ts` — the ship gate |
-| Scan time, 1 MB body | p99 ~10 ms | `tests/budget.test.ts` (median < 50 ms ceiling for CI variance); the tail is enforced by the scan worker's deadline, `tests/scan-host.test.ts` |
+| Scan time, 1 MB body | p99 ~10 ms | `tests/budget.test.ts` (median < 50 ms ceiling for CI variance); pathological inputs are bounded separately, by the scan worker's 500 ms fail-safe deadline |
 | Added request latency | p50 ≤ 5 ms | `tests/budget.test.ts` (< 25 ms ceiling for CI variance) |
 | Install size | ≤ 100 MB | CI binary-size check |
 

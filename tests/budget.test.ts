@@ -12,6 +12,13 @@ import { join } from "node:path";
 
 // R9/R5 budget harness — asserts the numbers the README publishes.
 
+// Both budgets below assert a median. These are wall-clock samples taken on a
+// shared CI runner, so the tail is that runner's scheduling noise (a GC pause,
+// CPU steal) rather than anything about Beagle; only the middle of the
+// distribution is about the code under test. Sorts in place — callers here
+// don't reuse the sample order.
+const median = (xs: number[]) => xs.sort((a, b) => a - b)[Math.floor(xs.length / 2)]!;
+
 describe("scan-time budget (R5: p99 ≤ ~10ms on 1 MB)", () => {
   const rules = compileRules(
     loadRuleFile(readFileSync("rules/beagle-rules.json", "utf8")),
@@ -29,18 +36,17 @@ describe("scan-time budget (R5: p99 ≤ ~10ms on 1 MB)", () => {
       scan(bytes, {}, rules);
       times.push(performance.now() - t);
     }
-    // Median, not a tail percentile — same statistic the latency test below
-    // uses. Every sample scans the SAME bytes, so the spread across them is
-    // runner noise (a GC pause, CPU steal on a shared runner), not scanner
-    // behavior: a tail index here measures the runner, and one bad sample
-    // failed an unrelated PR's build. The design target really is p99 ≤ ~10ms
-    // (PRD R5), but the tail it's about — input-dependent backtracking — is
-    // enforced behaviorally by the worker deadline in tests/scan-host.test.ts,
-    // not by an order statistic over 30 identical scans. A regression big
-    // enough to matter moves every sample, so it moves the median too.
-    const median = times.sort((a, b) => a - b)[Math.floor(times.length / 2)]!;
+    // Deliberately NOT a tail index: every sample scans the same bytes, so the
+    // spread across them is runner noise, and `times[Math.floor(n * 0.99)]` is
+    // the max for any n ≤ 100 (floor(100 * 0.99) === 99, the last index) — that
+    // read cost an unrelated PR a green build. Raising the sample count doesn't
+    // make it a p99; n ≥ 200 is needed to drop even one sample.
+    // The p99 ≤ ~10ms design target (PRD R5) is not what this gate proves, and
+    // no wall-clock gate on a shared runner could. What bounds a pathological
+    // input is the scan worker's 500ms deadline — a fail-safe that marks the
+    // exchange incomplete, 50x this target, covered by tests/scan-host.test.ts.
     // generous ceiling for CI variance; the design target is ~10ms
-    expect(median).toBeLessThan(50);
+    expect(median(times)).toBeLessThan(50);
   });
 });
 
@@ -125,7 +131,6 @@ describe("proxy added-latency budget (R9: p50 ≤ ~5ms over direct)", () => {
       direct.push(await oneRequest(upstreamPort, "/v1/messages"));
       tapped.push(await oneRequest(proxy.port, "/run/run-b/v1/messages"));
     }
-    const median = (xs: number[]) => xs.sort((a, b) => a - b)[Math.floor(xs.length / 2)]!;
     const added = median(tapped) - median(direct);
     // CI-generous ceiling; design target p50 ≤ 5ms. Guards against a pooling
     // regression (socket-per-request would add tens of ms).
