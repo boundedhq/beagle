@@ -32,6 +32,39 @@ const STOPWORDS = ["example", "sample", "placeholder", "dummy", "xxxxxx", "chang
 
 const MAX_FINDINGS_PER_RULE = 500;
 
+// Bodies are scanned as raw bytes — nothing on the scan path JSON-unescapes
+// them — so a secret pasted at the start of a line arrives preceded by the
+// TWO-character sequence `\n`, not a newline. Its `n` is a word character, so
+// a rule anchored with a leading `\b` finds no boundary and misses outright:
+// "here is the key\nAKIA…" reported nothing at all. That shape — secret first
+// on a line — is exactly how a key gets pasted into a chat prompt.
+//
+// Fixed by masking rather than by loosening the rules: every escape whose
+// final character is a word char is blanked to spaces before matching, so the
+// separator the rules already expect is really there. Two properties make
+// this safe:
+//   - Length is preserved, so match offsets still index the raw bytes that
+//     redaction and the store slice (values are re-read from the raw text).
+//   - Masking only ever turns word chars into spaces, so it can add a
+//     boundary but never fabricate one inside a secret — no rule's charset
+//     contains a backslash, so no secret can span an escape.
+// It also leaves every rule regex untouched, which matters: anchoring a rule
+// with a leading lookaround instead costs ~100x scan time (V8 can no longer
+// fast-scan for the literal prefix) and blows the R5 budget.
+//
+// `\\` and `\"` are matched but left alone — they already end in a non-word
+// char. Consuming them still matters for correct left-to-right tokenizing:
+// in `\\n` the `n` is literal text, not an escape, and must keep suppressing
+// the boundary.
+const JSON_ESCAPE = /\\(?:u[0-9a-fA-F]{4}|[\s\S])/g;
+
+export function maskJsonEscapes(text: string): string {
+  if (!text.includes("\\")) return text; // fast path: nothing to mask
+  return text.replace(JSON_ESCAPE, (esc) =>
+    /[A-Za-z0-9_]$/.test(esc) ? " ".repeat(esc.length) : esc,
+  );
+}
+
 export function compileRules(specs: RuleSpec[], hmacKey: Uint8Array): CompiledRules {
   return {
     rules: specs.map((spec) => ({ spec, re: new RegExp(spec.regex, spec.flags ?? "g") })),
@@ -40,7 +73,12 @@ export function compileRules(specs: RuleSpec[], hmacKey: Uint8Array): CompiledRu
 }
 
 export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): Finding[] {
-  const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  const raw = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  // Match against the escape-masked view; read secret VALUES back out of `raw`
+  // at the reported offsets. Masking is length-preserving, so the two index
+  // identically — and a secret that legitimately spans an escape (a PEM body
+  // carrying `\n`) is still fingerprinted and redacted from its true bytes.
+  const text = maskJsonEscapes(raw);
   const lower = text.toLowerCase();
   const authNorm = ctx.authValue ? normalize(ctx.authValue) : undefined;
   const findings: Finding[] = [];
@@ -63,7 +101,17 @@ export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): 
     let m: RegExpExecArray | null;
     while (ruleFindings < MAX_FINDINGS_PER_RULE && (m = re.exec(text)) !== null) {
       if (m[0].length === 0) { re.lastIndex++; continue; } // zero-width guard
-      const secretRaw = m[spec.secretGroup] ?? m[0];
+      // Span the capture group, not the whole match: consumed leading
+      // delimiters and keyword prefixes must not leak into the span, or
+      // redact-on-capture splices them out too (e.g. eating a quote corrupts
+      // the stored JSON) and echo-scrubbing fails to match the bare secret.
+      // indexOf is exact when the group text appears once in the match; on a
+      // duplicate it still spans an identical occurrence of the same value.
+      const matched = m[spec.secretGroup] ?? m[0];
+      const start = m.index + m[0].indexOf(matched);
+      // Masking is length-preserving, so the span maps straight back onto the
+      // unmasked bytes — every gate below judges the value that really shipped.
+      const secretRaw = raw.slice(start, start + matched.length);
       const secret = normalize(secretRaw);
       if (secret.length === 0) continue;
       const secretLower = secret.toLowerCase();
@@ -84,13 +132,6 @@ export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): 
         if (decoded.length < 8 || STOPWORDS.some((w) => decoded.toLowerCase().includes(w)) || !compiled.rules.some(({ spec: s, re: r }) =>
           s.tier === "structured" && !s.validators?.length && ((r.lastIndex = 0), r.test(decoded)))) continue;
       }
-      // Span the capture group, not the whole match: consumed leading
-      // delimiters and keyword prefixes must not leak into the span, or
-      // redact-on-capture splices them out too (e.g. eating a quote corrupts
-      // the stored JSON) and echo-scrubbing fails to match the bare secret.
-      // indexOf is exact when the group text appears once in the match; on a
-      // duplicate it still spans an identical occurrence of the same value.
-      const start = m.index + m[0].indexOf(secretRaw);
       ruleFindings++;
       findings.push({
         detector: spec.id,

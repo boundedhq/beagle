@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { compileRules, scan, shannonEntropy, luhnValid } from "../src/core/scanner/engine";
+import { compileRules, scan, shannonEntropy, luhnValid, maskJsonEscapes } from "../src/core/scanner/engine";
 import { loadRuleFile } from "../src/core/scanner/rules";
 import { readFileSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -160,6 +160,104 @@ describe("rule file integrity", () => {
     const pin = readFileSync("rules/beagle-rules.sha256", "utf8").trim();
     expect(() => loadRuleFile(raw, pin)).not.toThrow();
     expect(() => loadRuleFile(raw + " ", pin)).toThrow(/integrity|hash/i);
+  });
+});
+
+// Regression: bodies are scanned as raw bytes, so a secret pasted at the start
+// of a line is preceded by the two-char escape `\n`, whose `n` is a word char.
+// A leading `\b` found no boundary there and the secret went undetected —
+// no alert, no redaction, raw in the store.
+describe("JSON-escape-prefixed secrets (leading-boundary regression)", () => {
+  const BS = String.fromCharCode(92); // a real backslash, as it appears in raw JSON
+  const FAMILIES: Array<[string, string]> = [
+    ["aws-access-key-id", "AKIAZQ3DRSTUVWXY2345"],
+    ["github-pat", "ghp_A7hK9mP2qR5tW8xZ1cV4bN6jL3gF0dSe2aYb"],
+    ["slack-token", "xoxb-123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx"],
+    ["openai-api-key", "sk-Zx9Yw8Vu7Tt6Ss5Rr4Qq3Pp2Oo1Nn0MmLl2Kk3Jj4H"],
+    ["stripe-live-key", "sk_live_Zx9Yw8Vu7Tt6Ss5Rr4Qq3Pp"],
+    ["google-api-key", "AIzaSyD9Zx8Yw7Vu6Tt5Ss4Rr3Qq2Pp1Oo0Nn9M"],
+    ["npm-token", "npm_Zx9Yw8Vu7Tt6Ss5Rr4Qq3Pp2Oo1Nn0MmLl2K"],
+  ];
+
+  for (const [detector, secret] of FAMILIES) {
+    test(`${detector} is found after an escape, not just after real whitespace`, () => {
+      // Control: the shapes are detected when a real separator precedes them.
+      expect(scanText(`here is the key ${secret}`).some((f) => f.secretType === detector)).toBe(true);
+      expect(scanText(`here is the key\n${secret}`).some((f) => f.secretType === detector)).toBe(true);
+      // The regression: escapes whose final char is a word char.
+      for (const esc of ["n", "t", "r", "b", "f"]) {
+        const f = scanText(`here is the key${BS}${esc}${secret}`);
+        expect(f.some((x) => x.secretType === detector)).toBe(true);
+      }
+      // \r\n, and the \uXXXX form some encoders emit for control chars.
+      expect(scanText(`key${BS}r${BS}n${secret}`).some((f) => f.secretType === detector)).toBe(true);
+      expect(scanText(`key${BS}u000a${secret}`).some((f) => f.secretType === detector)).toBe(true);
+    });
+  }
+
+  test("a realistic JSON-encoded prompt body is scanned", () => {
+    const secret = "AKIAZQ3DRSTUVWXY2345";
+    const body = JSON.stringify([
+      { role: "user", content: `deploy with this:\n${secret}\nthanks` },
+    ]);
+    const f = scanText(body);
+    expect(f.some((x) => x.secretType === "aws-access-key-id")).toBe(true);
+  });
+
+  test("the span covers the secret only, so redaction stays exact", () => {
+    // The escape must not be swallowed into the finding: spans index the raw
+    // bytes, and eating the `n` of `\n` would corrupt the stored JSON.
+    const secret = "AKIAZQ3DRSTUVWXY2345";
+    const body = JSON.stringify([{ role: "user", content: `key:\n${secret}\ndone` }]);
+    const f = scanText(body).find((x) => x.secretType === "aws-access-key-id");
+    expect(f).toBeDefined();
+    expect(body.slice(f!.start, f!.end)).toBe(secret);
+  });
+
+  test("a trailing escape still closes the match", () => {
+    // An escape *starts* with a backslash, so the trailing boundary was never
+    // broken — pin that, since only the leading anchor was widened.
+    const f = scanText(`key ${"AKIAZQ3DRSTUVWXY2345"}${BS}nthanks`);
+    expect(f.some((x) => x.secretType === "aws-access-key-id")).toBe(true);
+  });
+
+  test("widening does not weaken the boundary for real word characters", () => {
+    // The anchor must still reject a secret glued to preceding word chars, or
+    // the fix would trade a miss for a false-positive class.
+    for (const prefix of ["FOO", "x", "9", "_"]) {
+      const f = scanText(`${prefix}AKIAZQ3DRSTUVWXY2345`);
+      expect(f.some((x) => x.secretType === "aws-access-key-id")).toBe(false);
+    }
+  });
+
+  test("masking is length-preserving, or every finding offset would shift", () => {
+    // The whole design rests on this: spans index the raw bytes that
+    // redact-on-capture and the store slice.
+    for (const s of [
+      String.raw`a\nb`, String.raw`Ax`, String.raw`\t\r\n`, String.raw`a\\nb`,
+      String.raw`q\"quoted\"`, "no escapes at all", String.raw`\\`,
+      "dangling" + BS, // a lone trailing backslash must not throw or resize
+    ]) {
+      expect(maskJsonEscapes(s).length).toBe(s.length);
+    }
+  });
+
+  test("masking blanks only word-tailed escapes, and tokenizes left to right", () => {
+    expect(maskJsonEscapes(String.raw`key\nAKIA`)).toBe("key  AKIA");
+    expect(maskJsonEscapes(`key${BS}u000aAKIA`)).toBe("key" + " ".repeat(6) + "AKIA");
+    // `\"` and `\\` already end in a non-word char — left intact so the stored
+    // JSON keeps its shape.
+    expect(maskJsonEscapes(String.raw`key\"AKIA`)).toBe(String.raw`key\"AKIA`);
+    // In `\\n` the `n` is literal text, not an escape: consuming `\\` first
+    // keeps it suppressing the boundary.
+    expect(maskJsonEscapes(String.raw`key\\nAKIA`)).toBe(String.raw`key\\nAKIA`);
+  });
+
+  test("rules stay data — the fix touches no regex, so the pin still holds", () => {
+    // R5/§6.11: the widening lives in the engine, not the vendored corpus.
+    const raw = readFileSync("rules/beagle-rules.json", "utf8");
+    const pin = readFileSync("rules/beagle-rules.sha256", "utf8").trim();
+    expect(() => loadRuleFile(raw, pin)).not.toThrow();
   });
 });
 
