@@ -134,15 +134,19 @@ interface OtlpRecord {
 const CONTENT_EVENTS = new Set(["user_prompt", "tool_result", "assistant_response", "api_request"]);
 
 // Claude Code fires internal side-calls that REUSE the user turn's session.id +
-// prompt.id but carry a non-user query_source — session-title generation today
-// (a haiku call whose response is `{"title": …}`), likely more later. Left in,
-// they fold into the turn: their tokens sum in, their model can win, and under
-// last-write-wins their response CLOBBERS the real reply (verified live — a
-// `generate_session_title` response overwriting the answer is exactly why some
-// captured turns showed a title JSON or went blank). Skip them by source. A
-// denylist, not an allowlist: an unrecognized source is kept as real content,
-// so we never silently drop a genuine reply.
-const INTERNAL_QUERY_SOURCES = new Set(["generate_session_title"]);
+// prompt.id but carry a non-user query_source. Verified live (raw OTLP dumps
+// from real interactive sessions):
+//   generate_session_title — haiku call, response `{"title": …}`
+//   prompt_suggestion      — the input-box ghost-text suggestion, emitted
+//                            co-batched AFTER the real answer
+// Left in, they fold into the turn: their tokens sum in, their model can win,
+// and under last-write-wins their response CLOBBERS the real reply — a
+// prompt_suggestion overwriting the answer is exactly why interactive turns
+// stored a next-prompt-looking sentence (or title JSON) instead of the reply.
+// Skip them by source. A denylist, not an allowlist: an unrecognized source is
+// kept as real content, so we never silently drop a genuine reply. The
+// BEAGLE_OTLP_DUMP diagnostic (receiver.ts) is how new ones get identified.
+const INTERNAL_QUERY_SOURCES = new Set(["generate_session_title", "prompt_suggestion"]);
 
 // Every level is array-guarded: a non-array container (object instead of []) is
 // treated as empty rather than throwing and discarding the whole payload.

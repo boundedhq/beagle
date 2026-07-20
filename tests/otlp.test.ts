@@ -149,6 +149,23 @@ describe("OTLP → Call mapping — Claude Code's real event schema (Mode B)", (
     expect(c.model).toBe("claude-opus-4-8");
   });
 
+  test("a prompt_suggestion side-call (emitted AFTER the answer, same batch) can't clobber the reply", () => {
+    // Verified live: interactively, Claude Code generates ghost-text input
+    // suggestions from the answer and emits them as assistant_response with
+    // query_source=prompt_suggestion — same session.id + prompt.id, co-batched
+    // AFTER the real reply, even carrying the same model. Under last-write-wins
+    // the stored "response" became the 27-char suggestion ("show me what's in
+    // my memory") instead of the 2000+-char answer — the exact interactive
+    // response-loss users hit.
+    const recs = [
+      event("user_prompt", { "session.id": "s", "prompt.id": "p", prompt: "how does your memory work?" }, "1720000000000000000"),
+      event("assistant_response", { "session.id": "s", "prompt.id": "p", model: "claude-opus-4-8", response: "the full multi-paragraph answer", query_source: "repl_main_thread" }, "1720000000100000000"),
+      event("assistant_response", { "session.id": "s", "prompt.id": "p", model: "claude-opus-4-8", response: "show me what's in my memory", query_source: "prompt_suggestion" }, "1720000000200000000"),
+    ];
+    const c = mapOtlpLogsToCalls(logs(recs), ctx)[0]!;
+    expect(c.response.text).toBe("the full multi-paragraph answer"); // NOT the suggestion
+  });
+
   test("an unrecognized query_source is kept (denylist, never drop a real reply)", () => {
     // Forward-safety: only KNOWN-internal sources are skipped. A future/unknown
     // source must fall through as real content, not vanish.
