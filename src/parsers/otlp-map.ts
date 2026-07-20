@@ -133,6 +133,17 @@ interface OtlpRecord {
 // api_refusal, …) is operational noise with no leak surface.
 const CONTENT_EVENTS = new Set(["user_prompt", "tool_result", "assistant_response", "api_request"]);
 
+// Claude Code fires internal side-calls that REUSE the user turn's session.id +
+// prompt.id but carry a non-user query_source — session-title generation today
+// (a haiku call whose response is `{"title": …}`), likely more later. Left in,
+// they fold into the turn: their tokens sum in, their model can win, and under
+// last-write-wins their response CLOBBERS the real reply (verified live — a
+// `generate_session_title` response overwriting the answer is exactly why some
+// captured turns showed a title JSON or went blank). Skip them by source. A
+// denylist, not an allowlist: an unrecognized source is kept as real content,
+// so we never silently drop a genuine reply.
+const INTERNAL_QUERY_SOURCES = new Set(["generate_session_title"]);
+
 // Every level is array-guarded: a non-array container (object instead of []) is
 // treated as empty rather than throwing and discarding the whole payload.
 const arr = <T>(x: unknown): T[] => (Array.isArray(x) ? (x as T[]) : []);
@@ -219,6 +230,9 @@ export function mapOtlpLogsToCalls(payload: unknown, ctx: OtlpContext): OtelCall
         const a = attrMap(rec.attributes);
         const name = str(a.get("event.name"));
         if (!name || !CONTENT_EVENTS.has(name)) continue;
+        // Drop internal side-calls before they touch the turn (response, model,
+        // and token counts all mis-attribute otherwise).
+        if (INTERNAL_QUERY_SOURCES.has(str(a.get("query_source")) ?? "")) continue;
         const sessionId = str(a.get("session.id"));
         const promptId = str(a.get("prompt.id"));
         // Group by turn. A content record with no prompt.id still gets its own

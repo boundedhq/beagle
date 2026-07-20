@@ -6,6 +6,8 @@
 // Code's PostToolUse hook, carrying the tool-output content its export omits).
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { mapHookToCall, mapOtlpLogsToCalls, type OtelCall } from "../../parsers/otlp-map";
 import { listenReady } from "../net/listen";
 
@@ -20,6 +22,7 @@ export interface OtlpReceiverOptions {
 export class OtlpReceiver {
   boundAddress = "";
   private server: Server | null = null;
+  private dumpSeq = 0;
 
   constructor(private opts: OtlpReceiverOptions) {}
 
@@ -72,11 +75,13 @@ export class OtlpReceiver {
     });
     req.on("end", () => {
       if (over) return;
+      const raw = Buffer.concat(chunks);
+      this.dumpRaw(isHook ? "hook" : "logs", raw);
       let payload: unknown;
       try {
         // Decode once from the assembled bytes — never coerce per chunk, which
         // would split multi-byte UTF-8 across boundaries and corrupt content.
-        payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        payload = JSON.parse(raw.toString("utf8"));
       } catch {
         res.writeHead(400).end("invalid json");
         return;
@@ -99,6 +104,24 @@ export class OtlpReceiver {
       // OTLP success envelope.
       res.writeHead(200, { "content-type": "application/json" }).end("{}");
     });
+  }
+
+  // Diagnostic escape hatch, off unless BEAGLE_OTLP_DUMP names a directory.
+  // Writes every received body there verbatim, before parsing — the only way to
+  // see what an agent's telemetry actually emits for a live interactive turn
+  // (Mode B response-fidelity debugging). Best-effort and fully swallowed: a
+  // dump failure must never disturb capture. Bodies may contain prompt/response
+  // content, so this is opt-in and points wherever the operator chooses.
+  private dumpRaw(route: string, bytes: Buffer): void {
+    const dir = process.env.BEAGLE_OTLP_DUMP;
+    if (!dir) return;
+    try {
+      mkdirSync(dir, { recursive: true });
+      const seq = String(++this.dumpSeq).padStart(4, "0");
+      writeFileSync(join(dir, `otlp-${seq}-${route}.json`), bytes);
+    } catch {
+      // diagnostic only — never surface into the capture path
+    }
   }
 
   private tokenOk(candidate: string): boolean {

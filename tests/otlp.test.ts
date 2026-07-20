@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { DisplayMessage } from "../src/parsers/parsers";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   mapOtlpLogsToCalls,
@@ -113,6 +114,49 @@ describe("OTLP → Call mapping — Claude Code's real event schema (Mode B)", (
       { role: "tool", content: 'Bash: {"cmd":"date"}', tool: "Bash", kind: "call" },
     ] as DisplayMessage[]);
     expect(decode(c.request.bodyBytes)).toBe('check the tz\n{"cmd":"date"}'); // prompt + tool input
+  });
+
+  test("an internal title-generation side-call (same prompt.id) never folds into the turn", () => {
+    // Claude Code emits a `generate_session_title` api_request + assistant_response
+    // that REUSE the user turn's session.id + prompt.id (verified live against a
+    // real `-p` capture: haiku title call, response `{"title": …}`, tokens 511/12).
+    // It must not touch the turn's response, model, or token counts.
+    const recs = [
+      event("user_prompt", { "session.id": "s", "prompt.id": "p", prompt: "the real question" }, "1720000000000000000"),
+      event("api_request", { "session.id": "s", "prompt.id": "p", model: "claude-haiku-4-5", input_tokens: 511, output_tokens: 12, query_source: "generate_session_title" }, "1720000000100000000"),
+      event("assistant_response", { "session.id": "s", "prompt.id": "p", model: "claude-haiku-4-5", response: '{"title": "A Title"}', query_source: "generate_session_title" }, "1720000000150000000"),
+      event("api_request", { "session.id": "s", "prompt.id": "p", model: "claude-opus-4-8", input_tokens: 3024, output_tokens: 13, query_source: "sdk" }, "1720000000200000000"),
+      event("assistant_response", { "session.id": "s", "prompt.id": "p", model: "claude-opus-4-8", response: "the real answer", query_source: "sdk" }, "1720000000250000000"),
+    ];
+    const c = mapOtlpLogsToCalls(logs(recs), ctx)[0]!;
+    expect(c.response.text).toBe("the real answer"); // NOT the title JSON
+    expect(c.model).toBe("claude-opus-4-8"); // NOT the haiku title model
+    expect(c.meta.tokensIn).toBe(3024); // the title call's 511 excluded
+    expect(c.meta.tokensOut).toBe(13); // the title call's 12 excluded
+  });
+
+  test("the side-call can't clobber the answer even when emitted LAST (the dangerous order)", () => {
+    // The bug hid in `-p` only because the real answer happened to come last, so
+    // last-write-wins kept it. Batching/interactive ordering can put the title
+    // side-call last — this is the case that silently corrupted real turns.
+    const recs = [
+      event("user_prompt", { "session.id": "s", "prompt.id": "p", prompt: "real question" }, "1720000000000000000"),
+      event("assistant_response", { "session.id": "s", "prompt.id": "p", model: "claude-opus-4-8", response: "the real answer", query_source: "sdk" }, "1720000000100000000"),
+      event("assistant_response", { "session.id": "s", "prompt.id": "p", model: "claude-haiku-4-5", response: '{"title": "X"}', query_source: "generate_session_title" }, "1720000000200000000"),
+    ];
+    const c = mapOtlpLogsToCalls(logs(recs), ctx)[0]!;
+    expect(c.response.text).toBe("the real answer");
+    expect(c.model).toBe("claude-opus-4-8");
+  });
+
+  test("an unrecognized query_source is kept (denylist, never drop a real reply)", () => {
+    // Forward-safety: only KNOWN-internal sources are skipped. A future/unknown
+    // source must fall through as real content, not vanish.
+    const c = mapOtlpLogsToCalls(logs([
+      event("user_prompt", { "session.id": "s", "prompt.id": "p", prompt: "hi" }),
+      event("assistant_response", { "session.id": "s", "prompt.id": "p", response: "kept anyway", query_source: "some_future_source" }),
+    ]), ctx)[0]!;
+    expect(c.response.text).toBe("kept anyway");
   });
 
   test("operational events (hooks, mcp, plugin, tool_decision) produce no calls", () => {
@@ -624,6 +668,62 @@ describe("OtlpReceiver HTTP endpoint", () => {
     const c = got[0] as { request: { bodyBytes: Uint8Array } };
     // prompt is part of the scanned body for the turn
     expect(decode(c.request.bodyBytes)).toContain(prompt);
+  });
+});
+
+describe("OtlpReceiver — BEAGLE_OTLP_DUMP diagnostic (off by default)", () => {
+  let receiver: OtlpReceiver;
+  let got: unknown[];
+  let port: number;
+  let prev: string | undefined;
+  let dir: string;
+
+  beforeEach(async () => {
+    prev = process.env.BEAGLE_OTLP_DUMP;
+    dir = mkdtempSync(join(tmpdir(), "beagle-otlp-dump-"));
+    got = [];
+    receiver = new OtlpReceiver({ token: "t", onCalls: (exs) => got.push(...exs) });
+    port = await receiver.listen(0);
+  });
+  afterEach(() => {
+    receiver.close();
+    if (prev === undefined) delete process.env.BEAGLE_OTLP_DUMP;
+    else process.env.BEAGLE_OTLP_DUMP = prev;
+  });
+
+  const send = (path: string, body: string) =>
+    fetch(`http://127.0.0.1:${port}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-beagle-run": "t" },
+      body,
+    });
+
+  test("unset → nothing is written (the default is silent)", async () => {
+    delete process.env.BEAGLE_OTLP_DUMP;
+    await send("/v1/logs", JSON.stringify(logs(turnRecords())));
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  test("set → each body is written verbatim, route-tagged and sequenced", async () => {
+    process.env.BEAGLE_OTLP_DUMP = dir;
+    const body1 = JSON.stringify(logs(turnRecords({ prompt: "first turn" })));
+    await send("/v1/logs", body1);
+    await send("/v1/hook", JSON.stringify({ session_id: "s", tool_name: "Bash", tool_input: { command: "x" }, tool_response: "y" }));
+    expect(readdirSync(dir).sort()).toEqual(["otlp-0001-logs.json", "otlp-0002-hook.json"].sort());
+    // verbatim: the dumped bytes equal exactly what was POSTed, so the raw OTLP
+    // stream can be inspected byte-for-byte — the whole point of the diagnostic.
+    expect(readFileSync(join(dir, "otlp-0001-logs.json"), "utf8")).toBe(body1);
+  });
+
+  test("an unwritable dump path never disturbs capture (best-effort, swallowed)", async () => {
+    // parent is a regular file → mkdir/write throws; the POST must still 200 and
+    // the call must still be delivered. Capture never fails because of a dump.
+    const file = join(dir, "not-a-dir");
+    writeFileSync(file, "x");
+    process.env.BEAGLE_OTLP_DUMP = join(file, "nested");
+    const r = await send("/v1/logs", JSON.stringify(logs(turnRecords())));
+    expect(r.status).toBe(200);
+    expect(got.length).toBe(1);
   });
 });
 
