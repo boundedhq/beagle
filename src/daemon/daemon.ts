@@ -525,9 +525,10 @@ export class Daemon {
       // that only ever appeared in a command's arguments — was scanned,
       // alerted and redacted, while `beagle search` answered "never sent": a
       // false negative on the one question search exists to answer
-      // definitively. Scan and search see the same surface now. Offset-redacted
-      // bytes, the copy the findings' spans index (the wire path does this too,
-      // see the redacted branch above), so the value scrub below no-ops on it.
+      // definitively. Search now covers the whole scanned surface rather than a
+      // truncated slice of it. Offset-redacted bytes, the copy the findings'
+      // spans index (the wire path does this too, see the redacted branch
+      // above), so the value scrub below no-ops on this half.
       const sent = new TextDecoder().decode(redaction ? redaction.requestBody : call.request.bodyBytes);
       // The response half is a SEPARATE question — whether search is outbound
       // only, which buildSearchText argues out for the wire path — and is left
@@ -554,6 +555,11 @@ export class Daemon {
       // What's appended above (and the summary) derives from the display
       // messages — flattened plain text, not the scanned bytes — so it scrubs
       // by value, not by the offsets, which don't index that text.
+      // KNOWN GAP, pre-dating this and shared with displayMessages below: the
+      // values are the RAW forms the scanner matched, so a secret whose raw
+      // form carries JSON escapes (a PEM's \\n inside a JSON-encoded prompt)
+      // does not literal-match the flattened copy and survives this scrub.
+      // The offset-redacted bytes above are unaffected; only derived text is.
       if (redaction) searchText = redaction.heldOut ? "" : redactValuesInText(searchText, redaction.values);
       const summary = redaction?.heldOut
         ? "[REDACTION INCOMPLETE: content withheld]"
