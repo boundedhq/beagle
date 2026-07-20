@@ -1,0 +1,27 @@
+{"timestamp":"2026-07-20T21:32:43.750Z","type":"session_meta","payload":{"session_id":"019f8171-e92f-72f0-8333-6333cb5a8c0d","id":"019f8171-e92f-72f0-8333-6333cb5a8c0d","cli_version":"0.144.6","originator":"codex_exec","source":"exec"}}
+{"timestamp":"2026-07-20T21:32:43.751Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-a"}}
+{"timestamp":"2026-07-20T21:32:43.760Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"[base instructions placeholder]"}]}}
+{"timestamp":"2026-07-20T21:32:43.761Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"[tools placeholder]"}]}}
+{"timestamp":"2026-07-20T21:32:43.770Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>/work/project</cwd>\n</environment_context>"}]}}
+{"timestamp":"2026-07-20T21:32:43.780Z","type":"world_state","payload":{"full":true}}
+{"timestamp":"2026-07-20T21:32:43.790Z","type":"turn_context","payload":{"turn_id":"turn-a","model":"gpt-5.6-sol","effort":"medium"}}
+{"timestamp":"2026-07-20T21:32:43.800Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Reply with exactly this token and nothing else: ALPHA111"}]}}
+{"timestamp":"2026-07-20T21:32:43.801Z","type":"event_msg","payload":{"type":"user_message"}}
+{"timestamp":"2026-07-20T21:32:45.500Z","type":"event_msg","payload":{"type":"agent_message"}}
+{"timestamp":"2026-07-20T21:32:45.500Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ALPHA111"}]}}
+{"timestamp":"2026-07-20T21:32:45.510Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200,"output_tokens":4}}}}
+{"timestamp":"2026-07-20T21:32:45.520Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-a"}}
+{"timestamp":"2026-07-20T21:37:31.293Z","type":"event_msg","payload":{"type":"token_count","info":{}}}
+{"timestamp":"2026-07-20T21:37:31.302Z","type":"event_msg","payload":{"type":"thread_rolled_back"}}
+{"timestamp":"2026-07-20T21:39:23.680Z","type":"event_msg","payload":{"type":"thread_settings_applied"}}
+{"timestamp":"2026-07-20T21:39:23.685Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-b"}}
+{"timestamp":"2026-07-20T21:39:23.693Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"[base instructions placeholder]"}]}}
+{"timestamp":"2026-07-20T21:39:23.693Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>/work/project</cwd>\n</environment_context>"}]}}
+{"timestamp":"2026-07-20T21:39:23.693Z","type":"world_state","payload":{"full":true}}
+{"timestamp":"2026-07-20T21:39:23.693Z","type":"turn_context","payload":{"turn_id":"turn-b","model":"gpt-5.6-sol","effort":"medium"}}
+{"timestamp":"2026-07-20T21:39:23.700Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Reply with exactly this token and nothing else: BRAVO222"}]}}
+{"timestamp":"2026-07-20T21:39:23.700Z","type":"event_msg","payload":{"type":"user_message"}}
+{"timestamp":"2026-07-20T21:39:26.494Z","type":"event_msg","payload":{"type":"agent_message"}}
+{"timestamp":"2026-07-20T21:39:26.494Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"BRAVO222"}]}}
+{"timestamp":"2026-07-20T21:39:26.506Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1300,"output_tokens":4}}}}
+{"timestamp":"2026-07-20T21:39:26.520Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-b"}}

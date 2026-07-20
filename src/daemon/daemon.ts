@@ -24,6 +24,7 @@ import { ViewerServer } from "../viewer/server";
 import { OtlpReceiver } from "../core/otlp/receiver";
 import { BEAGLE_VERSION } from "../core/version";
 import type { OtelCall } from "../parsers/otlp-map";
+import { CodexRolloutWatcher } from "../adapters/codex-rollout-tailer";
 // Embedded at build time so the compiled binary needs no repo checkout.
 // (bun-types types *.json as a parsed object; with { type: "text" } the
 // runtime value is the raw string — required for the sha256 pin to verify.)
@@ -53,6 +54,9 @@ export interface DaemonOptions {
   pendingTtlMs?: number;
   /** Override the sweep cadence (default 15 min) — tests only. */
   sweepIntervalMs?: number;
+  /** Point the Codex rollout watcher at a fixed sessions root (default: resolve
+   *  from CODEX_HOME / ~/.codex) — tests only. */
+  codexRolloutRootForTest?: string;
 }
 
 interface PendingCall {
@@ -95,6 +99,9 @@ export class Daemon {
   private notifier = new Notifier();
   private viewer: ViewerServer | null = null;
   private otlp: OtlpReceiver | null = null;
+  // Reads Codex rollout files to recover the assistant answer its OTel export
+  // omits, stitching it onto the turn row. Driven by ingestOtel (Codex activity).
+  private codexRollout: CodexRolloutWatcher | null = null;
   otlpPort = 0;
   private otlpToken = "";
   private pending = new Map<string, PendingCall>();
@@ -154,6 +161,11 @@ export class Daemon {
       token: d.otlpToken,
       onCalls: (exs) => void d.track(d.ingestOtel(exs)),
     });
+    // The tailer's answers re-enter the same ingest path (tracked for the drain).
+    d.codexRollout = new CodexRolloutWatcher({
+      emit: (calls) => void d.track(d.ingestOtel(calls)),
+      sessionsRoot: opts.codexRolloutRootForTest,
+    });
     try {
       // Any bind can fail (EADDRINUSE, etc.). Close everything already open
       // so a failed start doesn't strand the store handle, scanner worker, or
@@ -206,6 +218,7 @@ export class Daemon {
     if (this.sweeper) clearInterval(this.sweeper);
     this.viewer?.stop();
     this.otlp?.close();
+    this.codexRollout?.stop(); // stop the pollers before draining in-flight ingests
     this.proxy.close();
     this.control.close();
     // Listeners are closed (no new work starts — the pipeline entry points
@@ -567,15 +580,24 @@ export class Daemon {
       //
       // Held-out redaction also falls through: its "[REDACTION INCOMPLETE]"
       // placeholder must not overwrite the turn row's real summary.
-      if (
-        call.promptId &&
+      // Rollout-sourced answers (origin='codex-rollout') are inbound-only and
+      // ATTACH-OR-DROP — never a standalone row (design §6.1a): on an attach
+      // miss (race) or held-out scan we drop, avoiding an answer-with-no-question
+      // row and a duplicate on daemon restart. Their text is also kept OUT of the
+      // outbound search index (§6.1b), or `beagle search` would report the
+      // model's reply as "sent".
+      const fromRollout = call.origin === "codex-rollout";
+      const responseOnly =
+        Boolean(call.promptId) &&
         !call.request.messages?.length &&
         call.request.bodyBytes.byteLength === 0 &&
-        call.response.text &&
+        Boolean(call.response.text);
+      if (
+        responseOnly &&
         !redaction?.heldOut &&
         this.store.attachOtelResponse({
           sessionId: resolution.sessionId,
-          promptKey: call.promptId,
+          promptKey: call.promptId!,
           tsResponse: call.meta.tsResponse ?? call.meta.tsRequest,
           model: call.model,
           tokensIn: call.meta.tokensIn,
@@ -591,11 +613,14 @@ export class Daemon {
             existing ? `"${firstLine(existing, 40)}" → ${firstLine(summary, 80)}` : summary,
           redacted: redaction?.redacted ?? false,
           responseBody: redaction ? redaction.responseBody : (call.response.bodyBytes ?? null),
-          searchAppend: searchText,
+          searchAppend: fromRollout ? "" : searchText,
         })
       ) {
         continue;
       }
+      // Attach failed (or was skipped for heldOut): a rollout answer drops here
+      // instead of falling through to insertCall as an orphan/duplicate row.
+      if (responseOnly && fromRollout) continue;
       this.store.insertCall({
         id: call.id,
         sessionId: resolution.sessionId,
@@ -657,6 +682,14 @@ export class Daemon {
         source: "otel",
         hasLeak: scanResult.findings.length > 0, // scan completed above — final
       });
+      // A real (non-rollout) Codex OTel call means that conversation is live —
+      // ensure a rollout tailer for it. Triggered here, AFTER the turn row is
+      // written, so the tailer's answer attaches instead of racing the insert.
+      // This is both the trigger and the authorization to read that one
+      // session's file (design §5).
+      if (call.agent === "codex" && call.convId && call.origin !== "codex-rollout") {
+        this.codexRollout?.onActivity(call.convId);
+      }
     }
   }
 
