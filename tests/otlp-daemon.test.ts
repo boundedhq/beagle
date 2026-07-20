@@ -109,6 +109,24 @@ describe("Mode B end-to-end through the daemon", () => {
     store.close();
   });
 
+  test("Mode B search is OUTBOUND-only: a string only the model said is not a hit", async () => {
+    // The same invariant the wire path holds (buildSearchText): `beagle search`
+    // answers "was this SENT", so a hit is proof it left the machine. A token
+    // that appears ONLY in a Claude Code answer must not be reportable as sent
+    // — indexing call.response.text here made model-generated text look
+    // outbound, and Mode B is the path where most agent answers arrive.
+    await post(otlpBody(token, "what is in the readme?", "otel-conv-dir", "the readme mentions zqxjkvbrwn"));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    expect(store.searchLiteral("zqxjkvbrwn")).toEqual([]); // response-only token: never sent
+    const byPrompt = store.searchLiteral("what is in the readme?");
+    expect(byPrompt.length).toBe(1); // the prompt was
+    // The answer is still captured — withheld from the index, not from the row.
+    const call = store.getCall(byPrompt[0]!.callId)!;
+    expect(new TextDecoder().decode(call.responseBody!)).toContain("zqxjkvbrwn");
+    store.close();
+  });
+
   test("Mode B call persists its display messages for the session transcript", async () => {
     await post(otlpBody(token, "please read the readme"));
     await settled(daemon.socketPath);
@@ -201,23 +219,23 @@ describe("Mode B end-to-end through the daemon", () => {
     await post(otlpBody(token, "how does memory work?", "otel-conv-stitch", null));
     await settled(daemon.socketPath);
     await post(otlpBody(token, null, "otel-conv-stitch", "memory works like this"));
-    // The stitch adds no new call row, so poll the observable outcome — the
-    // answer text reaching the search index — rather than the call count.
+    // The stitch adds no new call row, and it deliberately leaves the search
+    // index alone (outbound-only), so poll the summary — the composed
+    // `"question" → answer` is the observable that only a stitch produces.
     await waitFor(() => {
       const s = Store.openReadOnly(stateDir);
       try {
-        return s.searchLiteral("memory works like this").length > 0;
+        return listCalls(s, 50).some((c) => (c.summary ?? "").includes("→"));
       } finally {
         s.close();
       }
     }, "the response to be stitched into the store");
     const store = Store.openReadOnly(stateDir);
-    // question and answer resolve to the SAME row…
     const byPrompt = store.searchLiteral("how does memory work")[0]!;
-    const byAnswer = store.searchLiteral("memory works like this")[0]!;
-    expect(byAnswer.callId).toBe(byPrompt.callId);
     const call = store.getCall(byPrompt.callId)!;
+    // The answer reached the row… but never the index (search is outbound-only).
     expect(new TextDecoder().decode(call.responseBody!)).toContain("memory works like this");
+    expect(store.searchLiteral("memory works like this")).toEqual([]);
     expect(call.model).toBe("claude-sonnet-5");
     expect(call.tokensIn).toBe(100); // 50 (prompt batch) + 50 (response batch)
     expect(call.tokensOut).toBe(8);
@@ -306,8 +324,11 @@ describe("Mode B end-to-end through the daemon", () => {
     await settled(daemon.socketPath);
     const store = Store.openReadOnly(stateDir);
     expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
-    const hit = store.searchLiteral("your key is")[0]!;
-    const call = store.getCall(hit.callId)!;
+    // Located by row, not by search: this batch sent nothing, so it is indexed
+    // under nothing — its content is response-side only.
+    const rows = listCalls(store, 50);
+    expect(rows.length).toBe(1); // pin the row this assertion is about
+    const call = store.getCall(rows[0]!.id)!;
     expect(call.redacted).toBe(true);
     expect(new TextDecoder().decode(call.responseBody!)).toContain("[REDACTED:aws-access-key-id:");
     expect(call.summary).not.toContain("AKIAZQ3DRSTUVWXY2345");

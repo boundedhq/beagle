@@ -4,6 +4,7 @@
 // module and the loopback receiver — Claude Code's (below) and Codex's
 // (`codex.*`, further down); the payload's event names discriminate.
 import { sanitizeTool, type DisplayMessage } from "./parsers";
+import { codexPromptKey } from "./codex-rollout";
 //
 // Claude Code's real schema (verified live against 2.1.193; scope
 // "com.anthropic.claude_code.events"). This is NOT the OpenTelemetry GenAI
@@ -40,9 +41,13 @@ interface AttrValue {
 export interface OtelCall extends Call {
   convId?: string;
   runToken?: string;
-  /** Claude Code's per-turn prompt.id — the daemon stitches a later-batch
-   *  response back onto its turn row with it. */
+  /** Per-turn stitch key. Claude Code's own prompt.id; for Codex, a hash of the
+   *  user prompt (codexPromptKey) so a rollout answer rejoins its turn row. */
   promptId?: string;
+  /** Set only by the Codex rollout tailer, so the daemon's response-only branch
+   *  treats it as attach-or-DROP (never a standalone row) and keeps the answer
+   *  out of the outbound search index. See codex-rollout-tailer.ts / design §6.1. */
+  origin?: "codex-rollout";
 }
 
 function attrMap(attrs: Array<{ key: string; value: AttrValue }> | undefined): Map<string, AttrValue> {
@@ -323,6 +328,9 @@ function buildCodexCall(o: {
   endpoint: string;
   scanText: string;
   display: DisplayMessage;
+  /** Stitch key — set only on the user_prompt row so the rollout answer has a
+   *  target; tool_result rows leave it undefined and are not attach targets. */
+  promptId?: string;
 }): OtelCall {
   return {
     id: ulid(o.ts),
@@ -342,6 +350,7 @@ function buildCodexCall(o: {
     response: { text: "", bodyBytes: new Uint8Array() },
     meta: { tsRequest: o.ts, tsResponse: o.ts },
     convId: o.convId,
+    promptId: o.promptId,
   };
 }
 
@@ -402,6 +411,9 @@ function mapCodexRecords(records: OtlpRecord[]): OtelCall[] {
           endpoint: "otel:codex:user_prompt",
           scanText: prompt,
           display: { role: "user", content: flattenPromptText(prompt) },
+          // The rollout answer for this turn is keyed by hash(prompt); stamp the
+          // same key here so store.attachOtelResponse can find this row.
+          promptId: codexPromptKey(prompt),
         });
         out.push({ order: i, call });
         if (convId) promptByConv.set(convId, call);
