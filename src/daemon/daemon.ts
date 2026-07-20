@@ -551,6 +551,34 @@ export class Daemon {
             role: m.role,
             content: redaction ? redactValuesInText(String(m.content), redaction.values) : String(m.content),
           }));
+      // Cross-batch turn stitching: Claude Code flushes the prompt in one OTLP
+      // batch and the response seconds later in another. A response-only
+      // partial (no prompt, no tool inputs — nothing outbound to scan or
+      // alert on) rejoins its stored turn row instead of landing as a
+      // detached answer the feed can't line up with its question. Held-out
+      // redaction falls through: its "[REDACTION INCOMPLETE]" placeholder
+      // must not overwrite the turn row's real summary.
+      if (
+        call.promptId &&
+        !call.request.messages?.length &&
+        call.request.bodyBytes.byteLength === 0 &&
+        call.response.text &&
+        !redaction?.heldOut &&
+        this.store.attachOtelResponse({
+          sessionId: resolution.sessionId,
+          promptKey: call.promptId,
+          tsResponse: call.meta.tsResponse ?? call.meta.tsRequest,
+          model: call.model,
+          tokensIn: call.meta.tokensIn,
+          tokensOut: call.meta.tokensOut,
+          summary,
+          redacted: redaction?.redacted ?? false,
+          responseBody: redaction ? redaction.responseBody : (call.response.bodyBytes ?? null),
+          searchAppend: searchText,
+        })
+      ) {
+        continue;
+      }
       this.store.insertCall({
         id: call.id,
         sessionId: resolution.sessionId,
@@ -579,6 +607,7 @@ export class Daemon {
         sseRaw: null,
         displayMessages: displayMessages?.length ? displayMessages : null,
         searchText,
+        promptKey: call.promptId,
       });
       this.alertEngine.process(
         {

@@ -39,6 +39,7 @@ export interface CallRecord {
   sessionTier: string;
   redacted?: boolean; // true when redact-on-capture rewrote the stored body
   oneShot?: boolean; // stateless utility turn (e.g. title-gen) — no conversation identity
+  promptKey?: string; // Mode B: per-turn prompt id (cross-batch turn stitching)
   requestBody: Uint8Array | null;
   requestHeaders: Array<[string, string]> | null;
   responseBody: Uint8Array | null;
@@ -163,13 +164,13 @@ export class Store {
       this.db.run(
         `INSERT INTO exchanges (id, session_id, run_id, source, agent, provider, model,
            endpoint, ts_request, ts_response, status, tokens_in, tokens_out,
-           bytes_req, bytes_resp, summary, scan_state, capture_state, session_tier, redacted, one_shot)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           bytes_req, bytes_resp, summary, scan_state, capture_state, session_tier, redacted, one_shot, prompt_key)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [call.id, call.sessionId, call.runId, call.source, call.agent ?? null, call.provider ?? null,
          call.model ?? null, call.endpoint ?? null, call.tsRequest, call.tsResponse ?? null,
          call.status ?? null, call.tokensIn ?? null, call.tokensOut ?? null, call.bytesReq ?? null,
          call.bytesResp ?? null, call.summary ?? null, call.scanState, call.captureState, call.sessionTier,
-         call.redacted ? 1 : null, call.oneShot ? 1 : null],
+         call.redacted ? 1 : null, call.oneShot ? 1 : null, call.promptKey ?? null],
       );
       this.db.run(
         `INSERT INTO payloads (exchange_id, request_body, request_headers,
@@ -180,6 +181,56 @@ export class Store {
       );
       this.db.run(`INSERT INTO exchanges_fts (content, exchange_id) VALUES (?,?)`,
         [call.searchText, call.id]);
+    });
+  }
+
+  // Mode B cross-batch turn stitching: Claude Code flushes a turn's prompt in
+  // one OTLP batch and its response ~seconds later in another, which used to
+  // land as two rows (question with no answer + detached answer). Rejoin the
+  // response to its turn row via (session, prompt_key). Returns false when no
+  // response-less turn row matches — the caller falls back to inserting the
+  // partial as its own row (the old behavior, nothing is ever dropped).
+  attachOtelResponse(input: {
+    sessionId: string;
+    promptKey: string;
+    tsResponse: number;
+    model?: string;
+    tokensIn?: number;
+    tokensOut?: number;
+    summary?: string;
+    redacted?: boolean;
+    responseBody: Uint8Array | null;
+    searchAppend: string;
+  }): boolean {
+    return this.inTx(() => {
+      // Newest response-less turn row for this (session, prompt id). bytes_resp
+      // guards double-attach: a second response for an already-answered turn
+      // stays a separate row rather than silently overwriting the first.
+      const target = this.db.get<{ id: string; tokens_in: number | null; tokens_out: number | null }>(
+        `SELECT id, tokens_in, tokens_out FROM exchanges
+         WHERE session_id=? AND prompt_key=? AND source='otel'
+           AND (bytes_resp IS NULL OR bytes_resp=0)
+         ORDER BY id DESC LIMIT 1`,
+        [input.sessionId, input.promptKey],
+      );
+      if (!target) return false;
+      this.db.run(
+        `UPDATE exchanges SET ts_response=?, model=COALESCE(?, model),
+           tokens_in=?, tokens_out=?, bytes_resp=?, summary=COALESCE(?, summary),
+           redacted=CASE WHEN ? THEN 1 ELSE redacted END
+         WHERE id=?`,
+        [input.tsResponse, input.model ?? null,
+         addNullable(target.tokens_in, input.tokensIn), addNullable(target.tokens_out, input.tokensOut),
+         input.responseBody?.byteLength ?? 0, input.summary ?? null,
+         input.redacted ? 1 : 0, target.id],
+      );
+      this.db.run(`UPDATE payloads SET response_body=? WHERE exchange_id=?`,
+        [input.responseBody, target.id]);
+      // The turn's search row gains the response text (same shape a one-batch
+      // turn would have been indexed with).
+      this.db.run(`UPDATE exchanges_fts SET content = content || ? WHERE exchange_id=?`,
+        [input.searchAppend, target.id]);
+      return true;
     });
   }
 
@@ -444,6 +495,14 @@ function migrate(db: Db, from: number): void {
   }
   if (from < 3) add("payloads", "display_messages TEXT");
   if (from < 4) add("exchanges", "one_shot INTEGER");
+  if (from < 5) add("exchanges", "prompt_key TEXT");
+}
+
+// Token counts stay NULL when neither side reported one — 0 would read as
+// "measured zero tokens" in the viewer rather than "not reported".
+function addNullable(a: number | null, b: number | undefined): number | null {
+  if (a === null && b === undefined) return null;
+  return (a ?? 0) + (b ?? 0);
 }
 
 function escapeLike(s: string): string {
@@ -473,6 +532,7 @@ function rowToCall(r: Record<string, unknown>): CallRecord {
     sessionTier: r.session_tier as string,
     redacted: Boolean(r.redacted),
     oneShot: Boolean(r.one_shot),
+    promptKey: (r.prompt_key as string) ?? undefined,
     requestBody: (r.request_body as Uint8Array) ?? null,
     requestHeaders: r.request_headers ? JSON.parse(r.request_headers as string) : null,
     responseBody: (r.response_body as Uint8Array) ?? null,

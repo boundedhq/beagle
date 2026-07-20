@@ -40,6 +40,9 @@ interface AttrValue {
 export interface OtelCall extends Call {
   convId?: string;
   runToken?: string;
+  /** Claude Code's per-turn prompt.id — the daemon stitches a later-batch
+   *  response back onto its turn row with it. */
+  promptId?: string;
 }
 
 function attrMap(attrs: Array<{ key: string; value: AttrValue }> | undefined): Map<string, AttrValue> {
@@ -112,6 +115,7 @@ function flattenPromptText(raw: string): string {
 interface Turn {
   order: number; // first-seen index, for stable output ordering
   sessionId?: string;
+  promptId?: string;
   tsNano?: number;
   prompt?: string;
   tools: Array<{ name?: string; input: string }>;
@@ -207,14 +211,16 @@ function buildTurnCall(t: Turn, ctx: OtlpContext): OtelCall {
     },
     meta: { tsRequest: ts, tsResponse: ts, tokensIn: t.tokensIn, tokensOut: t.tokensOut },
     convId: t.sessionId,
+    promptId: t.promptId,
   };
 }
 
 // Reassemble Claude Code's split event stream into one Call per user turn.
 // Malformed input degrades to [] (R3). Correlation is per DELIVERED PAYLOAD:
 // a turn whose events span multiple OTLP POST batches yields a partial Call
-// per batch (prompt-only, then response-only) — the scanner + fingerprint
-// dedup make that harmless (all content is scanned, no double alert).
+// per batch (prompt-only, then response-only). Scanning stays sound either way
+// (all content scanned, fingerprint dedup); the daemon rejoins a response-only
+// partial to its stored turn row via promptId (store.attachOtelResponse).
 export function mapOtlpLogsToCalls(payload: unknown, ctx: OtlpContext): OtelCall[] {
   try {
     const records = collectRecords(payload);
@@ -243,7 +249,7 @@ export function mapOtlpLogsToCalls(payload: unknown, ctx: OtlpContext): OtelCall
         const key = promptId ? `${sessionId ?? ""}::${promptId}` : `${sessionId ?? ""}::orphan-${i}`;
         let turn = turns.get(key);
         if (!turn) {
-          turn = { order: i, sessionId, tools: [] };
+          turn = { order: i, sessionId, promptId, tools: [] };
           turns.set(key, turn);
         }
         const ns = recordNano(rec);

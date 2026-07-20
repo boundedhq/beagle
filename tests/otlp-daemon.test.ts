@@ -193,6 +193,39 @@ describe("Mode B end-to-end through the daemon", () => {
     store.close();
   });
 
+  test("a response arriving in a later OTLP batch rejoins its turn row (cross-batch stitch)", async () => {
+    // The real interactive pattern (verified live against Claude Code 2.1.193):
+    // the prompt flushes in its own batch ~1s after Enter; the answer lands in
+    // another batch ~18s later. One turn must be ONE row — not a question with
+    // no answer plus a detached answer the feed can't line up.
+    await post(otlpBody(token, "how does memory work?", "otel-conv-stitch", null));
+    await settled(daemon.socketPath);
+    await post(otlpBody(token, null, "otel-conv-stitch", "memory works like this"));
+    // The stitch adds no new call row, so poll the observable outcome — the
+    // answer text reaching the search index — rather than the call count.
+    await waitFor(() => {
+      const s = Store.openReadOnly(stateDir);
+      try {
+        return s.searchLiteral("memory works like this").length > 0;
+      } finally {
+        s.close();
+      }
+    }, "the response to be stitched into the store");
+    const store = Store.openReadOnly(stateDir);
+    // question and answer resolve to the SAME row…
+    const byPrompt = store.searchLiteral("how does memory work")[0]!;
+    const byAnswer = store.searchLiteral("memory works like this")[0]!;
+    expect(byAnswer.callId).toBe(byPrompt.callId);
+    const call = store.getCall(byPrompt.callId)!;
+    expect(new TextDecoder().decode(call.responseBody!)).toContain("memory works like this");
+    expect(call.model).toBe("claude-sonnet-5");
+    expect(call.tokensIn).toBe(100); // 50 (prompt batch) + 50 (response batch)
+    expect(call.tokensOut).toBe(8);
+    // …and it stayed ONE row: no detached response-only exchange was created.
+    expect(listCalls(store, 50).length).toBe(1);
+    store.close();
+  });
+
   test("redact-on-capture scrubs a secret echoed in a response-only batch", async () => {
     await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
     // The prompt that leaked the key rode an earlier batch; this batch carries
