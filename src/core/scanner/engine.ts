@@ -52,11 +52,27 @@ const MAX_FINDINGS_PER_RULE = 500;
 // with a leading lookaround instead costs ~100x scan time (V8 can no longer
 // fast-scan for the literal prefix) and blows the R5 budget.
 //
-// `\\` and `\"` are matched but left alone — they already end in a non-word
-// char. Consuming them still matters for correct left-to-right tokenizing:
-// in `\\n` the `n` is literal text, not an escape, and must keep suppressing
-// the boundary.
-const JSON_ESCAPE = /\\(?:u[0-9a-fA-F]{4}|[\s\S])/g;
+// Only the escapes JSON actually defines are recognized. A backslash before
+// anything else is literal text — a Windows path (`C:\creds\AKIA…`), a regex,
+// a LaTeX macro — and blanking it would EAT the secret's own first character
+// and turn a detection into a miss.
+//
+// `\\`, `\"` and `\/` are matched but left alone: they already end in a
+// non-word char. Consuming them still matters for correct left-to-right
+// tokenizing — in `\\n` the `n` is literal text, not an escape, and must keep
+// suppressing the boundary.
+//
+// KNOWN GAP (accepted): a body that is NOT JSON can carry a bare backslash
+// that looks exactly like an escape, and nothing here can tell the two apart.
+// A secret whose FIRST character is b/f/n/r/t, sitting immediately after such
+// a backslash, loses that character to the mask and is missed — of the
+// structured rules only `npm-token` starts with one (`C:\creds\npm_…`).
+// Valid JSON must write that backslash as `\\`, which tokenizes correctly, so
+// this cannot bite a real JSON body. Closing it needs either a second pass
+// over the raw view (~2x scan time on the JSON traffic beagle mostly sees) or
+// a content-type threaded down to the scanner; neither is worth it for one
+// rule in a shape that does not occur in practice.
+const JSON_ESCAPE = /\\(?:u[0-9a-fA-F]{4}|[bfnrt"\\/])/g;
 
 export function maskJsonEscapes(text: string): string {
   if (!text.includes("\\")) return text; // fast path: nothing to mask

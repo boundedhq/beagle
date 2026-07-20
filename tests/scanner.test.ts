@@ -230,6 +230,43 @@ describe("JSON-escape-prefixed secrets (leading-boundary regression)", () => {
     }
   });
 
+  test("a backslash that is NOT a JSON escape is left alone", () => {
+    // Regression: masking `\A` as though it were an escape would blank the
+    // key's own first character and turn a detection into a miss. Only the
+    // escapes JSON defines may be masked.
+    const K = "AKIAZQ3DRSTUVWXY2345";
+    for (const text of [`C:${BS}creds${BS}${K}`, `cred=${BS}${K}`, `match ${BS}${K}`]) {
+      expect(maskJsonEscapes(text)).toBe(text); // untouched
+      expect(scanText(text).some((f) => f.secretType === "aws-access-key-id")).toBe(true);
+    }
+  });
+
+  test("known gap: a bare backslash in a NON-JSON body can still eat a b/f/n/r/t head", () => {
+    // Accepted limitation, pinned so it stays a decision and not a surprise.
+    // `npm_` is the only structured rule whose secret starts with one of the
+    // escape letters, so `\` + `npm_…` tokenizes as `\n` and loses the `n`.
+    const NPM = "npm_Zx9Yw8Vu7Tt6Ss5Rr4Qq3Pp2Oo1Nn0MmLl2K";
+    expect(scanText(`C:${BS}creds${BS}${NPM}`).some((f) => f.secretType === "npm-token")).toBe(false);
+    // In real JSON that backslash MUST be doubled — and then it works.
+    expect(scanText(`C:${BS}${BS}creds${BS}${BS}${NPM}`).some((f) => f.secretType === "npm-token")).toBe(true);
+    // No other structured rule starts with b/f/n/r/t, so nothing else regresses.
+    expect(scanText(`C:${BS}creds${BS}AKIAZQ3DRSTUVWXY2345`).some((f) => f.secretType === "aws-access-key-id")).toBe(true);
+  });
+
+  test("escape-prefixed decoys stay silent at every tier", () => {
+    // The FP side of the trade. Masking adds boundaries, which widens what the
+    // quiet entropy rules can see — every clean/out-of-scope corpus case must
+    // still produce nothing once it follows an escape.
+    const corpus: { cases: Array<{ text: string; outcome: string }> } = JSON.parse(
+      readFileSync("tests/fixtures/leakproof-corpus.json", "utf8"),
+    );
+    const decoys = corpus.cases.filter((c) => c.outcome !== "caught");
+    expect(decoys.length).toBeGreaterThan(0); // guard against a vacuous pass
+    for (const c of decoys) {
+      expect(scanText(JSON.stringify({ role: "user", content: `see below:\n${c.text}` }))).toEqual([]);
+    }
+  });
+
   test("masking is length-preserving, or every finding offset would shift", () => {
     // The whole design rests on this: spans index the raw bytes that
     // redact-on-capture and the store slice.
