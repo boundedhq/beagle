@@ -40,6 +40,24 @@ function otlpBody(_token: string, prompt: string | null, sessionId = "otel-conv-
   };
 }
 
+// Codex speaks its own codex.* schema on the same receiver (scope
+// codex_otel.log_only) — mirrors the builders in otlp.test.ts.
+function codexEvent(name: string, attrs: Record<string, string | number>) {
+  return {
+    timeUnixNano: "0",
+    observedTimeUnixNano: String(Date.now() * 1e6),
+    attributes: [
+      { key: "event.name", value: { stringValue: name } },
+      ...Object.entries(attrs).map(([key, value]) =>
+        typeof value === "number" ? { key, value: { intValue: value } } : { key, value: { stringValue: value } },
+      ),
+    ],
+  };
+}
+function codexLogs(records: unknown[]) {
+  return { resourceLogs: [{ scopeLogs: [{ scope: { name: "codex_otel.log_only" }, logRecords: records }] }] };
+}
+
 // The receiver 200s before the ingest pipeline (scan → insert → alert) runs,
 // so a fixed sleep races it under CI load.
 // Default stays under bun's 5s per-test timeout, so a real regression surfaces
@@ -305,6 +323,80 @@ describe("Mode B end-to-end through the daemon", () => {
     expect(content.length).toBeGreaterThan(4000);
     expect(content.length).toBeLessThan(4100);
     expect(content.endsWith("]")).toBe(true);
+    store.close();
+  });
+
+  test("a secret split across two tool_result CHUNKS is detected", async () => {
+    // codex streams one exec's output across several tool_result records. The
+    // grouping exists so a secret cut at a chunk seam is reassembled — but
+    // joining the chunks with "\n" put a newline exactly AT the seam, so the
+    // detector never matched and NOTHING fired: no alert, no redaction, raw
+    // halves in the body and the index. Worse than the display hole above,
+    // which at least alerted.
+    const chunk = (output: string) =>
+      codexEvent("codex.tool_result", {
+        "conversation.id": "otel-conv-split", call_id: "call-7",
+        tool_name: "exec_command", arguments: '{"cmd":"cat key.txt"}', output,
+      });
+    await post(codexLogs([chunk("the key is AKIAZQ3DRS"), chunk("TUVWXY2345 and the rest")]));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    expect(listLeakEvents(store).length).toBe(1); // reassembled → detected
+    const call = store.getCall(store.searchLiteral("cat key.txt")[0]!.callId)!;
+    expect(call.redacted).toBe(true);
+    const body = new TextDecoder().decode(call.requestBody!);
+    expect(body).not.toContain("AKIAZQ3DRSTUVWXY2345");
+    expect(body).toContain("[REDACTED:aws-access-key-id:");
+    store.close();
+  });
+
+  test("a secret straddling a CHUNK boundary is scrubbed from the transcript too", async () => {
+    // The display copy showed only the LAST chunk while the scan surface was
+    // every chunk joined, so the matched value was not a substring of the
+    // display text and the value scrub no-opped — the same failure class as
+    // the truncation hole, at a different boundary. The transcript now renders
+    // the whole reassembled output, so the scrub has the value to find.
+    const pemHead = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAchunkSeam";
+    const pemTail = "Regression\n-----END RSA PRIVATE KEY-----";
+    const chunk = (output: string) =>
+      codexEvent("codex.tool_result", {
+        "conversation.id": "otel-conv-seam", call_id: "call-9",
+        tool_name: "exec_command", arguments: '{"cmd":"cat id_rsa"}', output,
+      });
+    await post(codexLogs([chunk(pemHead), chunk(pemTail)]));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    expect(listLeakEvents(store).length).toBe(1);
+    const call = store.getCall(store.searchLiteral("cat id_rsa")[0]!.callId)!;
+    const dm = JSON.stringify(call.displayMessages);
+    expect(dm).not.toContain("MIIEowIBAAKCAQEAchunkSeam");
+    expect(dm).not.toContain("-----END RSA PRIVATE KEY-----");
+    expect(dm).toContain("[REDACTED:private-key:");
+    // …and the earlier chunk is rendered at all, not silently dropped.
+    expect(new TextDecoder().decode(call.requestBody!)).toContain("[REDACTED:private-key:");
+    store.close();
+  });
+
+  test("a long tool output with NO secret is still clamped", async () => {
+    // The straddling test above pins the clamp on the redacted path, where the
+    // cut runs to the end of a placeholder. This pins the ordinary path: no
+    // finding, nothing rewritten, and the transcript still must not grow to
+    // hold a whole `cat` of a large file. Without it the clamp could be lost
+    // for every non-secret result and only the redacted case would notice.
+    const output = "log line that says nothing secret\n".repeat(1000); // 34k chars
+    await post(codexLogs([
+      codexEvent("codex.tool_result", {
+        "conversation.id": "otel-conv-plain", call_id: "call-plain",
+        tool_name: "exec_command", arguments: '{"cmd":"cat build.log"}', output,
+      }),
+    ]));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    const call = store.getCall(store.searchLiteral("cat build.log")[0]!.callId)!;
+    // No placeholder to overshoot, so the clamp is exact — the whole display
+    // line, label included, is what DISPLAY_RESULT_CAP bounds.
+    const content = call.displayMessages![0]!.content;
+    expect(content).toBe(`exec_command: ${output}`.slice(0, 4000));
     store.close();
   });
 
