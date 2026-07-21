@@ -26,7 +26,12 @@ export interface RolloutAnswer {
   tsMs?: number;
   /** Which same-key turn this is (0-based): hash(prompt) is the only join key,
    *  so two turns asking the identical thing share it — the ordinal routes each
-   *  answer to its own row (store.attachOtelResponse extend.ordinal). */
+   *  answer to its own row (store.attachOtelResponse extend.ordinal). Counts
+   *  ANSWERED turns only (a tool-only turn yields no entry) while rows count
+   *  every prompt, so a SILENT same-key turn misaligns the two and the answer
+   *  lands on the earlier same-text row — the exact outcome the pre-ordinal
+   *  earliest-unanswered rule produced there. Accepted: same failure, same
+   *  rarity, and the ts staleness bound still refuses anything newer. */
   ordinal: number;
 }
 
