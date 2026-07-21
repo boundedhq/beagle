@@ -928,7 +928,7 @@ describe("Codex Mode B end-to-end through the daemon", () => {
     // The display copy of a tool result is capped (DISPLAY_RESULT_CAP, applied
     // by the daemon) and carries no arguments at all. Indexing that copy made search
     // lie by omission: a string genuinely sent — scanned, and redacted if it
-    // were a secret — came back "never sent through Beagle" purely because it
+    // were a secret — came back "no matches" purely because it
     // sat past the cap. Search is meant to be a definitive answer, so it is
     // built from the scanned bytes, which are neither truncated nor
     // output-only.

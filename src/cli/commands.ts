@@ -336,7 +336,7 @@ export function cmdSearch(stateDir: string, term: string): string {
   }
   const hits = store.searchLiteral(term);
   store.close();
-  if (hits.length === 0) return "no matches — that string was never sent through Beagle.";
+  if (hits.length === 0) return "no matches — not in any captured call still in the store (payloads are pruned on a rolling window, so this isn't proof it was never sent).";
   const sessions = new Set(hits.map((h) => h.sessionId));
   const lines = [
     `found in ${hits.length} call${hits.length === 1 ? "" : "s"} across ${sessions.size} session${sessions.size === 1 ? "" : "s"}:`,
@@ -385,11 +385,11 @@ function unwrapTitle(raw: string | undefined): string {
 export function cmdLeaks(stateDir: string): string {
   const store = openStore(stateDir);
   if (isStoreError(store)) return store.error;
-  if (!store) return "no leaks recorded.";
+  if (!store) return "no captured traffic yet — nothing has been scanned for leaks.\nWrap a session with `beagle run <agent>` first.";
   const events = listLeakEvents(store);
   if (events.length === 0) {
     store.close();
-    return "no leaks recorded.";
+    return "no detected leaks in the captured traffic.";
   }
 
   // Group by session: one conversation is one incident to a human, and the
