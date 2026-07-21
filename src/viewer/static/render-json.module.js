@@ -3,7 +3,9 @@
 // invariants: (§6.8) captured text is only ever interpolated as a text node,
 // never markup; (R7) a detected secret is always visibly highlighted — no fold
 // or clamp ever hides one. Everything that shows a stored body goes through
-// JsonBody (readable) or RawBody (raw); those are the only exports.
+// JsonBody (readable) or RawBody (raw); those are the only RENDER exports
+// (parseSegments is also exported, but it is a pure parser returning plain
+// data for tests — it never touches the DOM).
 import { h } from "preact";
 import { useMemo, useState } from "preact/hooks";
 import htm from "htm";
@@ -50,19 +52,27 @@ function Highlighted({ text, leaks }) {
   return html`${out}`;
 }
 
+// The "Name: payload" convention the mappers write, sniffed display-only. The
+// head cap is 80 — MCP tool names (mcp__openaiDeveloperDocssearch_openai_docs,
+// 43 chars) overflow the old 40 and silently lost their fold/pretty-print.
+const NAMED_HEAD = /^([A-Za-z_][\w.-]{0,80}):\s*([\s\S]*)$/;
+
 // Pretty-print JSON for reading, applied to EVERY displayed body: each line
 // that parses as a JSON object/array (bare, or behind a "Name: " prefix like
 // the Mode B "Bash: {...}" convention) re-serializes with 2-space indent.
 // Guard: if reformatting would lose an inline secret highlight (the value no
 // longer substring-matches), that line stays verbatim — a leak never loses
 // its red mark to cosmetics.
+// Reached only when parseSegments declined the body (no JSON line, or a leak
+// would not survive the split) — its per-line pretty-print is the gentler
+// fallback for exactly those cases.
 function prettyContent(text, leaks) {
   const values = (leaks ?? []).map((l) => l.value).filter(Boolean);
   const out = text
     .split("\n")
     .map((line) => {
       const t = line.trim();
-      const named = t.match(/^([A-Za-z_][\w.-]{0,40}):\s*([{[].*)$/);
+      const named = t.match(NAMED_HEAD);
       const raw = named ? named[2] : t;
       if (!raw.startsWith("{") && !raw.startsWith("[")) return line;
       try {
@@ -105,7 +115,7 @@ function parseForTree(content, leaks) {
   // (JSON.parse + the R7 string walk) are trivial at this scale. Only a
   // pathological multi-MB body falls back to flat text.
   if (content.length > 1_000_000) return null;
-  const m = content.match(/^([A-Za-z_][\w.-]{0,40}):\s*([\s\S]*)$/);
+  const m = content.match(NAMED_HEAD);
   const raw = (m ? m[2] : content).trim();
   if (!raw.startsWith("{") && !raw.startsWith("[")) return null;
   let value;
@@ -113,6 +123,19 @@ function parseForTree(content, leaks) {
   if (value === null || typeof value !== "object") return null;
   // R7 backstop: every detected value present in the body must be wholly
   // visible inside a single string leaf, or the tree cannot highlight it.
+  const strings = collectStrings(value);
+  for (const l of leaks ?? []) {
+    if (l.value && content.includes(l.value) && !strings.some((s) => s.includes(l.value))) {
+      return null;
+    }
+  }
+  return { head: m ? m[1] : null, value };
+}
+
+// Every string a tree renders as its own text node: leaves AND keys (both are
+// highlight surfaces). The R7 "does the secret survive structural splitting"
+// checks in parseForTree and parseSegments share this walk.
+function collectStrings(value) {
   const strings = [];
   (function walk(v) {
     if (typeof v === "string") strings.push(v);
@@ -121,12 +144,50 @@ function parseForTree(content, leaks) {
       for (const [k, x] of Object.entries(v)) { strings.push(k); walk(x); }
     }
   })(value);
-  for (const l of leaks ?? []) {
-    if (l.value && content.includes(l.value) && !strings.some((s) => s.includes(l.value))) {
-      return null;
+  return strings;
+}
+
+// Mixed prose+JSON bodies — the Mode B tool-row shape (`tool\n{args}\noutput…`)
+// — split by LINE into text segments and foldable JSON trees. parseForTree
+// only folds a body that IS one JSON document, so the args line of a codex
+// tool row rendered flat. Exported for tests (pure data, no DOM).
+// Returns null — keep the flat path — unless at least one line parses as a
+// JSON object/array, and null again if ANY detected value present in the body
+// would not survive the split whole (R7): a leak must sit inside a single
+// text segment, or inside one string leaf of a single tree segment.
+export function parseSegments(content, leaks) {
+  if (content.length > 1_000_000) return null; // same ceiling as parseForTree
+  const segs = [];
+  let buf = [];
+  const flush = () => {
+    if (buf.length) segs.push({ kind: "text", text: buf.join("\n") });
+    buf = [];
+  };
+  for (const line of content.split("\n")) {
+    const t = line.trim();
+    const named = t.match(NAMED_HEAD);
+    const raw = named ? named[2] : t;
+    let value;
+    if (raw.startsWith("{") || raw.startsWith("[")) {
+      try { value = JSON.parse(raw); } catch { /* prose after all */ }
     }
+    if (value === null || typeof value !== "object") {
+      buf.push(line);
+      continue;
+    }
+    flush();
+    segs.push({ kind: "tree", head: named ? named[1] : null, value });
   }
-  return { head: m ? m[1] : null, value };
+  flush();
+  if (!segs.some((s) => s.kind === "tree")) return null;
+  for (const l of leaks ?? []) {
+    if (!l.value || !content.includes(l.value)) continue;
+    const survives = segs.some((s) =>
+      s.kind === "text" ? s.text.includes(l.value) : collectStrings(s.value).some((str) => str.includes(l.value)),
+    );
+    if (!survives) return null;
+  }
+  return segs;
 }
 
 // A streamed response is an SSE event stream — a sequence of `event:`/`data:`
@@ -225,22 +286,54 @@ function ClampedText({ content, leaks, threshold, hasLeak }) {
   `;
 }
 
+// Mixed prose+JSON body: prose renders as flat highlighted text, each JSON
+// line as its own foldable tree. Clamping matches ClampedText exactly — the
+// leak-bearing case never clamps (R7), and the text is never sliced.
+function MixedBody({ segments, content, leaks, threshold, hasLeak }) {
+  const [expanded, setExpanded] = useState(false);
+  const clampable = content.length > threshold && !hasLeak;
+  const body = segments.map((s, i) =>
+    s.kind === "text"
+      ? html`<div key=${i}><${Highlighted} text=${s.text} leaks=${leaks} /></div>`
+      : html`<div class="jt" key=${i}>
+          ${s.head != null && html`<div class="jt-head">${s.head}</div>`}
+          <${JsonNode} v=${s.value} leaks=${leaks} depth=${0} />
+        </div>`,
+  );
+  if (!clampable) return html`${body}`;
+  return html`
+    <div class=${expanded ? "clamp" : "clamp clamped"}>${body}</div>
+    <button class="expander" onClick=${() => setExpanded(!expanded)}>
+      ${expanded ? "▴ collapse" : "▾ show all"}
+    </button>
+  `;
+}
+
 // The one entry point every readable body goes through: tree when the content
-// is a single JSON document, today's flat highlighted text otherwise.
+// is a single JSON document, mixed prose+trees when JSON lines are embedded in
+// other text, today's flat highlighted text otherwise.
 export function JsonBody({ content, leaks, threshold, hasLeak }) {
   // Memoized: with the 1MB cap a parse is no longer trivially cheap, and every
   // SSE-driven refresh re-renders the whole transcript (and every JsonBody in
   // it). content/leaks come from stable fetched view state, so this only
   // recomputes when the body actually changes.
   const tree = useMemo(() => parseForTree(content, leaks), [content, leaks]);
-  if (!tree) {
-    return html`<${ClampedText} content=${prettyContent(content, leaks)} leaks=${leaks}
+  const segments = useMemo(
+    () => (tree ? null : parseSegments(content, leaks)),
+    [tree, content, leaks],
+  );
+  if (tree) {
+    return html`<div class="jt">
+      ${tree.head != null && html`<div class="jt-head">${tree.head}</div>`}
+      <${JsonNode} v=${tree.value} leaks=${leaks} depth=${0} />
+    </div>`;
+  }
+  if (segments) {
+    return html`<${MixedBody} segments=${segments} content=${content} leaks=${leaks}
       threshold=${threshold ?? 2500} hasLeak=${hasLeak} />`;
   }
-  return html`<div class="jt">
-    ${tree.head != null && html`<div class="jt-head">${tree.head}</div>`}
-    <${JsonNode} v=${tree.value} leaks=${leaks} depth=${0} />
-  </div>`;
+  return html`<${ClampedText} content=${prettyContent(content, leaks)} leaks=${leaks}
+    threshold=${threshold ?? 2500} hasLeak=${hasLeak} />`;
 }
 
 // The raw view's request/response body: the exact captured bytes, folded as a
