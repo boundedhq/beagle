@@ -52,6 +52,12 @@ export interface OtelCall extends Call {
    *  Codex is hash(prompt), so repeated identical prompts need this to reach
    *  their own rows. Rides with origin='codex-rollout' only. */
   promptOrdinal?: number;
+  /** The slice of `response.text` the one-line summary should describe, when
+   *  the body merges several assistant messages and the LAST one is the real
+   *  reply. Set only where that split exists (a narrating Codex rollout turn):
+   *  absent means summarize the whole response, which is right everywhere
+   *  else. Redacted on its own before it reaches the feed line. */
+  responseHeadline?: string;
 }
 
 function attrMap(attrs: Array<{ key: string; value: AttrValue }> | undefined): Map<string, AttrValue> {

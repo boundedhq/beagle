@@ -1031,9 +1031,24 @@ export class Daemon {
       const messages = call.request.messages ?? [];
       const requestText = new TextDecoder().decode(call.request.bodyBytes);
       const bodyValues = findingValues(requestText, scanResult.findings);
+      // The inbound half is ONE part: whatever the feed line will quote. It
+      // needs its own scrub — the summary must never be the surface still
+      // showing a value the body redacted — and it is scrubbed here because
+      // redactDerivedParts splices by part-local offsets.
+      //
+      // Deliberately not [merged, headline]: inbound findings never alert
+      // (redactDerived keeps only f.start < outboundEnd), Mode B reads inbound
+      // for nothing but this summary, and the stored body is redacted from
+      // respScan — which for a rollout answer scans the very same string, since
+      // response.text and response.bodyBytes are both `ans.answer`. So carrying
+      // the merged text too would re-scan bytes already covered while doubling
+      // this text against MAX_FINDINGS_PER_RULE, and a response saturated with
+      // secret-shaped matches would start DROPPING findings at half the count
+      // it takes today — dropped findings being exactly the ones that would
+      // have scrubbed the line.
       const derived = await this.redactDerived(
         messages.map((m) => String(m.content)),
-        [call.response.text ?? ""],
+        [call.responseHeadline ?? call.response.text ?? ""],
         bodyValues,
         requestText,
       );
@@ -1108,6 +1123,8 @@ export class Daemon {
         ? "[REDACTION INCOMPLETE: content withheld]"
         : buildSummary(
             { model: call.model, messages: summaryMessages } as ParsedRequest,
+            // The scrubbed headline when this turn has one (a narrating rollout
+            // answer), else the whole response — see OtelCall.responseHeadline.
             derived.inbound[0],
             undefined,
             // The same backstop the wire path keeps, reaching the same two
@@ -1201,8 +1218,8 @@ export class Daemon {
               // through buildSummary's secretValues pass and the stored summary
               // was scrubbed when its row was written; never re-derive from the
               // raw call.response.text here, which would undo the redaction.
-              composeSummary: (existing) =>
-                existing ? `"${firstLine(existing, 40)}" → ${firstLine(summary, 80)}` : summary,
+              composeSummary: (existing, hasResponse) =>
+                composeStitchSummary(existing, hasResponse, summary),
               redacted,
               responseBody: redaction ? redaction.responseBody : (call.response.bodyBytes ?? null),
               // Rollout answers grow while their turn runs — grow-only upsert,
@@ -1685,6 +1702,32 @@ function clampLine(line: string, max: number): string {
 
 function firstLine(s: string, max: number): string {
   return clampLine(s.split("\n")[0] ?? "", max);
+}
+
+// The stitched turn's feed line, in buildSummary's wire order: `"ask" → got`.
+// Called again every time a codex rollout answer GROWS, so it has to be
+// idempotent — the second call is handed the line the first one wrote.
+//
+// Growth replaces only the answer half, keeping the question: a turn that
+// opened with a preamble ("I'm using the docs skill…") would otherwise keep
+// advertising the preamble while the row holds the real answer.
+//
+// The prefix match is how it recognizes its own output, and `[^"]*` means it
+// can miss when the QUESTION itself contains a quote (`"say "hi"" → …`).
+// Missing is the safe direction and why hasResponse exists: on a row that
+// already has an answer, an unrecognized line yields null (keep what's there),
+// never a fresh compose — which would nest the whole `"q" → a` line inside a
+// new quote pair and corrupt a stored summary. A first attach has no such
+// risk: there is no composed line yet, so it always composes.
+export function composeStitchSummary(
+  existing: string | null,
+  hasResponse: boolean,
+  answer: string,
+): string | null {
+  if (!existing) return answer;
+  const composed = /^("[^"]*" → )[\s\S]*$/.exec(existing);
+  if (composed) return `${composed[1]}${firstLine(answer, 80)}`;
+  return hasResponse ? null : `"${firstLine(existing, 40)}" → ${firstLine(answer, 80)}`;
 }
 
 function buildSearchText(parsed: ParsedRequest | null, call: CapturedCall, outboundParts: string[]): string {
