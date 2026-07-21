@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { buildDetail, detailLeaks, detailMessages, type LeakSpan } from "../src/viewer/detail";
 import type { CallRecord } from "../src/core/store/store";
+import type { DisplayMessage } from "../src/parsers/parsers";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 
@@ -119,6 +120,36 @@ describe("buildDetail — response reassembly (UI fix 1)", () => {
     // Same authority for the delta walk-back, which reads messages on its own.
     expect(detailMessages(call({ displayMessages: [{ role: "system", content: "" }, { role: "user", content: "masked" }] })))
       .toEqual([{ role: "user", content: "masked" }]);
+  });
+
+  test("a reply-only stored transcript (unparseable request) beats the body's reassembly", () => {
+    // The wire writer persists this shape when the REQUEST didn't parse but the
+    // reply's derived scan masked something: the mandatory system head at index
+    // 0 (empty — there was no parsed request to lift one from), no messages,
+    // then the reply as the trailing kind:"response" entry. The stored copy
+    // must win over parseResponse, whose reassembly of these frames rebuilds
+    // the split key — and the empty head must vanish, not render as a phantom
+    // "" system prompt.
+    const sse =
+      'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"key AKIAZQ3DRSTUV"}}\n\n' +
+      'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"WXY2345 done"}}\n\n';
+    // Typed as the writer's shape: the store column under-declares (no `kind`),
+    // which the viewer bridges with a cast — the test writes what the daemon writes.
+    const stored: DisplayMessage[] = [
+      { role: "system", content: "" },
+      { role: "assistant", kind: "response", content: "key [REDACTED:aws-access-key-id:abc123] done" },
+    ];
+    const d = buildDetail(
+      call({
+        requestBody: enc('{"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "cut off'),
+        responseBody: enc(sse), sseRaw: enc(sse),
+        displayMessages: stored,
+      }),
+      [],
+    );
+    expect(d.responseText).toBe("key [REDACTED:aws-access-key-id:abc123] done");
+    expect(d.system).toBeNull();
+    expect(d.messages).toEqual([]);
   });
 
   test("a redacted row's placeholder is highlighted even when only the transcript holds it", () => {

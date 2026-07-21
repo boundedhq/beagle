@@ -781,9 +781,9 @@ export class Daemon {
       // value pass would otherwise have moved precisely the rows that must not
       // move — the derived-only ones — onto the weaker surface.
       const bodySpans = (stash?.findings.length ?? 0) > 0 || (respScan?.findings.length ?? 0) > 0;
-      // `parsed` is the projection's precondition: without it buildSearchText
-      // falls back to the RAW request bytes, which is the one thing that must
-      // never reach the index on a redacted row.
+      // `parsed` is the precondition for indexing the projection's parts:
+      // without it buildSearchText fell back to the RAW request bytes, which is
+      // the one thing that must never reach the index on a redacted row.
       if (bodySpans || !parsed) searchText = new TextDecoder().decode(requestBody);
     }
     const summary = redaction?.heldOut
@@ -850,8 +850,19 @@ export class Daemon {
     // The always-visible summary already draws exactly this line above ("Runs
     // whatever the setting"). The raw panes still show every byte as received,
     // which is what the setting is actually for.
+    //
+    // NOT gated on `parsed` either. An unparseable REQUEST (a truncated capture
+    // cut the JSON mid-string) says nothing about the response, whose reply is
+    // the one surface above that the viewer still re-derives — however well the
+    // stored frames are masked, no single frame holds a value the provider
+    // split, so the value scrub has nothing to reach and the re-parse rebuilds
+    // it whole, under a header the derived OR below stamps "redacted". The
+    // request half simply degenerates: the head is the empty system entry the
+    // layout mandates anyway, and the message run is empty. A projection with
+    // nothing in it is unreachable — with no parsed request every outbound part
+    // is empty, so a derived value implies a response entry to store.
     let displayMessages: DisplayMessage[] | null = null;
-    if (!redaction?.heldOut && derived.values.length > 0 && parsed) {
+    if (!redaction?.heldOut && derived.values.length > 0) {
       // Built inside the branch: persisting a projection is the exception, so
       // the common row must not pay to assemble a value list it never reads.
       // One list rather than a union — see the summary's note above for why
