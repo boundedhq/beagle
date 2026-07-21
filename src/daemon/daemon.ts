@@ -57,6 +57,8 @@ export interface DaemonOptions {
   /** Point the Codex rollout watcher at a fixed sessions root (default: resolve
    *  from CODEX_HOME / ~/.codex) — tests only. */
   codexRolloutRootForTest?: string;
+  /** Compress the rollout tailer's poll/retry/retire clocks — tests only. */
+  codexRolloutTimingForTest?: { pollMs?: number; retryWindowMs?: number; retireMs?: number };
 }
 
 // One derived-text redaction outcome (Daemon.redactDerived). `values` are in
@@ -192,6 +194,7 @@ export class Daemon {
     d.codexRollout = new CodexRolloutWatcher({
       emit: (calls) => void d.track(d.ingestOtel(calls)),
       sessionsRoot: opts.codexRolloutRootForTest,
+      ...opts.codexRolloutTimingForTest,
     });
     try {
       // Any bind can fail (EADDRINUSE, etc.). Close everything already open

@@ -94,6 +94,38 @@ describe("CodexRolloutTailer", () => {
     expect(retired).toBe(true);
   });
 
+  test("an emitted answer carries its rollout line's own timestamp", () => {
+    const dir = tmp();
+    const file = join(dir, "rollout-x-conv1.jsonl");
+    writeFileSync(file, turn(PA, "ALPHA111") + "\n");
+    const out: OtelCall[] = [];
+    const t = new CodexRolloutTailer({ convId: "conv1", filePath: file, emit: (c) => out.push(...c), now: () => 1000 });
+    t.poll();
+    // The line time, not the poll clock — the store's stale-attach bound
+    // compares this against turn-row times, so it must reflect when the
+    // answer was actually produced.
+    expect(out[0]!.meta.tsResponse).toBe(Date.parse("2026-07-20T21:00:00.000Z"));
+  });
+
+  test("a timestamp-less answer's time freezes at first-seen across re-emits", () => {
+    const dir = tmp();
+    const file = join(dir, "rollout-x-conv1.jsonl");
+    // No `timestamp` field on the lines: the parser leaves tsMs undefined.
+    const bare = (role: string, text: string) => JSON.stringify({ type: "response_item", payload: msg(role, text) });
+    writeFileSync(file, [bare("user", PA), bare("assistant", "ALPHA111")].join("\n") + "\n");
+    let clock = 1000;
+    const out: OtelCall[] = [];
+    const t = new CodexRolloutTailer({ convId: "conv1", filePath: file, emit: (c) => out.push(...c), now: () => clock, retryWindowMs: 5000 });
+    t.poll();
+    expect(out.at(-1)!.meta.tsResponse).toBe(1000);
+    clock = 3000;
+    t.poll(); // re-emit within the retry window
+    // Still the FIRST-seen time. A live clock here would make every re-emit
+    // look freshly produced, letting a stale answer pass the store's
+    // stale-attach bound and claim a newer identical-prompt turn's row.
+    expect(out.at(-1)!.meta.tsResponse).toBe(1000);
+  });
+
   test("a missing/unreadable file never throws", () => {
     const t = new CodexRolloutTailer({ convId: "conv1", filePath: "/no/such/rollout.jsonl", emit: () => { throw new Error("should not emit"); }, now: () => 1000 });
     expect(() => t.poll()).not.toThrow();

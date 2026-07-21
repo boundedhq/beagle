@@ -162,12 +162,23 @@ sessionId = conversation.id
   preceding user `message`, computes the same `codexPromptKey(userText)`, and
   emits a response-only call with that `promptId`.
 
-`attachOtelResponse` then matches `(session_id, prompt_key)` unchanged. Its
-existing `ORDER BY ts_request ASC … bytes_resp IS NULL` query already resolves
-the only ambiguous case — the *same prompt typed twice in one session* — by
-attaching answers to the identical-prompt rows in arrival order. One shared
-helper `codexPromptKey(text)` guarantees the two sides compute byte-identical
-keys.
+`attachOtelResponse` then matches `(session_id, prompt_key)`. Its
+`ORDER BY ts_request ASC … bytes_resp IS NULL` query resolves the ambiguous
+case — the *same prompt typed twice in one session* — by attaching answers to
+the identical-prompt rows in arrival order. Arrival order alone proved
+insufficient once re-emits entered the picture (§5.1's retry window, and a
+recreated tailer re-reading the whole file): a re-emitted turn-1 answer landing
+after turn 2's identical-prompt row existed would claim that fresh row, and the
+real turn-2 answer then hit the `bytes_resp` guard and was dropped forever. The
+attach query therefore also carries a **stale-attach bound**: the target row's
+`ts_request` must not postdate the answer's `tsResponse` (plus a small skew
+margin). An answer is always produced after its own prompt, so a row newer than
+the answer belongs to a later turn — refusing it fails safe (§4.3: no stitch,
+never a wrong one), while post-retirement back-fill (row old, answer late) still
+attaches. For a rollout line with no parseable timestamp the tailer stamps the
+answer's *first-seen* time, frozen across re-emits, so re-emits can't look
+freshly produced. One shared helper `codexPromptKey(text)` guarantees the two
+sides compute byte-identical keys.
 
 ### 4.3 Why hash-of-prompt, not ordinal or timestamp
 
@@ -330,6 +341,7 @@ carries an `origin:'codex-rollout'` discriminator the daemon branch checks:
 | Prompt text mismatch (OTel vs rollout) | `promptKey` differs → no stitch → answer absent (safe). Byte-equal today (§8.2); timestamp fallback only if a future version diverges them. |
 | Schema drift on a Codex update (renamed `response_item`/`output_text`) | parse defensively (array-guarded, unknown types skipped, like `otlp-map`); answer degrades to absent, never throws. Pinned to observed 0.144.x shape in tests. |
 | Attach race / daemon restart re-emit (§5.1, §6.1a) | held & retried, then **dropped** if the prompt row never appears — never a standalone/duplicate row. |
+| Re-emit races a re-typed identical prompt (retry window, or a recreated tailer re-reading the file) | the stale-attach bound (§4.2) refuses the newer row — the stale answer drops, the turn's real answer attaches. |
 | User disabled rollout logging (`history_mode`/config) | no file → answer absent. Rare; note in `beagle status` reasoning line if detectable. |
 | Tailer poll error mid-session | swallowed per-poll; next poll retries; capture may lag, turn works. |
 
@@ -435,10 +447,12 @@ interactive TUI and wrote the same `response_item` / `message` / `role=assistant
 
 ## 10. Cost & footprint
 
-- **Core LOC: zero.** `attachOtelResponse` (core) is reused **unchanged** — the
+- **Core LOC: near zero.** `attachOtelResponse` (core) is reused — the
   two deviations (§6.1) live in the daemon's response-only branch (non-core):
   an `origin=='codex-rollout'` check that (a) drops instead of `insertCall` on
-  attach-fail and (b) passes empty `searchAppend`.
+  attach-fail and (b) passes empty `searchAppend`. The one core change landed
+  post-ship: the stale-attach bound (§4.2), a `ts_request <= tsResponse + skew`
+  clause in the attach query.
 - **New code (non-core):** rollout JSONL parser (`src/parsers/codex-rollout.ts`);
   the daemon-side RolloutTailer (poll/offset/retire/pending-retry) + its wiring;
   `promptId` stamp in the Codex mapper; `codexPromptKey` shared helper;

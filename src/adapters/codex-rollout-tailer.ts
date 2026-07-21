@@ -58,8 +58,12 @@ function locateRollout(root: string, convId: string): string | null {
   return bestPath;
 }
 
-function buildResponseCall(convId: string, ans: RolloutAnswer, now: () => number): OtelCall {
-  const ts = ans.tsMs ?? now();
+// `fallbackTs` stands in for a timestamp-less rollout line: the answer's
+// FIRST-SEEN time, frozen across re-emits. A live now() here would defeat the
+// store's stale-attach bound (ts_request <= tsResponse) — every re-emit would
+// look freshly produced and could claim a newer identical-prompt turn's row.
+function buildResponseCall(convId: string, ans: RolloutAnswer, fallbackTs: number): OtelCall {
+  const ts = ans.tsMs ?? fallbackTs;
   return {
     id: ulid(ts),
     runId: "otel",
@@ -159,7 +163,10 @@ export class CodexRolloutTailer {
     // Emit each answer once when first seen, and re-emit it within the retry
     // window so a raced answer (its turn row not yet written) lands once the
     // row appears. attach is idempotent — a re-emit for an already-answered
-    // turn simply drops in the daemon (design §5.1/§6.1a).
+    // turn simply drops in the daemon (design §5.1/§6.1a), and one racing a
+    // NEWER identical-prompt turn row (same text re-typed, or any historical
+    // answer a recreated tailer re-reads) is refused by the store's
+    // stale-attach bound rather than claiming that turn's row.
     const window = this.opts.retryWindowMs ?? RETRY_WINDOW_MS;
     const due: OtelCall[] = [];
     this.answers.forEach((ans, i) => {
@@ -168,7 +175,7 @@ export class CodexRolloutTailer {
         seen = now;
         this.firstSeen.set(i, seen);
       }
-      if (now - seen <= window) due.push(buildResponseCall(this.opts.convId, ans, this.now));
+      if (now - seen <= window) due.push(buildResponseCall(this.opts.convId, ans, seen));
     });
     if (due.length) this.opts.emit(due);
     this.checkRetire(now);
