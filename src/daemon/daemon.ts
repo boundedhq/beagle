@@ -392,6 +392,18 @@ export class Daemon {
   // `redacted`, and extractLeaks then highlights placeholders and ignores spans
   // entirely (viewer/detail.ts). So a span is only ever used against bytes it
   // still fits.
+  //
+  // HIGHLIGHT ONLY — never feed these offsets to redactBody. They come from a
+  // text SEARCH, not from the regex's own `d`-flag indices, and the engine
+  // holds the opposite invariant for anything that splices: a search returns
+  // the first occurrence of the value, which for a repeated value need not be
+  // the occurrence a rule matched (mongodb://root:root@host reported the
+  // username's span and shipped the password — the bug that put the `d` flag
+  // in compileRules). Recovering the VALUE is insensitive to which occurrence
+  // wins, because every occurrence is the same string; splicing is not.
+  // applyCaptureRedaction is deliberately still handed the body scan's findings
+  // alone. If a later change masks derived-only values in the body too, it must
+  // carry its own exact offsets rather than reuse these.
   private async redactDerived(
     outbound: string[],
     inbound: string[],
