@@ -78,6 +78,7 @@ describe("redact-on-capture (R11)", () => {
     expect(findings.length).toBe(1);
     const out = dec(applyCaptureRedaction({
       incomplete: false, requestBytes: enc(body), requestFindings: findings, responseBody: null,
+      extraValues: [],
     }).requestBody);
     expect(out).not.toContain(":root@"); // the password is gone
     expect(out).toContain("mongodb://root:[REDACTED:connection-string:"); // the username is not
@@ -169,6 +170,126 @@ describe("redact-on-capture (R11)", () => {
       const out = redactValuesInText(`sent ${decoded} onward`, [{ value: escaped, type: "x" }]);
       expect(out).toBe(`sent ${redactionPlaceholder("x", escaped)} onward`);
     }
+  });
+
+  test("redactValuesInText scrubs the JSON-ESCAPED form of a decoded value", () => {
+    // The mirror of the two tests above, and the direction extraValues needs:
+    // the value was matched in the DERIVED text (decoded) and has to be scrubbed
+    // from the raw BODY, where it is escaped. Only the decode direction existed,
+    // because every value used to come from the bytes and travel outward.
+    const decoded = '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAsaid"quoted"\n-----END RSA PRIVATE KEY-----';
+    const escaped = '-----BEGIN RSA PRIVATE KEY-----\\nMIIEowIBAAKCAQEAsaid\\"quoted\\"\\n-----END RSA PRIVATE KEY-----';
+    const out = redactValuesInText(`{"prompt":"${escaped}"}`, [{ value: decoded, type: "private-key" }]);
+    expect(out).not.toContain("MIIEowIBAAKCAQEAsaid");
+    expect(out).toBe(`{"prompt":"${redactionPlaceholder("private-key", decoded)}"}`);
+  });
+
+  test("escaping can lift a sub-floor value OVER the 8-char floor, and that is intended", () => {
+    // The floor is re-checked per form, and the note on redactValuesInText
+    // reasons about decoding, which only SHORTENS. Encoding lengthens: this
+    // six-char value is under the floor raw and eight escaped, so the escaped
+    // form scrubs where the raw one is skipped. Over-redaction of a genuine
+    // secret, i.e. the fail-safe direction — and the form that clears the floor
+    // is the more distinctive of the two, so it is the safer one to act on.
+    // Pinned because it is a behaviour the third form ADDED, not one it
+    // inherited.
+    const raw = 'a"b"cd'; // 6
+    const escaped = 'a\\"b\\"cd'; // 8
+    expect(raw.length).toBe(6);
+    expect(escaped.length).toBe(8);
+    expect(redactValuesInText(`held ${raw} here`, [{ value: raw, type: "x" }])).toBe(`held ${raw} here`);
+    expect(redactValuesInText(`{"k":"${escaped}"}`, [{ value: raw, type: "x" }])).toBe(
+      `{"k":"${redactionPlaceholder("x", raw)}"}`,
+    );
+  });
+
+  test("a value whose raw form hides INSIDE its escaped form doesn't corrupt the body", () => {
+    // The forms are tried longest first because one can be a substring of
+    // another. A value opening with a backslash — connection-string's
+    // `[^\s@\/]{4,}` and private-key's `[\s\S]` both admit one — sits in the
+    // bytes as `\\abcdefgh`, so the RAW form matches at offset one and eats the
+    // escape: `\[REDACTED:…]`, which no longer parses, on a row reporting a
+    // clean rewrite. The secret does leave either way; what is asserted here is
+    // that the body around it survives.
+    const value = "\\abcdefgh"; // 9 chars, first is a backslash
+    const body = JSON.stringify({ messages: [{ content: `pw is ${value} here` }] });
+    const out = dec(applyCaptureRedaction({
+      incomplete: false,
+      requestBytes: enc(body),
+      requestFindings: [],
+      responseBody: null,
+      extraValues: [{ value, type: "connection-string" }],
+    }).requestBody);
+    expect(out).not.toContain(value);
+    expect(JSON.parse(out)).toBeDefined(); // the whole point: still parseable
+    expect(out).toBe(
+      JSON.stringify({ messages: [{ content: `pw is ${redactionPlaceholder("connection-string", value)} here` }] }),
+    );
+  });
+
+  test("an extraValue no span covers is masked out of the stored bodies", () => {
+    // The derived-scan hole: a finding only the DERIVED scan made is in no
+    // `requestFindings` list, so redactBody masks nothing and the row used to
+    // claim `redacted` over a body still holding the key. JSON escaping is the
+    // usual cause — `\": \"` is six characters where the parsed message content
+    // spends four on `": "`, over the generic rule's `["':=\s]{1,5}` cap (and
+    // starting with a backslash, which that class does not even accept).
+    const key = "Xk7Qm2Vb9Rt4Ws8Yz1Nc6Pd3aJ5Hf0Lg";
+    const body = JSON.stringify({ messages: [{ role: "user", content: `config has "api_key": "${key}" in it` }] });
+    expect(scan(enc(body), {}, rules)).toEqual([]); // premise: the body scan sees nothing
+    const out = applyCaptureRedaction({
+      incomplete: false,
+      requestBytes: enc(body),
+      requestFindings: [],
+      responseBody: enc(`I set ${key} for you`), // …and the echo in the reply
+      extraValues: [{ value: key, type: "generic-api-key" }],
+    });
+    expect(dec(out.requestBody)).not.toContain(key);
+    expect(dec(out.requestBody)).toContain("[REDACTED:generic-api-key:");
+    expect(dec(out.responseBody!)).not.toContain(key);
+    expect(out.redacted).toBe(true);
+    expect(JSON.parse(dec(out.requestBody))).toBeDefined(); // still parseable
+    // Handed back, so the surfaces the CALLER redacts from these same bytes —
+    // the raw SSE stream, the search text, the summary's backstop — cover it
+    // without a second list to keep in step.
+    expect(out.values).toContainEqual({ value: key, type: "generic-api-key" });
+  });
+
+  test("an extraValue is masked in the ESCAPED form the body actually holds", () => {
+    // The derived scan matches the decoded rendering, so its value carries real
+    // newlines while the bytes carry `\n`. A literal-match scrub of the raw form
+    // alone silently no-ops here — the same mismatch that produced this
+    // function's decode direction, read the other way.
+    const decoded = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAonlyInTheRendering\n-----END RSA PRIVATE KEY-----";
+    const body = JSON.stringify({ prompt: `deploy with:\n${decoded}` });
+    const out = applyCaptureRedaction({
+      incomplete: false,
+      requestBytes: enc(body),
+      requestFindings: [],
+      responseBody: null,
+      extraValues: [{ value: decoded, type: "private-key" }],
+    });
+    expect(dec(out.requestBody)).not.toContain("MIIEowIBAAKCAQEAonlyInTheRendering");
+    expect(dec(out.requestBody)).toContain("[REDACTED:private-key:");
+  });
+
+  test("an extraValue absent from the bytes leaves them alone, and `redacted` says so", () => {
+    // The other derived-only shape: a secret the display MANUFACTURED by joining
+    // two content blocks is in no body at all, so there is nothing here to mask.
+    // `redacted` must not claim a rewrite that didn't happen — the viewer paints
+    // its highlight on that flag, and the wire path switches its search text to
+    // the stored body when it is set. (The row still reads redacted overall: the
+    // caller ORs in the derived parts it DID rewrite.)
+    const body = '{"messages":[{"content":"half AKIAZQ3DRSTUV"},{"content":"WXY2345 half"}]}';
+    const out = applyCaptureRedaction({
+      incomplete: false,
+      requestBytes: enc(body),
+      requestFindings: [],
+      responseBody: null,
+      extraValues: [{ value: "AKIAZQ3DRSTUVWXY2345", type: "aws-access-key-id" }],
+    });
+    expect(dec(out.requestBody)).toBe(body); // byte-identical
+    expect(out.redacted).toBe(false);
   });
 
   // redactDerivedParts is what the value scrub above structurally cannot be:
@@ -384,6 +505,7 @@ describe("redact-on-capture (R11)", () => {
       requestBytes: enc("could hold anything"),
       requestFindings: [],
       responseBody: enc("also unverified"),
+      extraValues: [],
     });
     expect(out.redacted).toBe(true);
     expect(out.heldOut).toBe(true);
@@ -402,6 +524,7 @@ describe("redact-on-capture (R11)", () => {
       requestFindings: [],
       responseBody: enc(resp),
       responseFindings: [finding(start, start + secret.length)],
+      extraValues: [],
     });
     expect(out.redacted).toBe(true);
     expect(out.heldOut).toBe(false);
@@ -422,6 +545,7 @@ describe("redact-on-capture (R11)", () => {
       requestBytes: enc(body),
       requestFindings: [finding(first, first + secret.length)], // only the first occurrence
       responseBody: null,
+      extraValues: [],
     });
     expect(dec(out.requestBody)).not.toContain(secret); // both copies gone
     expect(dec(out.requestBody).match(/\[REDACTED:/g)?.length).toBe(2);

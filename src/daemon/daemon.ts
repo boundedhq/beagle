@@ -60,8 +60,12 @@ export interface DaemonOptions {
 }
 
 // One derived-text redaction outcome (Daemon.redactDerived). `values` are in
-// the DERIVED form, for scrubbing text built from these parts that is not one
-// of them — the summary's quoted ask, a truncated transcript copy.
+// the DERIVED form, and have two kinds of consumer. Text built FROM these parts
+// that is not one of them — the summary's quoted ask, a truncated transcript
+// copy — and, as applyCaptureRedaction's extraValues, the stored BODIES, which
+// are the opposite relation: the source these parts were rendered from. A value
+// only this scan matched has no span in those bytes, so scrubbing by value is
+// the only thing that reaches it there.
 interface DerivedRedaction {
   /** The request-derived parts, redacted. */
   outbound: string[];
@@ -713,6 +717,14 @@ export class Daemon {
           requestFindings: stash?.findings ?? [],
           responseBody: call.response.bodyBytes ?? null,
           responseFindings: respScan?.findings,
+          // What the DERIVED scan found and the body scan did not. Its offsets
+          // index the transcript, so they can never splice these bytes (see
+          // extraValues); the value is what carries over, and it carries over
+          // because the derived text is a rendering of this body — the usual
+          // reason a rule matches one and not the other is escaping, and the
+          // value then sits here verbatim. Without this the row said
+          // `redacted: true` over a request body still holding the key.
+          extraValues: derived.values,
         })
       : null;
     const requestBody = redaction ? redaction.requestBody : call.request.bodyBytes;
@@ -751,11 +763,32 @@ export class Daemon {
         ? null
         : redactRawStream(sseRaw, call.response.bodyBytes ?? null, respScan?.findings ?? [], redaction.values);
       // Outbound only (see buildSearchText): index the request, not the response.
-      searchText = new TextDecoder().decode(requestBody);
+      //
+      // The body is the broader surface — the projection is [system,
+      // ...contents] where the body is everything that actually left — so it is
+      // the one that answers "was this sent" without a false negative, and it
+      // is what a row with a body finding has always indexed. But it earns that
+      // only when a scan matched IN it: then its spans mask by offset, with no
+      // floor and no dependence on which rendering the value took. A body no
+      // scan matched is scrubbed by VALUE alone, and everything the value pass
+      // cannot reach — a sub-floor password, a fourth escaping, a secret the
+      // join MANUFACTURED out of two innocent halves — is cleartext in it while
+      // the projection beside it carries a placeholder spanning exactly that.
+      //
+      // So the swap follows the SPANS, not the redaction flag. Before
+      // extraValues the two agreed, because a call with no findings in either
+      // body could not be redacted at all; making the flag honest about the
+      // value pass would otherwise have moved precisely the rows that must not
+      // move — the derived-only ones — onto the weaker surface.
+      const bodySpans = (stash?.findings.length ?? 0) > 0 || (respScan?.findings.length ?? 0) > 0;
+      // `parsed` is the projection's precondition: without it buildSearchText
+      // falls back to the RAW request bytes, which is the one thing that must
+      // never reach the index on a redacted row.
+      if (bodySpans || !parsed) searchText = new TextDecoder().decode(requestBody);
     }
     const summary = redaction?.heldOut
       ? "[REDACTION INCOMPLETE: content withheld]"
-      : buildSummary(summaryParsed, derived.inbound[0], summaryActions, [
+      : buildSummary(summaryParsed, derived.inbound[0], summaryActions,
           // A BACKSTOP now, not the defense: the parts above already arrive
           // offset-redacted. What still reaches it is redactDerivedParts'
           // overlap skip — a finding sharing bytes with an already-spliced one
@@ -772,10 +805,15 @@ export class Daemon {
           // scanState "incomplete" so the reader is told. Runs whatever the
           // setting: the feed line is always visible, so it must never depend
           // on redact-on-capture to do its scrubbing.
-          ...(redaction?.values ?? []),
-          ...bodyValues,
-          ...derived.values,
-        ]);
+          //
+          // ONE list, not a union of three: `redaction.values` already contains
+          // the body findings it spliced AND derived.values (handed to it as
+          // extraValues), so re-listing those would just re-scan every message
+          // for strings the first pass replaced — the same O(values x messages)
+          // cost the lazy hashing right below is written to avoid. The tails
+          // are what the OFF path gets, where there is no redaction to ask.
+          redaction ? redaction.values : [...bodyValues, ...derived.values],
+        );
     // A wire row normally persists NO transcript: the viewer re-parses the
     // stored body, which is byte-exact, so re-deriving is faithful and free.
     // Derived redaction breaks that. A secret the display MANUFACTURES by
@@ -816,7 +854,9 @@ export class Daemon {
     if (!redaction?.heldOut && derived.values.length > 0 && parsed) {
       // Built inside the branch: persisting a projection is the exception, so
       // the common row must not pay to assemble a value list it never reads.
-      const values = [...derived.values, ...(redaction?.values ?? []), ...bodyValues];
+      // One list rather than a union — see the summary's note above for why
+      // `redaction.values` already covers the other two.
+      const values = redaction ? redaction.values : [...derived.values, ...bodyValues];
       displayMessages = [
         { role: "system", content: outContents[0]! },
         ...redactedMessages.map((m) =>
@@ -991,6 +1031,12 @@ export class Daemon {
             requestFindings: scanResult.findings,
             responseBody: call.response.bodyBytes ?? null,
             responseFindings: respScan?.findings,
+            // The wire path's note applies verbatim: a derived-only finding is
+            // in no body-scan span, so only its VALUE can reach these bytes.
+            // Mode B is where the two views diverge most — the scanned body is
+            // the prompt attribute, which for a resumed conversation is a
+            // serialized message list whose escapes the display drops.
+            extraValues: derived.values,
           })
         : null;
       // OUTBOUND ONLY, the same invariant buildSearchText holds for the wire
@@ -1050,13 +1096,13 @@ export class Daemon {
             { model: call.model, messages: summaryMessages } as ParsedRequest,
             derived.inbound[0],
             undefined,
-            [
-              // The same backstop the wire path keeps, reaching the same two
-              // cases and carrying the same 8-char limit — see there.
-              ...(redaction?.values ?? []),
-              ...bodyValues,
-              ...derived.values,
-            ],
+            // The same backstop the wire path keeps, reaching the same two
+            // cases and carrying the same 8-char limit — see there. And picked
+            // the same way: `redaction.values` is already the union of these
+            // two (the body findings it spliced, plus derived.values as
+            // extraValues), so listing them again would only re-scan every
+            // message for strings the first pass has already replaced.
+            redaction ? redaction.values : [...bodyValues, ...derived.values],
           );
       const scanState =
         redaction?.heldOut || derived.incomplete ? "incomplete" : scanResult.state;
