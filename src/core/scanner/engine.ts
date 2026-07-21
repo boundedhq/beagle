@@ -122,23 +122,97 @@ const ESCAPE_RUN = /\\+(?:u[0-9a-fA-F]{4}|[bfnrt"/])?/g;
 const BLANKS = Array.from({ length: 33 }, (_, n) => " ".repeat(n));
 const BACKSLASH = 92;
 
+// Keeping the leading literals is not on its own enough, because a raw Windows
+// path is bytewise a row of escapes with nothing left over to keep:
+// `C:\aws\n3f9c…d5x\blob.bin` is a path holding no secret, and every run in it
+// is a clean 1-backslash escape, so the split above has no literal to preserve.
+// Blanking rewrites it to `C:\aws  3f9c…d5x  lob.bin`, which stands the `aws`
+// keyword two spaces from a 40-char run and fires aws-secret-access-key at HIGH
+// — the same alert the 3-run case above avoids, arriving by a different route.
+//
+// So the run is not the only unit. What tells the two apart is PARITY of the
+// runs around it. JSON spells a literal backslash `\\`, and every further layer
+// doubles that, so a run that opens no escape is 2, 4, 8 — always EVEN — in
+// anything that was ever JSON-escaped. A bare ODD run is a lone backslash the
+// sender typed, which no encoder produces: the text is raw. `C:\aws\n…` has a
+// bare 1-run at `\a`, and that is the tell the path's own `\n` does not carry.
+//
+// The tell is then applied per TOKEN — a run of non-whitespace — all-or-nothing:
+// one bare odd run anywhere in a token means every backslash in it is literal,
+// including the ones that would have parsed. This composes with the split rather
+// than replacing it: the split decides how much of a run is escape, parity
+// decides whether the token is escaped text at all.
+//
+// The token is the right scope because it is the FP's own scope. Masking can
+// only invent a keyword/value pair that was never adjacent by blanking what
+// sits between them, and a keyword-adjacency rule reaches across at most 5
+// separator chars, so both sides must share a token for anything to be
+// manufactured. Whitespace already separated everything else.
+//
+// Parity is what keeps this from costing depth. A minified body is one long
+// whitespace-free token, so a coarser test — "some run here opens nothing" —
+// would let one Windows path in a sibling field silence the whole body:
+// `{"path":"C:\\proj","content":"key:\nAKIA…"}` measurably lost its secret that
+// way. Those runs are EVEN, correctly-encoded literal backslashes, so parity
+// passes them and the nested secret still masks.
+//
+// It also narrows the ambiguity the union exists to bracket rather than widening
+// it: `C:\creds\redis://u:pw@h/0` is one token with a bare 1-run, so it no
+// longer loses the `r` of `redis` in this view. The union still runs — a token
+// whose runs are all even is still indistinguishable from JSON — but it is
+// asked to rescue less.
+
+// Whitespace by code unit. `\s` would disagree on NUL, which separates the
+// derived text's parts. NaN — charCodeAt past the end — counts, so a token cut
+// off by the capture cap still ends.
+const isBoundary = (c: number) => c <= 32 || Number.isNaN(c);
+
+// A private twin of ESCAPE_RUN: the outer replace() owns that one's lastIndex,
+// and reusing it here would corrupt the walk in progress.
+const RUNS = /\\+(?:u[0-9a-fA-F]{4}|[bfnrt"/])?/g;
+
+function tokenPoisoned(text: string, start: number, end: number): boolean {
+  RUNS.lastIndex = start;
+  for (let m = RUNS.exec(text); m !== null && m.index < end; m = RUNS.exec(text)) {
+    const run = m[0];
+    if (run.charCodeAt(run.length - 1) === BACKSLASH && run.length % 2 === 1) return true;
+  }
+  return false;
+}
+
 export function maskJsonEscapes(text: string): string {
   if (!text.includes("\\")) return text; // fast path: nothing to mask
-  return text.replace(ESCAPE_RUN, (run) => {
-    // A run ending in a backslash consumed no escape char, so it is literal
-    // text at every depth — leave it exactly as it arrived.
-    if (run.charCodeAt(run.length - 1) === BACKSLASH) return run;
-    // Only the trailing 2^k backslashes belong to the escape; anything before
-    // them is a literal backslash the sender really typed, and blanking it
-    // would erase a separator the rules rely on. See ESCAPE_RUN.
-    let bs = 0;
-    while (run.charCodeAt(bs) === BACKSLASH) bs++;
-    let used = 1;
-    while (used * 2 <= bs) used *= 2;
-    const keep = bs - used;
-    const blank = run.length - keep;
-    return run.slice(0, keep) + (BLANKS[blank] ?? " ".repeat(blank));
+  // The verdict is cached per token, not recomputed per run, so a body whose
+  // runs all sit in one long token is walked twice over rather than once per
+  // backslash. It cannot be decided lazily as each run arrives: the poison may
+  // sit AFTER the run being masked, so the whole token is read up front.
+  let tokenEnd = -1, poisoned = false;
+  return text.replace(ESCAPE_RUN, (run, at: number) => {
+    if (at >= tokenEnd) {
+      let start = at;
+      while (start > 0 && !isBoundary(text.charCodeAt(start - 1))) start--;
+      tokenEnd = at;
+      while (tokenEnd < text.length && !isBoundary(text.charCodeAt(tokenEnd))) tokenEnd++;
+      poisoned = tokenPoisoned(text, start, tokenEnd);
+    }
+    return poisoned ? run : maskRun(run);
   });
+}
+
+function maskRun(run: string): string {
+  // A run ending in a backslash consumed no escape char, so it is literal
+  // text at every depth — leave it exactly as it arrived.
+  if (run.charCodeAt(run.length - 1) === BACKSLASH) return run;
+  // Only the trailing 2^k backslashes belong to the escape; anything before
+  // them is a literal backslash the sender really typed, and blanking it
+  // would erase a separator the rules rely on. See ESCAPE_RUN.
+  let bs = 0;
+  while (run.charCodeAt(bs) === BACKSLASH) bs++;
+  let used = 1;
+  while (used * 2 <= bs) used *= 2;
+  const keep = bs - used;
+  const blank = run.length - keep;
+  return run.slice(0, keep) + (BLANKS[blank] ?? " ".repeat(blank));
 }
 
 export function compileRules(specs: RuleSpec[], hmacKey: Uint8Array): CompiledRules {

@@ -670,6 +670,67 @@ describe("JSON-escape-prefixed secrets (leading-boundary regression)", () => {
     expect(maskJsonEscapes(String.raw`C:\creds`)).toBe(String.raw`C:\creds`);
     expect(maskJsonEscapes(String.raw`a\\c`)).toBe(String.raw`a\\c`);
   });
+
+  test("a Windows path is not a row of escapes", () => {
+    // Regression: every run here is a clean 1-backslash escape, so the split
+    // has no literal to keep, and blanking rewrote the path to
+    // `C:\aws  3f9c…d5x  lob.bin` — standing the `aws` keyword two spaces from
+    // a 40-char run and firing aws-secret-access-key at HIGH on a path holding
+    // no secret at all. Same alert as the 3-run case, by a different route.
+    // The run is 39 hex plus a trailing letter, so it draws from 17 symbols and
+    // clears the 4.0 gate. A pure hex digest could not — 40 chars over hex's 16
+    // symbols tops out at 3.971 — which is the sibling FP this rule already
+    // fixed by raising the gate. Masking is what remained.
+    const path = String.raw`C:\aws\n3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5x\blob.bin`;
+    expect(maskJsonEscapes(path)).toBe(path); // untouched
+    for (const body of [path, `run "${path}" now`]) {
+      expect(scanText(body)).toEqual([]);
+    }
+    // NOT asserted silent: JSON.stringify(path) doubles the backslashes, so the
+    // `\\n` really is an encoded newline and blanking it is correct. What that
+    // body decodes to is `C:\aws`, a line break, then the run — and the rule
+    // fires on `aws <run>` with no backslash anywhere in it, so this is the
+    // rule's call on decoded content, not something the mask manufactured.
+    const encoded = JSON.stringify({ path });
+    expect(scanText(encoded).map((f) => f.secretType)).toEqual(
+      scanText(`aws ${"3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5x"}`).map((f) => f.secretType),
+    );
+  });
+
+  test("parity decides which bare runs poison a token", () => {
+    const K = "AKIAZQ3DRSTUVWXY2345";
+    // Odd and bare: a lone backslash the sender typed, which no encoder emits.
+    // The token is raw text, so the `\n` beside it is not an escape either.
+    expect(maskJsonEscapes(String.raw`C:\aws\n${K}`)).toBe(String.raw`C:\aws\n${K}`);
+    // Even and bare: exactly how JSON writes a literal backslash, at depth 1
+    // and 2. The escape beside it still masks — which is what stops a path in
+    // one field of a minified body from silencing the secret in the next, a
+    // miss a coarser "some run opens nothing" test measurably caused.
+    expect(maskJsonEscapes(String.raw`C:\\proj\n${K}`)).toBe(String.raw`C:\\proj` + "  " + K);
+    expect(maskJsonEscapes(String.raw`C:\\\\proj\\n${K}`)).toBe(String.raw`C:\\\\proj` + "   " + K);
+    // Poisoning stops at whitespace, which is also why the FP needs one token:
+    // a keyword and a value in separate tokens were already separated.
+    expect(maskJsonEscapes(String.raw`C:\aws\q key\n${K}`)).toBe(String.raw`C:\aws\q key  ${K}`);
+  });
+
+  test("masking survives the surfaces that are not JSON", () => {
+    // Half the scan path is not a JSON body: derivedScanText joins decoded
+    // parts with a real newline around a NUL, otlp-map builds synthetic
+    // prompt+tool bodies, and a capture can stop at the buffer cap mid-string.
+    // Gating on a well-formed JSON STRING lost every one of these; a token
+    // needs no quotes, no terminator, and has no quote parity to desynchronize.
+    const K = "AKIAZQ3DRSTUVWXY2345";
+    const NUL = String.fromCharCode(0), TAB = String.fromCharCode(9);
+    for (const body of [
+      `paste from my notes:${BS}n${K}${BS}nuse it`, // raw prose, no quotes
+      `cat cfg\n${NUL}\n{"boot":"setup${BS}n${K}`, // derived join, truncated
+      `x "name${TAB}value" -> {"aws":"${BS}n${K}"}`, // raw tab inside quotes
+      `the 6" gauge -> {"aws":"${BS}n${K}"}`, // one stray quote
+      `{"messages":[{"content":"token:${BS}n${K} rest of the mess`, // cut short
+    ]) {
+      expect(scanText(body).some((f) => f.secretType === "aws-access-key-id")).toBe(true);
+    }
+  });
 });
 
 // Depth 2+ shapes: a secret nested inside a tool-call arguments STRING. Each
