@@ -72,42 +72,55 @@ const JSON_ESCAPE = /\\(?:u[0-9a-fA-F]{4}|[bfnrt"\\/])/g;
 // its 3.0 entropy gate). Masked-view findings are additive — the raw view
 // staying silent cannot take them back — so that lands as a loud alert.
 //
-// Masking therefore runs only inside a WELL-FORMED JSON string literal:
-// quoted, terminated, no raw control characters, and every backslash in it a
-// real escape. One stray backslash disqualifies the whole run, which is what
-// also keeps out a path that merely got quoted by a shell or by prose —
-// `"C:\node\bin\x.exe"` is disqualified by its `\x`, no escape in any JSON.
-// A conforming encoder writes a literal backslash `\\`, so this never costs a
-// genuine JSON body anything: its paths arrive doubled and are left alone as
-// before.
+// Masking therefore runs per TOKEN — a run of non-whitespace — and is
+// all-or-nothing: every backslash in the token opens a real escape, or none of
+// them do. The path above is one token holding `\a`, which no JSON escape
+// spells, so none of its backslashes are escapes and it is left exactly as it
+// arrived. A conforming encoder writes a literal backslash `\\`, so this costs
+// a genuine JSON body nothing: its paths arrive doubled, every escape in the
+// token is real, and the mask behaves as it always did.
 //
-// A local test, deliberately, rather than `JSON.parse(body)`: it finds the
-// JSON-escaped regions wherever they sit — an SSE `data:` frame, an NDJSON
-// line, a JSON blob pasted into a chat message — and leaves the non-JSON text
-// around them alone. Whole-body parsing would answer "no" to all three, and
-// the derived-text surface (already-decoded prose joined by REAL newlines,
-// where masking has no legitimate work at all) would still get masked.
+// The token is the right unit because it is the FP's own unit. Masking can only
+// invent a keyword/value pair that was never adjacent by blanking the thing
+// between them, and a rule reaches from keyword to value across at most a few
+// separator characters — so both sides have to sit in one token for the mask to
+// manufacture anything. Anything already split by whitespace was separated
+// before the mask ran.
 //
+// Requiring a JSON STRING around the escape instead — quoted, terminated,
+// well-formed — is the tempting stricter rule and is wrong in both directions.
+// Too strict: half the scan path is not JSON at all (derivedScanText joins
+// decoded prose with real newlines; otlp-map builds synthetic prompt+tool
+// bodies; a capture truncated at the buffer cap ends mid-string) and every one
+// of those loses masking wholesale. Measured on this repo's own files read as
+// tool output, a string gate keeps 52% of the escapes the mask used to blank;
+// the token gate keeps 99%. And not strict enough where it matters: pairing
+// quotes has a parity failure, so ONE disqualified run — a raw tab inside
+// quotes, an ANSI colour code, a `\d` in a regex, a lone `6" gauge` — makes
+// every following string's closing quote read as an opening one and silently
+// turns masking off for the rest of the line. Tokens have no parity to lose.
+//
+// Sticky and anchored at the token start, so the search stays linear: the run
+// admits empty and cannot fail, and where it stops is either the token's end or
+// the backslash that disqualified it. Letting a /g regex hunt whole tokens
+// instead backtracks inside every long one looking for a backslash it may not
+// contain.
+const TOKEN = /(?:[^\\\x00-\x20]|\\(?:u[0-9a-fA-F]{4}|[bfnrt"\\/]))*/y;
+
+// Whitespace by code unit, matching TOKEN's own class exactly — `\s` would
+// disagree with it on NUL (which separates the derived text's parts) and on
+// U+00A0, and a token whose two ends disagree about where it stops would mask
+// off the end of one.
+const isBoundary = (c: number) => c <= 32 || Number.isNaN(c);
+
 // Even so, the masked view can still blank a character that was really text,
-// because a quoted run whose escapes all happen to be valid is indistinguishable
-// from JSON: `see "C:\temp\redis://u:pw@h/0"` loses the `r` of `redis` and the
-// high-severity connection-string rule misses it; the same rule's password group
-// accepts backslashes, so `"mongodb://u:ab\ncd@h/db"` loses a character
-// mid-value. Pairing quotes can also desynchronize on prose holding an odd
-// number of them and skip a real JSON string. That is why scan() runs the rules
-// over BOTH views and unions the results rather than trusting the masked view
-// alone: every one of these costs the masked view a find the raw view is still
-// making, never a finding outright.
-//
-// Sticky, and matched from one quote at a time rather than let loose with /g,
-// because the search has to stay linear on hostile input. The run is anchored
-// at lastIndex and admits empty, so it cannot fail: where it stops IS the first
-// character that may not appear in a JSON string — the closing quote, or
-// whatever disqualified the run. A /g regex that demanded the closing quote
-// instead retries from every quote it passed, and `"\"\"\"…` consumes each of
-// its quotes as a `\"` escape, so all n/2 of them scan to EOF before failing —
-// quadratic, ~150 ms on 16 KB, minutes on a body at the capture cap.
-const STRING_BODY = /(?:[^"\\\x00-\x1f]|\\(?:u[0-9a-fA-F]{4}|[bfnrt"\\/]))*/y;
+// because a token whose escapes all happen to be valid is indistinguishable
+// from JSON: `C:\temp\redis://u:pw@h/0` loses the `r` of `redis` and the
+// high-severity connection-string rule misses it; the same rule's password
+// group accepts backslashes, so `mongodb://u:ab\ncd@h/db` loses a character
+// mid-value. That is why scan() runs the rules over BOTH views and unions the
+// results rather than trusting the masked view alone: this costs the masked
+// view a find the raw view is still making, never a finding outright.
 
 // Hot path: an 8 MiB escape-dense body runs this millions of times, so the
 // replacement avoids a per-match regex test. A match is either a 6-char
@@ -123,41 +136,36 @@ function maskEscape(esc: string): string {
 }
 
 export function maskJsonEscapes(text: string): string {
-  // Doubles as the fast path — no backslash anywhere, no escape to mask — and
-  // as the cursor below, which is why it is an index and not an `includes`.
+  // Driven by the backslashes, not by every token: a body with one escape in a
+  // megabyte walks one token, and a body with none returns here.
   let bs = text.indexOf("\\");
   if (bs < 0) return text;
+  const n = text.length;
   let out = "", pos = 0; // `out` holds text[0..pos), escapes so far blanked
-  for (let q = text.indexOf('"'); q >= 0; ) {
-    STRING_BODY.lastIndex = q + 1;
+  while (bs >= 0) {
+    let start = bs; // back up to the token's first character
+    while (start > 0 && !isBoundary(text.charCodeAt(start - 1))) start--;
+    TOKEN.lastIndex = start;
     // test(), not exec(): the run is walked for its extent, not its text, and
-    // exec would materialize every string in the body just to measure it — 4x
-    // the cost on a body whose strings mostly hold no escape. It cannot fail
-    // (sticky, and the run admits empty), but a false would reset lastIndex to
-    // 0 and walk `pos` backwards, so the extent is taken from a live true.
-    const end = STRING_BODY.test(text) ? STRING_BODY.lastIndex : q + 1;
-    if (text.charCodeAt(end) !== QUOTE) {
-      // Not a string. Resume at the character that disqualified it, never
-      // before: every quote in between was consumed as a `\"` escape, so
-      // reconsidering them is both the quadratic case above and the wrong
-      // answer — this run is not JSON, and masking less only ever costs the
-      // masked view a find the raw view is already making.
-      q = text.indexOf('"', end);
-      continue;
-    }
-    // Most strings in a JSON body hold no escape at all. `bs` is the first
-    // backslash at or after `q` and only ever moves forward, so locating them
-    // costs one pass across the whole loop rather than one per string, and an
-    // escape-free string is never copied.
-    if (bs < q) {
-      bs = text.indexOf("\\", q);
-      if (bs < 0) break; // no backslash left: no later string can need masking
-    }
-    if (bs < end) {
-      out += text.slice(pos, q + 1) + text.slice(q + 1, end).replace(JSON_ESCAPE, maskEscape);
+    // exec would materialize a string per token just to measure it. It cannot
+    // fail (sticky, and the run admits empty), but a false would reset
+    // lastIndex to 0 and walk `pos` backwards, so `start` is the fallback.
+    const stop = TOKEN.test(text) ? TOKEN.lastIndex : start;
+    let end = stop;
+    if (isBoundary(text.charCodeAt(stop))) {
+      // The run reached the token's end, so every backslash in it was an
+      // escape. charCodeAt past the end is NaN, which counts: an escape does
+      // not need the token terminated to be an escape, which is what keeps a
+      // capture truncated at the buffer cap working.
+      out += text.slice(pos, start) + text.slice(start, end).replace(JSON_ESCAPE, maskEscape);
       pos = end;
+    } else {
+      // Stopped on a backslash that opens nothing. The token is not escaped
+      // text; skip the whole of it, so a later valid-looking escape inside the
+      // same token cannot be blanked either.
+      while (end < n && !isBoundary(text.charCodeAt(end))) end++;
     }
-    q = text.indexOf('"', end + 1);
+    bs = text.indexOf("\\", end); // end > bs always, so this terminates
   }
   return pos === 0 ? text : out + text.slice(pos);
 }
