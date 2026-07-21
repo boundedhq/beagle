@@ -8,6 +8,7 @@ import { controlRequest } from "../src/daemon/control";
 import { Store } from "../src/core/store/store";
 import { listCalls, listLeakEvents } from "../src/viewer/feed-query";
 import { listSessions } from "../src/viewer/session-view";
+import { buildDetail } from "../src/viewer/detail";
 import { createServer, type Server } from "node:net";
 
 // fake upstream that replies with a fixed Anthropic-ish JSON body
@@ -502,11 +503,84 @@ describe("Daemon end-to-end", () => {
     const store = Store.openReadOnly(stateDir);
     const call = store.getCall(store.searchLiteral("just an ordinary ask")[0]!.callId)!;
     expect(call.displayMessages).toBeNull();
-    const { buildDetail } = await import("../src/viewer/detail");
     const detail = buildDetail(call, []);
     expect(detail.messages[0]!.content).toBe("just an ordinary ask");
     expect(detail.system).toBe("You are Claude Code."); // still lifted from the body
     store.close();
+  });
+
+  test("a tool call's ARGS are masked, not just its detail", async () => {
+    // args is the tool card's BODY (app.js draws `args ?? detail`), and for
+    // anthropic-messages it is JSON.stringify(input) — a RE-SERIALIZATION that
+    // decodes \uXXXX. A key written escaped in the response bytes matches no
+    // rule there, so nothing is spliced and no matched value exists to scrub
+    // by; only scanning the re-serialized string reaches it. Masking `detail`
+    // alone left the unmasked copy winning on the same card.
+    const key = "AKIAZQ3DRSTUVWXY2345";
+    const escaped = "\\u0041KIAZQ3DRSTUVWXY2345"; // A === "A"
+    const reply = `{"model":"m","content":[{"type":"tool_use","name":"bash","id":"t1","input":{"command":"aws set k ${escaped}"}}]}`;
+    const server = createServer((sock) => {
+      let sent = false;
+      sock.on("data", () => {
+        if (sent) return;
+        sent = true;
+        sock.write(`HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: ${reply.length}\r\n\r\n${reply}`);
+      });
+      sock.on("error", () => {});
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    let store: Store | undefined;
+    try {
+      const port = (server.address() as { port: number }).port;
+      await controlRequest(daemon.socketPath, {
+        cmd: "register-run",
+        args: { id: "run-tool-args", agent: "claude-code", provider: "anthropic", upstream: `http://127.0.0.1:${port}`, authLocation: "x-api-key" },
+      });
+      await sendThroughProxy(daemon.proxyPort, "run-tool-args", requestBody("escaped tool arg"));
+      let hit: { callId: string } | undefined;
+      for (let i = 0; i < 40 && !hit; i++) {
+        await Bun.sleep(50);
+        store?.close();
+        store = Store.openReadOnly(stateDir);
+        hit = store.searchLiteral("escaped tool arg")[0];
+      }
+      if (!hit) throw new Error("timed out waiting for the tool-call reply to be captured");
+      const call = store!.getCall(hit.callId)!;
+      // The bytes hold only the ESCAPED form, so no rule matched and nothing was
+      // spliced — the precondition that makes this unreachable by body redaction.
+      expect(new TextDecoder().decode(call.responseBody!)).not.toContain(key);
+      const action = buildDetail(call, []).responseCalls[0]!;
+      expect(action.args ?? "").not.toContain(key);
+      expect(action.detail ?? "").not.toContain(key);
+      expect(action.args ?? "").toContain("[REDACTED:aws-access-key-id:");
+      expect(action.tool).toBe("bash"); // the card still renders
+    } finally {
+      store?.close();
+      server.close();
+    }
+  });
+
+  test("a manufactured secret is masked in the view even with redact-on-capture OFF", async () => {
+    // The setting buys the raw view of bytes that were ON THE WIRE. This key
+    // never was in that form — the reassembly builds it at read time out of two
+    // individually innocent frames — so there is no raw copy for the opt-out to
+    // protect, and storing nothing just meant the viewer rebuilt it. Same line
+    // the always-visible summary already draws.
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: false } });
+    try {
+      const call = await streamedCall(
+        "run-split-noredact",
+        "stream a split secret unredacted",
+        deltaFrame("key AKIAZQ3DRSTUV") + deltaFrame("WXY2345 done"),
+      );
+      const d = buildDetail(call, []);
+      expect(d.responseText).not.toContain("AKIAZQ3DRSTUVWXY2345");
+      expect(d.responseText).toContain("[REDACTED:aws-access-key-id:");
+      // The raw panes still show every byte as received — that IS the setting.
+      expect(new TextDecoder().decode(call.sseRaw!)).toContain("AKIAZQ3DRSTUV");
+    } finally {
+      await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    }
   });
 
   test("a pasted QUOTED .env line alerts, end to end", async () => {

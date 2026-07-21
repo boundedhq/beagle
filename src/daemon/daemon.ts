@@ -470,7 +470,18 @@ export class Daemon {
     );
     const derived = await this.redactDerived(
       outboundParts,
-      [respParsed?.text ?? "", ...respActions.map((a) => a.detail ?? "")],
+      // [reply, then detail+args PER ACTION in order]. `args` is a scanned part
+      // and not merely value-scrubbed because it is not a verbatim slice of the
+      // bytes: for anthropic-messages it is JSON.stringify(b.input), a
+      // RE-SERIALIZATION, so `AKIA…` in the scanned body renders as
+      // `AKIA…` here. No rule matched the escaped bytes, so no span covers it
+      // and no matched value exists to scrub by — only scanning this string
+      // reaches it. It is also the tool card's BODY (app.js draws
+      // `args ?? detail`), so an unmasked args wins over a masked detail.
+      [
+        respParsed?.text ?? "",
+        ...respActions.flatMap((a) => [a.detail ?? "", a.args ?? ""]),
+      ],
       bodyValues,
     );
     // Positional, mirroring what redactDerived was handed just above: outbound
@@ -507,7 +518,8 @@ export class Daemon {
     //     MAX_FINDINGS_PER_RULE and still returns "ok", so match 501 of a rule
     //     is invisible to every pass — spans and value scrub alike.
     const summaryParsed = parsed && { ...parsed, messages: redactedMessages };
-    const summaryActions = respActions.map((a, i) => ({ ...a, detail: derived.inbound[i + 1]! }));
+    // Pairs, so the detail for action i sits at 1 + 2i (its args follows).
+    const summaryActions = respActions.map((a, i) => ({ ...a, detail: derived.inbound[1 + 2 * i]! }));
     // An unverified transcript is an unverified call: the row must not read
     // "ok" for text no scan checked. It rides the same `incomplete` flag as the
     // body halves, so the whole call is held out rather than only the derived
@@ -613,11 +625,20 @@ export class Daemon {
     // detail exactly as it would in a value-scrubbed summary. Closing that
     // needs `detail` promoted to a scanned part, which reshapes outbound and
     // its index arithmetic — deliberately not done here.
+    // NOT gated on `redaction`, unlike the stored bodies and the search index.
+    // Turning redact-on-capture off buys the raw view of BYTES THAT WERE ON THE
+    // WIRE — and a secret a join manufactures was never on the wire in that
+    // form; the reassembly builds it at read time out of parts that are
+    // individually innocent. So the setting has no raw copy to protect here,
+    // and leaving this NULL only meant the viewer rebuilt the secret instead.
+    // The always-visible summary already draws exactly this line above ("Runs
+    // whatever the setting"). The raw panes still show every byte as received,
+    // which is what the setting is actually for.
     let displayMessages: DisplayMessage[] | null = null;
-    if (redaction && !redaction.heldOut && derived.values.length > 0 && parsed) {
+    if (!redaction?.heldOut && derived.values.length > 0 && parsed) {
       // Built inside the branch: persisting a projection is the exception, so
       // the common row must not pay to assemble a value list it never reads.
-      const values = [...derived.values, ...redaction.values, ...bodyValues];
+      const values = [...derived.values, ...(redaction?.values ?? []), ...bodyValues];
       displayMessages = [
         { role: "system", content: derived.outbound[0]! },
         ...redactedMessages.map((m) =>
@@ -635,6 +656,20 @@ export class Daemon {
         ...(respParsed?.text !== undefined
           ? [{ role: "assistant", kind: "response" as const, content: derived.inbound[0] ?? "" }]
           : []),
+        // The reply's TOOL CALLS, same marker trick and same reason. The viewer
+        // re-runs extractActions over the stored body, which JSON-parses it —
+        // decoding the very escapes that hid the value from the scanner — so
+        // both halves of each card rebuild a string no rule ever matched in
+        // those bytes. args rides `content` (it is the card's body, and that is
+        // the field storedText scans for placeholders); detail keeps its own.
+        ...respActions.map((a, i) => ({
+          role: "assistant",
+          kind: "response-call" as const,
+          tool: a.tool,
+          callId: a.callId,
+          detail: derived.inbound[1 + 2 * i]!,
+          content: derived.inbound[2 + 2 * i]!,
+        })),
       ];
     }
 
