@@ -85,6 +85,15 @@ export interface SearchHit {
 
 const DB_FILE = "beagle.db";
 
+// attachOtelResponse staleness margin. An answer can only attach to a turn row
+// that PREDATES it — an answer is generated after its own prompt, so a
+// response-less row newer than the answer belongs to a later turn (a re-emitted
+// codex-rollout answer racing a re-typed identical prompt). The margin absorbs
+// cross-source timestamp imprecision (rollout ISO-ms vs OTLP ns, file-mtime
+// fallback stamps), not real ordering: keep it well under the seconds a human
+// takes to read an answer and re-send the same prompt.
+const ATTACH_MAX_SKEW_MS = 2000;
+
 // Disk bytes the fts5 trigram index costs per byte of indexed content —
 // the stored content copy plus the trigram postings. Measured on bun:sqlite
 // (fts5, tokenize='trigram'): ~2.3x for highly repetitive text, ~3.0x for
@@ -242,6 +251,8 @@ export class Store {
   attachOtelResponse(input: {
     sessionId: string;
     promptKey: string;
+    /** When the answer was produced — also the staleness bound: only rows with
+     *  ts_request at or before this (plus skew) are attach targets. */
     tsResponse: number;
     model?: string;
     tokensIn?: number;
@@ -262,13 +273,17 @@ export class Store {
       // by ts_request, not id: ids are ULIDs, only sortable across distinct
       // milliseconds (the random suffix decides within one). bytes_resp guards
       // double-attach: a second response for an already-answered turn stays a
-      // separate row rather than overwriting.
+      // separate row rather than overwriting. The ts_request bound refuses
+      // STALE attaches: a row newer than the answer is a later turn's (same
+      // prompt re-typed), and taking it would both mis-attribute this answer
+      // and orphan that turn's real one — refusal fails safe (no stitch, never
+      // a wrong one; see ATTACH_MAX_SKEW_MS).
       const target = this.db.get<{ id: string; tokens_in: number | null; tokens_out: number | null; summary: string | null }>(
         `SELECT id, tokens_in, tokens_out, summary FROM exchanges
          WHERE session_id=? AND prompt_key=? AND source='otel'
-           AND (bytes_resp IS NULL OR bytes_resp=0)
+           AND (bytes_resp IS NULL OR bytes_resp=0) AND ts_request <= ?
          ORDER BY ts_request ASC, id ASC LIMIT 1`,
-        [input.sessionId, input.promptKey],
+        [input.sessionId, input.promptKey, input.tsResponse + ATTACH_MAX_SKEW_MS],
       );
       if (!target) return false;
       const summary = input.composeSummary ? input.composeSummary(target.summary) : null;
