@@ -593,16 +593,21 @@ function respLeaks(t) {
 }
 
 // R7 backstop note: the turn is flagged but SOME detected value appears in
-// none of its renderable text (secret in a header / protocol field / escaped
-// form) — say where to look instead of showing a flag with nothing marked.
-// Per-value, not all-or-nothing: one visible secret must not silence the
-// pointer for a second, invisible one.
+// none of its renderable text (secret in an HTTP header / protocol field /
+// escaped form) — say where to look instead of showing a flag with nothing
+// marked. Per-value, not all-or-nothing: one visible secret must not silence
+// the pointer for a second, invisible one.
+// Detail lines count as renderable: ToolCard puts m.detail / c.detail in the
+// card header, and a derived-only redaction can leave its placeholder — which
+// is the l.value searched for here — in a detail and nowhere else (the server's
+// storedText makes the same call). Omitting them pointed the user at a raw
+// pane that holds nothing more than the header already shows.
 function leakNotVisible(t) {
   if (t.leaks.length === 0) return false;
   const text = [
-    ...t.messages.map((m) => String(m.content ?? "")),
+    ...t.messages.flatMap((m) => [String(m.content ?? ""), String(m.detail ?? "")]),
     t.responseText ?? "",
-    ...(t.responseCalls ?? []).map((c) => c.args ?? ""),
+    ...(t.responseCalls ?? []).flatMap((c) => [c.args ?? "", c.detail ?? ""]),
   ].join("\n");
   return t.leaks.some((l) => l.value && !text.includes(l.value));
 }
@@ -784,15 +789,17 @@ function Detail({ id, onSession }) {
   // timeline with a toggle the user has to discover.
   const hasStructure = messages.length > 0 || system != null;
   const showRaw = raw || !hasStructure;
-  // What the readable view actually HIGHLIGHTS inline: the messages (earlier
-  // ones holding a leak are force-shown, above), the response text, and the
-  // response's tool-call args. NOT the system prompt — it sits in a collapsed,
-  // un-highlighted chip — and NOT anything only in a header or protocol field.
-  // If the secret lives only in those, point the user at raw.
+  // What the readable view actually SHOWS inline: the messages (earlier ones
+  // holding a leak are force-shown, above), each card's detail line (ToolCard
+  // renders it in the header, and a derived-only redaction can leave its
+  // placeholder there and nowhere else), the response text, and the response's
+  // tool-call args. NOT the system prompt — it sits in a collapsed,
+  // un-highlighted chip — and NOT anything only in an HTTP header or protocol
+  // field. If the secret lives only in those, point the user at raw.
   const readableText = [
-    ...messages.map((m) => m.content),
+    ...messages.flatMap((m) => [m.content, m.detail ?? ""]),
     detail.responseText ?? "",
-    ...responseCalls.map((c) => c.args ?? ""),
+    ...responseCalls.flatMap((c) => [c.args ?? "", c.detail ?? ""]),
   ].join("\n");
   // Per-value, not all-or-nothing (mirrors leakNotVisible): if ANY detected
   // value is absent from the readable text, point at raw — one visible secret
