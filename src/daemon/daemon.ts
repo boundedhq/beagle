@@ -775,7 +775,14 @@ export class Daemon {
   ): Promise<{ state: "ok" | "incomplete"; findings: Finding[]; values: Array<{ value: string; type: string }> }> {
     const text = call.derivedText;
     if (!text) return { state: "ok", findings: [], values: [] };
-    const result = await this.scanHost.scan(new TextEncoder().encode(text), {});
+    const bytes = new TextEncoder().encode(text);
+    const result = await this.scanHost.scan(bytes, {});
+    // The same protocol-identity noise filter the body gets, and it matters
+    // MORE here: a request body pasted into a prompt (an ordinary debugging
+    // ask) carries `"prompt_cache_key":"…"` escaped in the raw bytes, where the
+    // backslash keeps the generic rule from matching at all — flattening
+    // unescapes it into exactly the shape the filter exists to suppress.
+    const scanned = dropIdentityFieldNoise(bytes, result.findings);
     // Dedup against the raw scan: a secret the bytes already proved keeps its
     // own tier and its own body span, and must not be re-filed here at the
     // lower one. Matched by VALUE modulo escaping, not by fingerprint — the
@@ -786,7 +793,7 @@ export class Daemon {
     for (const f of rawFindings) for (const form of secretForms(body.slice(f.start, f.end))) seen.add(form);
     const findings: Finding[] = [];
     const values: Array<{ value: string; type: string }> = [];
-    for (const f of result.findings) {
+    for (const f of scanned) {
       const value = text.slice(f.start, f.end);
       // Already proven by the bytes, or a repeat within the flattened text.
       if (!value || secretForms(value).some((form) => seen.has(form))) continue;

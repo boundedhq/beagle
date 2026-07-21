@@ -284,6 +284,23 @@ describe("Mode B end-to-end through the daemon", () => {
     store.close();
   });
 
+  test("the identity-field noise filter applies to derived text too", async () => {
+    // A request body pasted into a prompt while debugging — ordinary agent
+    // work. `prompt_cache_key` IS the session id, not a credential, which is
+    // what dropIdentityFieldNoise exists to say. In the serialized bytes the
+    // field arrives escaped (`\"prompt_cache_key\":\"…\"`), where the backslash
+    // keeps the generic rule from matching at all; flattening unescapes it into
+    // exactly the shape that fires. Without the filter on this surface, opening
+    // a request body in a prompt would file a leak.
+    const pasted = '{"prompt_cache_key":"sess-a1b2c3d4e5f60718293a4b5c6d7e8f90"}';
+    const prompt = JSON.stringify([{ role: "user", content: `why does this 400: ${pasted}` }]);
+    await post(otlpBody(token, prompt, "otel-conv-identity", null));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    expect(listLeakEvents(store)).toEqual([]);
+    store.close();
+  });
+
   test("a plain-string prompt is not re-scanned as derived text", async () => {
     // The second scan exists only where flattening CHANGED the text. A plain
     // prompt is already in the scanned bytes verbatim, so scanning it again
