@@ -490,6 +490,54 @@ describe("Mode B end-to-end through the daemon", () => {
     store.close();
   });
 
+  // The pair above asserts the SUMMARY and stops there, which leaves the other
+  // two surfaces a sub-floor value reaches with no assertion at that length: the
+  // stored transcript and the FTS index. Only the PEM case above covers all
+  // four at once, and it uses a LONG secret — so a regression confined to the
+  // index or the transcript, at a length where the value scrub cannot stand in,
+  // passed the whole file while shipping a password in cleartext at rest. That
+  // is the exact shape of the original report: the body read [REDACTED:…] while
+  // searchLiteral("svc:abcd@") still returned a hit.
+  //
+  // Every negative here is paired with the POSITIVE placeholder assertion,
+  // because a withheld call satisfies all of the negatives on its own —
+  // scanState "incomplete" stores "[REDACTION INCOMPLETE: content withheld]"
+  // and `redacted: true` — and would pass a test that only checked for absence
+  // without the redaction path ever having run.
+  //
+  // Config left at its default (redactOnCapture is true, config.ts) like the
+  // two tests above: forcing it on would keep this passing if the default ever
+  // flipped, and this is the test whose name claims the broadest guarantee.
+  //
+  // mongodb+srv also exercises the scheme alternation's optional group, which
+  // the postgres cases above do not reach.
+  test("a short Mode B secret reaches NO stored surface — body, transcript, index, summary", async () => {
+    await post(otlpBody(token, "connect with mongodb+srv://svc:abcd@cluster0.mongodb.test/db please", "otel-conv-short-all", null));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    expect(store.searchLiteral("connect with").length).toBe(1);
+    const call = store.getCall(store.searchLiteral("connect with")[0]!.callId)!;
+    expect(call.redacted).toBe(true);
+    // The stored body: offset-redacted.
+    const body = new TextDecoder().decode(call.requestBody!);
+    expect(body).not.toContain(":abcd@");
+    expect(body).toContain("[REDACTED:connection-string:");
+    // The transcript the session view renders — re-derived from the parts, so a
+    // span is the only thing that can have masked it.
+    expect(JSON.stringify(call.displayMessages)).not.toContain(":abcd@");
+    expect(JSON.stringify(call.displayMessages)).toContain("[REDACTED:connection-string:");
+    // The index, which would otherwise answer a search with the password.
+    expect(store.searchLiteral("svc:abcd@")).toEqual([]);
+    expect(store.searchLiteral("mongodb+srv://svc:abcd@cluster0.mongodb.test/db")).toEqual([]);
+    // The always-visible feed line.
+    expect(call.summary).not.toContain(":abcd@");
+    expect(call.summary).toContain("[REDACTED:connection-string:");
+    // …while the rest of the prompt stays searchable and readable: this masks a
+    // secret, not the line that carried it.
+    expect(call.summary).toContain("connect with");
+    store.close();
+  });
+
   test("a response arriving in a later OTLP batch rejoins its turn row (cross-batch stitch)", async () => {
     // The real interactive pattern (verified live against Claude Code 2.1.193):
     // the prompt flushes in its own batch ~1s after Enter; the answer lands in

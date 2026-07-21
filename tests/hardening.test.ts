@@ -190,6 +190,30 @@ describe("redact-on-capture (R11)", () => {
     expect(out.values).toEqual([{ value: secret, type: "aws-access-key-id" }]);
   });
 
+  // The floor is redactValuesInText's alone. This path is what makes a short
+  // secret recoverable at all — it splices by OFFSET, and an offset does not
+  // care how long the value is — so state that as its own assertion rather than
+  // leaving it implied by the daemon tests that depend on it. Four chars is the
+  // shortest a rule can report today (connection-string's secretGroup is the
+  // password alone, `([^\s@\/]{4,})`), which is exactly half the floor: a floor
+  // added here "for symmetry" with the value scrub would silently reopen the
+  // hole this path exists to close.
+  test("redactDerivedParts has NO length floor — a 4-char finding is still spliced", () => {
+    const secret = "abcd";
+    const parts = ["connect with", `mongodb+srv://svc:${secret}@cluster0.mongodb.test/db`];
+    const joined = derivedScanText(parts);
+    const at = joined.indexOf(`:${secret}@`) + 1; // the password alone, as secretGroup reports it
+    const out = redactDerivedParts(parts, [finding(at, at + secret.length, "connection-string")]);
+    expect(out.parts[0]).toBe("connect with"); // untouched
+    expect(out.parts[1]).toBe(`mongodb+srv://svc:${redactionPlaceholder("connection-string", secret)}@cluster0.mongodb.test/db`);
+    expect(out.values).toEqual([{ value: secret, type: "connection-string" }]);
+    // And the contrast that makes the point: the same value through the value
+    // scrub is a NO-OP. Two passes, one input, opposite outcomes — which is why
+    // every derived surface must be built from the parts above and never from
+    // raw text handed to the scrub.
+    expect(redactValuesInText(parts[1]!, out.values)).toBe(parts[1]!);
+  });
+
   test("redactDerivedParts splices a finding that SPANS two parts out of both", () => {
     // A PEM whose BEGIN and END sit in different messages: the transcript
     // renders them adjacently, so it is readable, so it must be masked — and
