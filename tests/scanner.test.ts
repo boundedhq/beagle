@@ -626,11 +626,14 @@ describe("JSON-escape-prefixed secrets (leading-boundary regression)", () => {
     expect(maskJsonEscapes(`x${"\\".repeat(40)}ny`)).toBe(`x${"\\".repeat(8)}${" ".repeat(33)}y`);
   });
 
-  // The split is what keeps a literal backslash from being erased. An odd run
-  // longer than one is never a pure nested escape: a newline at depth d takes
-  // 2^(d-1) backslashes, so 1, 2, 4, 8 are escapes and 3 is a typed backslash
-  // followed by a depth-1 one. Blanking all of 3 erased the backslash that
-  // stops `C:\aws\` + newline + digest reading as an aws-keyed secret.
+  // The split is what keeps a literal backslash from being erased. A LETTER
+  // escape's pure nested run is a power of two — a newline at depth d takes
+  // 2^(d-1) backslashes, so 1, 2, 4, 8 — which makes a 3-run before `n` a
+  // typed backslash followed by a depth-1 escape. (Not so before a quote: a
+  // depth-2 `\"` is a pure 3-run, still read the literal way — the engine.ts
+  // ESCAPE_RUN comment weighs that trade.) Blanking all of 3 erased the
+  // backslash that stops `C:\aws\` + newline + digest reading as an aws-keyed
+  // secret.
   test("a run splits into kept literals and a blanked 2^k escape", () => {
     expect(maskJsonEscapes(String.raw`a\nb`)).toBe("a  b"); // depth 1
     expect(maskJsonEscapes(String.raw`a\\nb`)).toBe("a   b"); // depth 2

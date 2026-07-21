@@ -78,15 +78,30 @@ const MAX_PROBES = 1 << 16;
 // single-encoding reading, where `\\` is one escaped backslash and the `n`
 // after it is literal) is precisely what misses depth 2.
 //
-// But only the trailing 2^k backslashes belong to the escape, and the rest are
-// literal. A newline at depth d is written with 2^(d-1) backslashes — 1, 2, 4,
-// 8 — so an ODD run longer than one is never a pure nested escape; it is a
-// literal backslash the sender typed, followed by a shallower escape. Blanking
-// the whole run there erases that literal backslash, and it is load-bearing:
-// `C:\aws\` + newline + a 40-char digest arrives as a 3-run, and with the
-// backslash gone the digest reads as an aws-keyed secret at HIGH severity. So
-// the run is split — leading literals kept, the 2^k suffix and its escape char
-// blanked — which detects every depth AND keeps that false positive silent.
+// But the run alone does not say how much of it is escape. The letter escapes
+// (`\n` `\t` `\uXXXX`) at depth d carry 2^(d-1) backslashes — 1, 2, 4, 8,
+// always a power of two — but a nested QUOTE carries 2^d - 1 — 1, 3, 7,
+// always ODD, because every layer must re-escape the quote it wraps (`\/` does
+// not share this: no standard encoder re-escapes a slash, so its runs just
+// double like the letters') — and a literal backslash the sender typed adds
+// 2^d in front of whatever follows. So `\\\"` is BOTH a pure depth-2 quote and a typed
+// backslash before a depth-1 quote; the bytes cannot tell them apart. maskRun
+// resolves every run toward the literal reading: only the trailing 2^k
+// backslashes are treated as escape and blanked with their escape char, and
+// the rest are kept. Keeping them is load-bearing — `C:\aws\` + newline + a
+// 40-char digest arrives as a 3-run, and blanking all three erases the
+// backslash that stops the digest reading as an aws-keyed secret at HIGH
+// severity. The letter family loses nothing (its pure runs ARE the 2^k
+// suffix, at every depth), but the quote family pays from depth 2 up: the
+// quoted .env form `KEY=\"…\"` arrives at depth 2 as `KEY=\\\"…`, and the
+// kept backslash is a phantom between `=` and the value that no separator
+// class admits — the one-unit `\"` alternate in aws-secret-access-key reaches
+// depth 1 only. So the QUOTED .env form gets one less depth of loud detection
+// than the unquoted (HIGH through depth 1, only the quiet aws-secret-shape
+// tier from depth 2) — the same asymmetry that rule's description records for
+// the raw/depth-1 pair, moved one depth up. Extending it is separator data on
+// that rule, not a different split here: run arithmetic cannot tell a phantom
+// from a typed backslash.
 //
 // That reading cannot be the only one, because nothing on the wire tells an
 // escape apart from a literal backslash in a body that is not JSON:
@@ -240,9 +255,10 @@ function maskRun(run: string): string {
   // A run ending in a backslash consumed no escape char, so it is literal
   // text at every depth — leave it exactly as it arrived.
   if (run.charCodeAt(run.length - 1) === BACKSLASH) return run;
-  // Only the trailing 2^k backslashes belong to the escape; anything before
-  // them is a literal backslash the sender really typed, and blanking it
-  // would erase a separator the rules rely on. See ESCAPE_RUN.
+  // The literal reading: treat only the trailing 2^k backslashes as escape
+  // and keep the rest. That preserves typed backslashes (separators the rules
+  // rely on) at the price of a phantom backslash when a quote escape nests —
+  // see ESCAPE_RUN for the ambiguity and what each side costs.
   let bs = 0;
   while (run.charCodeAt(bs) === BACKSLASH) bs++;
   let used = 1;
