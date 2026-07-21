@@ -1031,15 +1031,24 @@ export class Daemon {
       const messages = call.request.messages ?? [];
       const requestText = new TextDecoder().decode(call.request.bodyBytes);
       const bodyValues = findingValues(requestText, scanResult.findings);
-      // The headline rides as a SECOND inbound part so it gets its own scrub
-      // rather than being sliced out of the merged one — it is what reaches
-      // the feed line, and the feed line must never be the surface that
-      // shows a secret the body redacted.
+      // The inbound half is ONE part: whatever the feed line will quote. It
+      // needs its own scrub — the summary must never be the surface still
+      // showing a value the body redacted — and it is scrubbed here because
+      // redactDerivedParts splices by part-local offsets.
+      //
+      // Deliberately not [merged, headline]: inbound findings never alert
+      // (redactDerived keeps only f.start < outboundEnd), Mode B reads inbound
+      // for nothing but this summary, and the stored body is redacted from
+      // respScan — which for a rollout answer scans the very same string, since
+      // response.text and response.bodyBytes are both `ans.answer`. So carrying
+      // the merged text too would re-scan bytes already covered while doubling
+      // this text against MAX_FINDINGS_PER_RULE, and a response saturated with
+      // secret-shaped matches would start DROPPING findings at half the count
+      // it takes today — dropped findings being exactly the ones that would
+      // have scrubbed the line.
       const derived = await this.redactDerived(
         messages.map((m) => String(m.content)),
-        call.responseHeadline
-          ? [call.response.text ?? "", call.responseHeadline]
-          : [call.response.text ?? ""],
+        [call.responseHeadline ?? call.response.text ?? ""],
         bodyValues,
         requestText,
       );
@@ -1114,9 +1123,9 @@ export class Daemon {
         ? "[REDACTION INCOMPLETE: content withheld]"
         : buildSummary(
             { model: call.model, messages: summaryMessages } as ParsedRequest,
-            // The headline when this turn has one (a narrating rollout answer),
-            // else the whole response — see OtelCall.responseHeadline.
-            derived.inbound[1] ?? derived.inbound[0],
+            // The scrubbed headline when this turn has one (a narrating rollout
+            // answer), else the whole response — see OtelCall.responseHeadline.
+            derived.inbound[0],
             undefined,
             // The same backstop the wire path keeps, reaching the same two
             // cases and carrying the same 8-char limit — see there. And picked
