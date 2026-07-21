@@ -621,9 +621,10 @@ describe("performance budget (R5/R9)", () => {
   });
 
   test("quote- and backslash-dense text cannot blow up the string scan", () => {
-    // JSON_STRING is scanned with a regex; a body engineered to make every
+    // STRING_BODY is scanned with a regex; a body engineered to make every
     // candidate string fail late must stay linear, not quadratic. Each shape is
-    // 256 KB of the worst case it can build.
+    // 256 KB of the worst case it can build — `"\"\"…` is the one that was
+    // quadratic, at ~150 ms per 16 KB, so a regression blows this by ~200x.
     for (const unit of ['"', '\\', '"\\', 'a"\\x', '"aaaa\\q', '"\\\\"']) {
       let body = "";
       while (body.length < 1 << 18) body += unit;

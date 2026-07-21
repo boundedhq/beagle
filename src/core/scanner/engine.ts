@@ -88,6 +88,17 @@ const JSON_ESCAPE = /\\(?:u[0-9a-fA-F]{4}|[bfnrt"\\/])/g;
 // the derived-text surface (already-decoded prose joined by REAL newlines,
 // where masking has no legitimate work at all) would still get masked.
 //
+// Even so, the masked view can still blank a character that was really text,
+// because a quoted run whose escapes all happen to be valid is indistinguishable
+// from JSON: `see "C:\temp\redis://u:pw@h/0"` loses the `r` of `redis` and the
+// high-severity connection-string rule misses it; the same rule's password group
+// accepts backslashes, so `"mongodb://u:ab\ncd@h/db"` loses a character
+// mid-value. Pairing quotes can also desynchronize on prose holding an odd
+// number of them and skip a real JSON string. That is why scan() runs the rules
+// over BOTH views and unions the results rather than trusting the masked view
+// alone: every one of these costs the masked view a find the raw view is still
+// making, never a finding outright.
+//
 // Sticky, and matched from one quote at a time rather than let loose with /g,
 // because the search has to stay linear on hostile input. The run is anchored
 // at lastIndex and admits empty, so it cannot fail: where it stops IS the first
@@ -97,14 +108,6 @@ const JSON_ESCAPE = /\\(?:u[0-9a-fA-F]{4}|[bfnrt"\\/])/g;
 // its quotes as a `\"` escape, so all n/2 of them scan to EOF before failing —
 // quadratic, ~150 ms on 16 KB, minutes on a body at the capture cap.
 const STRING_BODY = /(?:[^"\\\x00-\x1f]|\\(?:u[0-9a-fA-F]{4}|[bfnrt"\\/]))*/y;
-
-// Even so, the masked view can still blank a character that was really text,
-// because a quoted run whose escapes all happen to be valid is indistinguishable
-// from JSON: `see "C:\temp\redis://u:pw@h/0"` loses the `r` of `redis` and the
-// high-severity connection-string rule misses it; the same rule's password group
-// accepts backslashes, so `"mongodb://u:ab\ncd@h/db"` loses a character
-// mid-value. That is why scan() runs the rules over BOTH views and unions the
-// results rather than trusting the masked view alone.
 
 // Hot path: an 8 MiB escape-dense body runs this millions of times, so the
 // replacement avoids a per-match regex test. A match is either a 6-char
@@ -120,25 +123,37 @@ function maskEscape(esc: string): string {
 }
 
 export function maskJsonEscapes(text: string): string {
-  if (!text.includes("\\")) return text; // fast path: nothing to mask
-  let out = "", pos = 0; // `out` holds text[0..pos), with the escapes so far blanked
+  // Doubles as the fast path — no backslash anywhere, no escape to mask — and
+  // as the cursor below, which is why it is an index and not an `includes`.
+  let bs = text.indexOf("\\");
+  if (bs < 0) return text;
+  let out = "", pos = 0; // `out` holds text[0..pos), escapes so far blanked
   for (let q = text.indexOf('"'); q >= 0; ) {
     STRING_BODY.lastIndex = q + 1;
-    const body = STRING_BODY.exec(text)?.[0] ?? "";
-    const end = q + 1 + body.length;
+    // test(), not exec(): the run is walked for its extent, not its text, and
+    // exec would materialize every string in the body just to measure it — 4x
+    // the cost on a body whose strings mostly hold no escape. It cannot fail
+    // (sticky, and the run admits empty), but a false would reset lastIndex to
+    // 0 and walk `pos` backwards, so the extent is taken from a live true.
+    const end = STRING_BODY.test(text) ? STRING_BODY.lastIndex : q + 1;
     if (text.charCodeAt(end) !== QUOTE) {
       // Not a string. Resume at the character that disqualified it, never
       // before: every quote in between was consumed as a `\"` escape, so
       // reconsidering them is both the quadratic case above and the wrong
       // answer — this run is not JSON, and masking less only ever costs the
       // masked view a find the raw view is already making.
-      q = text.indexOf('"', Math.max(end, q + 1));
+      q = text.indexOf('"', end);
       continue;
     }
-    // Most strings in a JSON body carry no escape at all, so the copy is gated
-    // on one substring test and untouched bodies never leave the input string.
-    if (body.includes("\\")) {
-      out += text.slice(pos, q + 1) + body.replace(JSON_ESCAPE, maskEscape);
+    // Most strings in a JSON body hold no escape at all. `bs` is the first
+    // backslash at or after `q` and only ever moves forward, so locating them
+    // costs one pass across the whole loop rather than one per string, and an
+    // escape-free string is never copied. Once it is -1 no string can contain
+    // one, and the guard stops it rescanning to EOF for a backslash that is
+    // not there.
+    if (bs >= 0 && bs < q) bs = text.indexOf("\\", q);
+    if (bs >= 0 && bs < end) {
+      out += text.slice(pos, q + 1) + text.slice(q + 1, end).replace(JSON_ESCAPE, maskEscape);
       pos = end;
     }
     q = text.indexOf('"', end + 1);
