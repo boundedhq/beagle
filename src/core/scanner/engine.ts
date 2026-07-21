@@ -54,8 +54,12 @@ const MAX_FINDINGS_PER_RULE = 500;
 //   - Length is preserved, so match offsets still index the raw bytes that
 //     redaction splices and the store slices.
 //   - Masking only ever writes spaces, so it can add a boundary but never
-//     fabricate one inside a secret — no rule's charset contains a backslash,
-//     so no secret can span an escape run.
+//     fabricate a non-space character inside a value. It CAN still shorten one:
+//     two rules admit a backslash in what they capture (`private-key` via
+//     `[\s\S]`, and `connection-string`'s password group via the negated
+//     `[^\s@\/]`), so a password holding a literal `\n` is truncated in this
+//     view. That is not a gap only because the raw view below also runs — it
+//     is one of the concrete reasons that second pass is not optional.
 //   - Every rule regex is left untouched. Anchoring rules with a leading
 //     lookaround instead costs ~100x scan time (V8 can no longer fast-scan for
 //     the literal prefix) and blows the R5 budget.
