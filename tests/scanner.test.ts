@@ -219,6 +219,35 @@ describe("pasted secrets, JSON-encoded as they arrive on the wire", () => {
     ["backslash then colon", `C:\\aws\\:${DIGEST}`],
     ["backslash then tab", `C:\\aws\\\t${DIGEST}`],
   ];
+  // The tail is a negative lookahead, not \b, which needs a word char: a real
+  // 40-char key ending in + or / was missed outright (~3% of the keyspace).
+  for (const tail of ["+", "/"]) {
+    test(`a key ending in '${tail}' still alerts (\\b would not match it)`, () => {
+      const key = `${SECRET.slice(0, 39)}${tail}`;
+      const hit = scanText(wireBody(`AWS_SECRET_ACCESS_KEY="${key}"`))
+        .find((x) => x.secretType === "aws-secret-access-key");
+      expect(hit?.tier).toBe("structured");
+    });
+  }
+
+  test("a padded base64 blob near an aws keyword stays silent", () => {
+    // '=' is not a value character: 40 base64 chars encode exactly 30 bytes, so
+    // a real key never carries padding. Admitting it would make data-URI image
+    // blobs fire the moment the tail stopped requiring a word char.
+    const f = scanText(wireBody("aws logo: iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAA="));
+    expect(f.some((x) => x.secretType === "aws-secret-access-key")).toBe(false);
+  });
+
+  test("a longer run is not half-matched (partial redaction would leak the tail)", () => {
+    // \b let a 50-char value match on its first 40 when char 41 was + / or =.
+    // redact-on-capture splices exactly the finding's span, so that stored a
+    // live token with its last 10 characters intact. Whole run or nothing.
+    const long = `${SECRET}ABCDEFGHIJ`;
+    const hits = scanText(wireBody(`aws_secret_access_key = "${long}"`))
+      .filter((x) => x.secretType === "aws-secret-access-key");
+    expect(hits).toEqual([]);
+  });
+
   for (const [shape, text] of PATHS) {
     test(`a backslash that does not escape a quote stays silent: ${shape}`, () => {
       // Raw body (single backslash) and wire body (doubled) must both stay quiet.
