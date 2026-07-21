@@ -180,6 +180,42 @@ describe("fingerprint stability across wrapping and wire encoding", () => {
     expect(fpOf(JSON.stringify({ c: pem(BODY) }))).not.toBe(fpOf(pem(BODY.replace("0Z3", "0Z4"))));
   });
 
+  const fpConn = (text: string) =>
+    scanText(text).find((x) => x.secretType === "connection-string")!.fingerprint;
+
+  test("a password ending in a quote fingerprints identically JSON-encoded and raw", () => {
+    // JSON-encoded, the password's closing quote ships as the two characters
+    // \ + ". Stripping the bare quote before decoding ate the " out of the
+    // escape and hashed the dangling `hunterpw\`, while the raw arrival hashed
+    // `hunterpw` — one secret, two fingerprints, and R6 dedup re-alerted.
+    const url = 'mongodb://app:hunterpw"@db.internal/prod';
+    expect(fpConn(JSON.stringify({ url }))).toBe(fpConn(`URL=${url}`));
+    // Both arrivals converge on the undecorated password itself.
+    expect(fpConn(`URL=${url}`)).toBe(fingerprint("hunterpw", HMAC_KEY));
+  });
+
+  test("a password starting with a quote agrees across encodings too", () => {
+    // The mirror image: `\"hunterpw` has no BARE leading quote, so the strip
+    // used to skip it and the decoded `"hunterpw` hashed with its quote on.
+    const url = 'mongodb://app:"hunterpw@db.internal/prod';
+    expect(fpConn(JSON.stringify({ url }))).toBe(fpConn(`URL=${url}`));
+  });
+
+  test("a \\u0022-escaping encoder agrees as well", () => {
+    // Same closing quote, third spelling. An escape-aware quote-strip taught
+    // the two-character `\"` would still split this one — the reason the fix
+    // is decode order, not a smarter strip.
+    const url = 'mongodb://app:hunterpw"@db.internal/prod';
+    const body = JSON.stringify({ url }).replace(/\\"/g, "\\u0022");
+    expect(fpConn(body)).toBe(fpConn(`URL=${url}`));
+  });
+
+  test("distinct quote-bearing passwords stay distinct", () => {
+    expect(fpConn(JSON.stringify({ url: 'mongodb://app:alpha9z"@db.internal/prod' }))).not.toBe(
+      fpConn(JSON.stringify({ url: 'mongodb://app:alpha9x"@db.internal/prod' })),
+    );
+  });
+
   test("an escaped backslash does not decode into the escape after it", () => {
     // `\\n` is a literal backslash then n, NOT a newline — true only because the
     // single left-to-right pass consumes `\\` whole. A refactor that collapsed
