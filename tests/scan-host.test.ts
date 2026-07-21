@@ -37,7 +37,9 @@ describe("ScanHost (worker-hosted scanner)", () => {
     expect(r.findings.length).toBe(500);
     expect(r.findings.every((f) => f.secretType === "aws-access-key-id")).toBe(true);
     // Matching is left to right, so the one dropped is exactly the 501st
-    // occurrence — and every reported span still slices a real occurrence.
+    // occurrence: 500 DISTINCT starts (500 duplicate spans would pass every
+    // other line here), each slicing a real occurrence, none of them the last.
+    expect(new Set(r.findings.map((f) => f.start)).size).toBe(500);
     const lastAt = body.lastIndexOf(KEY);
     expect(r.findings.some((f) => f.start === lastAt)).toBe(false);
     for (const f of r.findings) expect(body.slice(f.start, f.end)).toBe(KEY);

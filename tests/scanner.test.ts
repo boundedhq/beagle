@@ -978,6 +978,10 @@ describe("scan caps (silent deadline backstops)", () => {
     expect(findings.every((f) => f.secretType === "npm-token")).toBe(true);
     const plainFrom = body.indexOf(`\n${NPM}`) + 1;
     expect(findings.every((f) => f.start >= plainFrom)).toBe(true);
+    // 500 DISTINCT plain occurrences (duplicate spans would pass the lines
+    // above), and the one past the cap is exactly the 501st — the last.
+    expect(new Set(findings.map((f) => f.start)).size).toBe(500);
+    expect(findings.some((f) => f.start === body.lastIndexOf(NPM))).toBe(false);
   });
 
   test("the base64 decode probe stops at its budget: last funded candidate decodes, the next is skipped", () => {

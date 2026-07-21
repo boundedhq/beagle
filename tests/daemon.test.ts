@@ -911,24 +911,27 @@ describe("Daemon end-to-end", () => {
     // transcript, not the body, so AlertEngine.process(…, bodySpans=false)
     // must store NULL: a real offset here would be sliced out of the raw body
     // by extractLeaks and rendered as a highlight "value" of arbitrary JSON.
-    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: false } });
+    const marker = "stream a split secret unredacted";
     const reqBody = JSON.stringify({
       model: "claude-sonnet-5",
       system: "You are Claude Code.",
       messages: [{
         role: "user",
         content: [
-          { type: "text", text: "stream a split secret unredacted AKIAZQ3DRSTUV" },
+          { type: "text", text: `${marker} AKIAZQ3DRSTUV` },
           { type: "text", text: "WXY6789 goes out in the same message" },
         ],
       }],
     });
-    expect(scanRaw(reqBody)).toEqual([]); // premise: the byte scan is blind to both halves
+    // Premise first, before any config change: the byte scan is blind to both
+    // halves, so everything below is the derived scan's doing.
+    expect(scanRaw(reqBody)).toEqual([]);
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: false } });
     let store: Store | undefined;
     try {
       const call = await streamedCall(
         "run-split-noredact",
-        "stream a split secret unredacted",
+        marker,
         deltaFrame("key AKIAZQ3DRSTUV") + deltaFrame("WXY2345 done"),
         "",
         reqBody,
