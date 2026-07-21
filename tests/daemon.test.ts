@@ -708,6 +708,90 @@ describe("Daemon end-to-end", () => {
     store!.close();
   });
 
+  test("a sub-floor derived-only password stays in the body — the residual, pinned", async () => {
+    // A KNOWN LIMIT, asserted so it is a decision rather than a discovery.
+    // connection-string captures the bare password, four chars here, and the
+    // value scrub floors at eight — so extraValues, which has no span to fall
+    // back on, cannot reach it. Everything a human READS is still masked: the
+    // transcript, the feed line and the index all come from parts the derived
+    // scan spliced by offset. What keeps the password is the raw body pane.
+    //
+    // The fixture is an ordinary Python client, not a contrivance: json.dumps
+    // writes `", "` between the two content blocks, and connection-string's
+    // `[^\s@\/]{4,}` cannot cross that space — so the body scan reports
+    // nothing, and only the flattened text sees the whole URL. Closing this
+    // means blanking a four-char string across a whole request body, which
+    // takes `root` in a path and every id that contains it along with it.
+    const body = '{"model": "claude-sonnet-5", "messages": [{"role": "user", "content": '
+      + '[{"type": "text", "text": "python split db: postgres://svc:pw12"}, '
+      + '{"type": "text", "text": "@db.internal/app"}]}]}';
+    expect(scanRaw(body)).toEqual([]); // the body scan really is blind to it
+    await sendThroughProxy(daemon.proxyPort, "run-e2e", body);
+    let store: Store | undefined;
+    let hit: { callId: string } | undefined;
+    for (let i = 0; i < 40 && !hit; i++) {
+      await Bun.sleep(50);
+      store?.close();
+      store = Store.openReadOnly(stateDir);
+      hit = store.searchLiteral("python split db")[0];
+    }
+    if (!hit) throw new Error("timed out waiting for the split connection string to be captured");
+    const call = store!.getCall(hit.callId)!;
+    // The derived scan DID see it, so the surfaces built from its parts are clean…
+    expect(call.summary).not.toContain("pw12");
+    expect(JSON.stringify(call.displayMessages)).not.toContain("pw12");
+    expect(store!.searchLiteral("svc:pw12")).toEqual([]);
+    // …and this is the part that is not. If a change starts covering it, this
+    // line fails on purpose — promote it, don't delete it.
+    expect(new TextDecoder().decode(call.requestBody!)).toContain("pw12");
+    store!.close();
+  });
+
+  test("scrubbing the body by value does NOT move the search index off the projection", async () => {
+    // Two derived-only findings on one call, and they need different surfaces:
+    // the api_key is verbatim in the body, so the value scrub reaches it and
+    // the bodies really are rewritten — while the AWS key is MANUFACTURED by
+    // the join between two content blocks, so it exists in no body at all and
+    // only the projection's span covers it.
+    //
+    // The trap: making `redacted` honest about the value pass also flipped the
+    // flag that decides which surface feeds fts5. Following it would index the
+    // body — where the manufactured key sits as two innocent-looking halves 25
+    // bytes apart — in place of a projection that carries one placeholder over
+    // the whole thing. The index follows the SPANS now, so it doesn't.
+    const key = "Xk7Qm2Vb9Rt4Ws8Yz1Nc6Pd3aJ5Hf0Lg";
+    const body = JSON.stringify({
+      model: "claude-sonnet-5",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: `config has "api_key": "${key}" and creds AKIAZQ3DRSTUV` },
+          { type: "text", text: "WXY2345 done" },
+        ],
+      }],
+    });
+    expect(scanRaw(body)).toEqual([]); // premise: neither is visible in the bytes
+    await sendThroughProxy(daemon.proxyPort, "run-e2e", body);
+    let store: Store | undefined;
+    let hit: { callId: string } | undefined;
+    for (let i = 0; i < 40 && !hit; i++) {
+      await Bun.sleep(50);
+      store?.close();
+      store = Store.openReadOnly(stateDir);
+      hit = store.searchLiteral("config has")[0];
+    }
+    if (!hit) throw new Error("timed out waiting for the two-finding call to be captured");
+    // searchLiteral is a substring match, so a HALF of the manufactured key is a
+    // hit if the raw body reached the index. Both halves, because splicing a
+    // finding that spans the join masks it out of both parts.
+    expect(store!.searchLiteral("AKIAZQ3DRSTUV")).toEqual([]);
+    expect(store!.searchLiteral("WXY2345")).toEqual([]);
+    // …while the body is still scrubbed of the value that WAS in it, which is
+    // the fix this test must not undo.
+    expect(new TextDecoder().decode(store!.getCall(hit.callId)!.requestBody!)).not.toContain(key);
+    store!.close();
+  });
+
   test("a derived-only secret in the REPLY is scrubbed from the response body and the raw stream", async () => {
     // The inbound half of the same hole, and the path extraValues newly
     // reaches: `redaction.values` is what redactRawStream borrows for the SSE

@@ -203,6 +203,30 @@ describe("redact-on-capture (R11)", () => {
     );
   });
 
+  test("a value whose raw form hides INSIDE its escaped form doesn't corrupt the body", () => {
+    // The forms are tried longest first because one can be a substring of
+    // another. A value opening with a backslash — connection-string's
+    // `[^\s@\/]{4,}` and private-key's `[\s\S]` both admit one — sits in the
+    // bytes as `\\abcdefgh`, so the RAW form matches at offset one and eats the
+    // escape: `\[REDACTED:…]`, which no longer parses, on a row reporting a
+    // clean rewrite. The secret does leave either way; what is asserted here is
+    // that the body around it survives.
+    const value = "\\abcdefgh"; // 9 chars, first is a backslash
+    const body = JSON.stringify({ messages: [{ content: `pw is ${value} here` }] });
+    const out = dec(applyCaptureRedaction({
+      incomplete: false,
+      requestBytes: enc(body),
+      requestFindings: [],
+      responseBody: null,
+      extraValues: [{ value, type: "connection-string" }],
+    }).requestBody);
+    expect(out).not.toContain(value);
+    expect(JSON.parse(out)).toBeDefined(); // the whole point: still parseable
+    expect(out).toBe(
+      JSON.stringify({ messages: [{ content: `pw is ${redactionPlaceholder("connection-string", value)} here` }] }),
+    );
+  });
+
   test("an extraValue no span covers is masked out of the stored bodies", () => {
     // The derived-scan hole: a finding only the DERIVED scan made is in no
     // `requestFindings` list, so redactBody masks nothing and the row used to

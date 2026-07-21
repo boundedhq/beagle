@@ -141,7 +141,17 @@ export function redactValuesInText(
     // front would run sha256 O(values x messages) times per captured call to
     // throw nearly all of it away.
     let placeholder: string | null = null;
-    for (const form of [value, jsonUnescaped(value), jsonEscaped(value)]) {
+    // LONGEST FIRST, and that ordering is load-bearing rather than tidy: one
+    // form can be a SUBSTRING of another, and replacing the short one first
+    // consumes the middle of the long one and leaves its head behind. Concrete,
+    // and it corrupts the stored body rather than just missing: a value opening
+    // with a backslash (connection-string and private-key both admit one) sits
+    // in the bytes as `\\abcdefgh`, the raw form `\abcdefgh` matches at offset
+    // ONE, and the result is `\[REDACTED:…]` — a dangling escape that no longer
+    // parses as JSON, on a row reporting a clean rewrite. Encoding only
+    // lengthens and decoding only shortens, so escaped/raw/decoded IS that
+    // order; sorting by length would say the same thing less directly.
+    for (const form of [jsonEscaped(value), value, jsonUnescaped(value)]) {
       if (form !== null && form.length >= 8 && text.includes(form)) {
         placeholder ??= redactionPlaceholder(type, value);
         text = text.split(form).join(placeholder);
@@ -393,12 +403,27 @@ export function applyCaptureRedaction(o: {
    *  the USERNAME's span, and redaction shipped the password in cleartext. A
    *  value is insensitive to which occurrence wins; a span is not.
    *
-   *  So it inherits both of redactValuesInText's residuals, and they stay
-   *  documented on the two functions that OWN them rather than restated here:
-   *  the 8-char floor (see there — under it only connection-string can go, and
-   *  nothing is exempted from it here, because scrubbing a four-char string out
-   *  of a whole request body blanks timestamps and ids along with it), and the
-   *  fixed list of value forms (see jsonEscaped).
+   *  So it inherits both of redactValuesInText's residuals, documented on the
+   *  functions that own them — the 8-char floor and the fixed list of value
+   *  forms. Both are LIVE here, not theoretical, because this is the one caller
+   *  with no span to fall back on. Pinned by tests rather than left to be
+   *  rediscovered:
+   *
+   *  - Under the floor only connection-string can go (it captures the bare
+   *    password). The tempting mitigation — "the password class eats JSON
+   *    structure up to the `@`, so the body matches too and a span covers it" —
+   *    is FALSE: that class is `[^\s@\/]{4,}`, so any space, `/` or `@` in the
+   *    bytes between two content blocks stops it, and python's json.dumps
+   *    writes `", "` by default. An ordinary Python client whose connection
+   *    string straddles two blocks therefore stores a 4-char password in the
+   *    clear on a row that reads `redacted`. Not floor-exempted, because
+   *    scrubbing a four-char string out of a whole request body blanks
+   *    unrelated text with it — `root` inside a path, an id, a timestamp — and
+   *    over-redacting the Layer-2 fidelity view that far is its own harm.
+   *  - A serializer escaping what JSON.stringify leaves alone (`\/`, `\u0041`)
+   *    writes a form no re-encoding produces, and that one loses the WHOLE
+   *    value, not a short one. Reachable from a general HTTP client rather than
+   *    from the agents beagle ships shims for.
    *
    *  REQUIRED, not optional, though `[]` is a perfectly good answer. A new
    *  ingest path that simply forgot this would compile clean while reopening
@@ -454,12 +479,23 @@ export function applyCaptureRedaction(o: {
   // dedup lands HERE and not per consumer because the list leaves through
   // `values` into five of them (both bodies, the raw stream, the summary, the
   // transcript), and it rides the array copy those spreads already pay for.
+  //
+  // Sorted LONGEST FIRST for the reason the form list is (see
+  // redactValuesInText): one value can be a SUBSTRING of another — two rules
+  // matching the same bytes at different widths is the ordinary case, e.g.
+  // aws-access-key-id's 20 chars inside generic-api-key's 28 — and scrubbing
+  // the short one first leaves the long one's tail in the clear beside a
+  // placeholder. Sorted once here rather than inside the scrub, which runs per
+  // message. Stable, so equal-length duplicates keep the order the dedup
+  // filtered on.
   const seen = new Set<string>();
-  const values = [...req.values, ...(resp?.values ?? []), ...o.extraValues].filter((v) => {
-    if (seen.has(v.value)) return false;
-    seen.add(v.value);
-    return true;
-  });
+  const values = [...req.values, ...(resp?.values ?? []), ...o.extraValues]
+    .filter((v) => {
+      if (seen.has(v.value)) return false;
+      seen.add(v.value);
+      return true;
+    })
+    .sort((a, b) => b.value.length - a.value.length);
   const requestBody = redactValues(req.bytes, values) ?? req.bytes;
   const responseBody = redactValues(resp?.bytes ?? o.responseBody, values);
   // Measured, not assumed. A finding always rewrites the body it was found in,

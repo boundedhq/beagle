@@ -764,18 +764,27 @@ export class Daemon {
         : redactRawStream(sseRaw, call.response.bodyBytes ?? null, respScan?.findings ?? [], redaction.values);
       // Outbound only (see buildSearchText): index the request, not the response.
       //
-      // This swaps the index off the span-redacted PROJECTION and onto the
-      // stored body, which is the broader surface — the projection is
-      // [system, ...contents] and the body is everything that actually left, so
-      // it is the one that can answer "was this sent" without a false negative
-      // (the Mode B half says the same, at greater length). The trade is that
-      // the body is value-scrubbed where the projection was span-redacted, so
-      // it inherits the 8-char floor. Widened by extraValues: a call whose only
-      // finding is derived now lands here whenever that value was in the body,
-      // where it used to keep the projection. Both surfaces are masked for the
-      // value that got it here; what differs is a SECOND, sub-floor value on
-      // the same call, which the projection would have spanned out.
-      searchText = new TextDecoder().decode(requestBody);
+      // The body is the broader surface — the projection is [system,
+      // ...contents] where the body is everything that actually left — so it is
+      // the one that answers "was this sent" without a false negative, and it
+      // is what a row with a body finding has always indexed. But it earns that
+      // only when a scan matched IN it: then its spans mask by offset, with no
+      // floor and no dependence on which rendering the value took. A body no
+      // scan matched is scrubbed by VALUE alone, and everything the value pass
+      // cannot reach — a sub-floor password, a fourth escaping, a secret the
+      // join MANUFACTURED out of two innocent halves — is cleartext in it while
+      // the projection beside it carries a placeholder spanning exactly that.
+      //
+      // So the swap follows the SPANS, not the redaction flag. Before
+      // extraValues the two agreed, because a call with no findings in either
+      // body could not be redacted at all; making the flag honest about the
+      // value pass would otherwise have moved precisely the rows that must not
+      // move — the derived-only ones — onto the weaker surface.
+      const bodySpans = (stash?.findings.length ?? 0) > 0 || (respScan?.findings.length ?? 0) > 0;
+      // `parsed` is the projection's precondition: without it buildSearchText
+      // falls back to the RAW request bytes, which is the one thing that must
+      // never reach the index on a redacted row.
+      if (bodySpans || !parsed) searchText = new TextDecoder().decode(requestBody);
     }
     const summary = redaction?.heldOut
       ? "[REDACTION INCOMPLETE: content withheld]"
