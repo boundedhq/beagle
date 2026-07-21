@@ -294,6 +294,40 @@ describe("Daemon end-to-end", () => {
     store.close();
   });
 
+  test("a secret split across two content blocks alerts and stays out of the search index", async () => {
+    // The wire path's own copy of the Mode B hole: flattenContent joins a
+    // message's content blocks with NOTHING between them, so this key exists in
+    // the readable projection — the summary and the search index — while the
+    // scanned bytes hold only the two halves either side of `"},{"type":…`.
+    // Nothing matched, so nothing alerted and `beagle search` answered with the
+    // key. The derived text is scanned on its own now.
+    await sendThroughProxy(
+      daemon.proxyPort, "run-e2e",
+      JSON.stringify({
+        model: "claude-sonnet-5",
+        messages: [{
+          role: "user",
+          content: [
+            { type: "text", text: "block one ends AKIAZQ3DRSTUV" },
+            { type: "text", text: "WXY2345 begins block two" },
+          ],
+        }],
+      }),
+    );
+    await Bun.sleep(150);
+    expect(alerts.length).toBe(1);
+    expect(alerts[0]!.secretType).toBe("aws-access-key-id");
+    const store = Store.openReadOnly(stateDir);
+    expect(listLeakEvents(store).length).toBe(1);
+    // The stored body keeps its bytes — no rule ever matched them, and neither
+    // half is a secret on its own.
+    const call = store.getCall(store.searchLiteral("block one ends")[0]!.callId)!;
+    expect(call.redacted).toBe(true); // the derived surfaces WERE rewritten
+    expect(call.summary).not.toContain("AKIAZQ3DRSTUVWXY2345");
+    expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
+    store.close();
+  });
+
   test("protocol identity fields (prompt_cache_key) never create leak events", async () => {
     // The exact false positive from live traffic: opencode's own session id,
     // high-entropy and preceded by "…key", flagged by the generic detector.

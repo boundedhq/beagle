@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/core/store/store";
-import { applyCaptureRedaction, redactBody, redactValues, redactValuesInText, redactionPlaceholder } from "../src/transform/redact";
+import { applyCaptureRedaction, clampRedacted, redactBody, redactDerivedParts, redactValues, redactValuesInText, redactionPlaceholder, secretKeys } from "../src/transform/redact";
 import { DEFAULT_CONFIG } from "../src/core/config/config";
 import { quarantineCorruptDb } from "../src/core/store/quarantine";
 import type { Finding } from "../src/core/scanner/engine";
@@ -125,6 +125,78 @@ describe("redact-on-capture (R11)", () => {
       const out = redactValuesInText(`sent ${decoded} onward`, [{ value: escaped, type: "x" }]);
       expect(out).toBe(`sent ${redactionPlaceholder("x", escaped)} onward`);
     }
+  });
+
+  // redactDerivedParts is what the value scrub above structurally cannot be:
+  // it splices the offsets of a scan run over the DERIVED text itself, so it
+  // reaches secrets that exist only in the rendering.
+  test("redactDerivedParts splices a finding out of the one part that holds it", () => {
+    const secret = "AKIAZQ3DRSTUVWXY2345";
+    const parts = ["hello", `key ${secret} here`, "bye"];
+    const joined = parts.join("\n");
+    const at = joined.indexOf(secret);
+    const out = redactDerivedParts(parts, [finding(at, at + secret.length, "aws-access-key-id")]);
+    expect(out.parts[0]).toBe("hello"); // untouched
+    expect(out.parts[2]).toBe("bye");
+    expect(out.parts[1]).toBe(`key ${redactionPlaceholder("aws-access-key-id", secret)} here`);
+    // The value comes back in the DERIVED form, for scrubbing text built from
+    // these parts that isn't one of them (the summary's quoted ask).
+    expect(out.values).toEqual([{ value: secret, type: "aws-access-key-id" }]);
+  });
+
+  test("redactDerivedParts splices a finding that SPANS two parts out of both", () => {
+    // A PEM whose BEGIN and END sit in different messages: the transcript
+    // renders them adjacently, so it is readable, so it must be masked — and
+    // neither part may be left holding its half.
+    const parts = [
+      "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAspanning",
+      "tail\n-----END RSA PRIVATE KEY-----",
+    ];
+    const joined = parts.join("\n");
+    const out = redactDerivedParts(parts, [finding(0, joined.length, "private-key")]);
+    expect(out.parts[0]).not.toContain("MIIEowIBAAKCAQEAspanning");
+    expect(out.parts[0]).not.toContain("BEGIN RSA PRIVATE KEY");
+    expect(out.parts[1]).not.toContain("END RSA PRIVATE KEY");
+    // Each part is fully replaced here, so both read as the same placeholder —
+    // one secret, two masks, which is the over-redacting direction.
+    const ph = redactionPlaceholder("private-key", joined);
+    expect(out.parts).toEqual([ph, ph]);
+  });
+
+  test("redactDerivedParts skips an overlapping second finding rather than double-splicing", () => {
+    // Two quiet-tier rules can flag the same characters; splicing twice would
+    // corrupt the text around them. Same guard redactBody holds — and the
+    // skipped finding's value is still reported, so callers can scrub it.
+    const parts = [`x ${"a".repeat(40)} y`];
+    const out = redactDerivedParts(parts, [finding(2, 42, "generic"), finding(2, 30, "aws-secret-shape")]);
+    expect(out.parts[0]).toBe(`x ${redactionPlaceholder("generic", "a".repeat(40))} y`);
+    expect(out.values.length).toBe(2);
+  });
+
+  test("clampRedacted cuts past a straddling placeholder, never through it", () => {
+    const ph = redactionPlaceholder("aws-access-key-id", "AKIAZQ3DRSTUVWXY2345");
+    // The cap lands 4 characters into the placeholder: a plain slice would
+    // leave "[RED", which reads as a corrupted transcript, not a redaction.
+    const text = `${"f".repeat(10)}${ph} trailing`;
+    const out = clampRedacted(text, 14);
+    expect(out).toBe(`${"f".repeat(10)}${ph}`);
+    // Nothing to protect: a cut in ordinary text is exact.
+    expect(clampRedacted("f".repeat(50), 14)).toBe("f".repeat(14));
+    expect(clampRedacted("short", 14)).toBe("short");
+  });
+
+  test("secretKeys matches an escaped body value against its decoded rendering", () => {
+    // The dedup the alert path needs: one PEM seen in the bytes and again in
+    // the transcript is one leak, but the scanner's fingerprint can't say so —
+    // it strips whitespace, and the escaped form's `\n` is a backslash and an
+    // `n`, which survives.
+    const escaped = "-----BEGIN RSA PRIVATE KEY-----\\nMIIEowIBAAKCAQEAkeyed\\n-----END RSA PRIVATE KEY-----";
+    const decoded = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAkeyed\n-----END RSA PRIVATE KEY-----";
+    const shared = secretKeys(escaped).filter((k) => secretKeys(decoded).includes(k));
+    expect(shared.length).toBeGreaterThan(0);
+    // Two genuinely different secrets must not collide.
+    expect(secretKeys("AKIAZQ3DRSTUVWXY2345").some((k) => secretKeys("AKIAZQ3DRSTUVWXY9999").includes(k)))
+      .toBe(false);
   });
 
   test("applyCaptureRedaction holds all content out on an incomplete scan", () => {

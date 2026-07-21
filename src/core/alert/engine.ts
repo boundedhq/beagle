@@ -34,7 +34,11 @@ export class AlertEngine {
     private sink: AlertSink,
   ) {}
 
-  process(call: CallMeta, findings: Finding[]): void {
+  /** `bodySpans` false for findings scanned over DERIVED text (the rendered
+   *  transcript), whose offsets index that text and not the stored body — a
+   *  secret the display manufactured by joining blocks has no body span at all.
+   *  Recorded span-less rather than wrong; leakSpansFor already skips those. */
+  process(call: CallMeta, findings: Finding[], bodySpans = true): void {
     // Dedup keys on the destination PROVIDER (R6) — a mid-session model
     // switch is the same destination and must not re-alert. The model only
     // enriches the human-facing copy, built downstream.
@@ -50,7 +54,7 @@ export class AlertEngine {
         destination: call.provider,
         callId: call.id,
         ts: Date.now(),
-        spanStart: f.start, spanEnd: f.end,
+        spanStart: bodySpans ? f.start : undefined, spanEnd: bodySpans ? f.end : undefined,
       });
       if (fresh && f.tier === "structured") {
         this.sink({
