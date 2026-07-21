@@ -139,16 +139,24 @@ export function buildDetail(call: CallRecord, spans: LeakSpan[]): CallDetail {
       stored?.responseText ??
       parsedResp?.text ??
       (call.source === "otel" && responseRaw ? responseRaw : null),
+    // Stored calls first, for the third time and the same reason: extractActions
+    // JSON-PARSES the body, decoding escapes the scanner matched against, so a
+    // key written `AKIA…` in those bytes matches no rule there — nothing is
+    // spliced — and both `detail` and the re-serialized `args` rebuild it whole.
+    // args especially: it is the card's body, so an unmasked one would win over
+    // a masked detail beside it.
     // Mode B bodies are plain text — extractActions parses nothing there and
     // returns [], so the section simply doesn't render for self-reports.
     // The tool name becomes a card HEADER label — sanitize at this boundary
     // (same rule every other header path applies); hostile names render as
-    // the generic "tool", their args still fully visible in the body.
-    responseCalls: (call.responseBody
-      ? extractActions(format, call.responseBody)
-      : call.sseRaw
-        ? extractActions(format, call.sseRaw)
-        : []
+    // the generic "tool", their args still visible in the body.
+    responseCalls: (
+      stored?.responseCalls ??
+      (call.responseBody
+        ? extractActions(format, call.responseBody)
+        : call.sseRaw
+          ? extractActions(format, call.sseRaw)
+          : [])
     ).map((a) => ({ ...a, tool: sanitizeTool(a.tool) ?? "tool" })),
     newFrom: null, // filled by the /api/call route (needs the previous call)
     responseLeaks: [], // filled by the route (needs the next call)
@@ -178,17 +186,42 @@ export function buildDetail(call: CallRecord, spans: LeakSpan[]): CallDetail {
 // frame of the stored body and re-parsing rebuilds it whole.
 function storedProjection(
   call: CallRecord,
-): { system?: string; messages: DisplayMessage[]; responseText?: string } | null {
+): {
+  system?: string;
+  messages: DisplayMessage[];
+  responseText?: string;
+  responseCalls?: ToolAction[];
+} | null {
   let stored = call.displayMessages as DisplayMessage[] | undefined | null;
   if (!stored?.length) return null;
+  // The reply's tool calls trail everything, in order (see Daemon.captureCall).
+  // Taken as a block so a row that stored none is distinguishable from one whose
+  // reply made none — both yield undefined and fall through to the re-parse.
+  let responseCalls: ToolAction[] | undefined;
+  const firstCall = stored.findIndex((m) => m.kind === "response-call");
+  if (firstCall !== -1) {
+    responseCalls = stored.slice(firstCall).map((m) => ({
+      tool: m.tool ?? "tool",
+      detail: m.detail || undefined,
+      args: m.content || undefined,
+      callId: m.callId,
+    }));
+    stored = stored.slice(0, firstCall);
+    if (!stored.length) return { messages: [], responseCalls };
+  }
   let responseText: string | undefined;
   if (stored[stored.length - 1]!.kind === "response") {
     responseText = stored[stored.length - 1]!.content;
     stored = stored.slice(0, -1);
-    if (!stored.length) return { messages: [], responseText };
+    if (!stored.length) return { messages: [], responseText, responseCalls };
   }
-  if (stored[0]!.role !== "system") return { messages: stored, responseText };
-  return { system: stored[0]!.content || undefined, messages: stored.slice(1), responseText };
+  if (stored[0]!.role !== "system") return { messages: stored, responseText, responseCalls };
+  return {
+    system: stored[0]!.content || undefined,
+    messages: stored.slice(1),
+    responseText,
+    responseCalls,
+  };
 }
 
 // Every string a row stores as its own transcript, for placeholder discovery
