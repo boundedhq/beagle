@@ -14,11 +14,11 @@ import { SessionResolver, type Resolution } from "../core/session/resolver";
 import { Store } from "../core/store/store";
 import { ScanHost, dropIdentityFieldNoise } from "../adapters/scan-host";
 import type { Finding } from "../core/scanner/engine";
-import { applyCaptureRedaction, redactValues, redactValuesInText } from "../transform/redact";
+import { applyCaptureRedaction, clampRedacted, derivedScanText, derivedSplitAt, redactDerivedParts, redactRawStream, redactValuesInText, secretKeys } from "../transform/redact";
 import { scrubAuthHeaders } from "../core/normalize/normalize";
 import { Notifier, type AlertMessage } from "../notifier/notifier";
 import { buildAlertMessage } from "../notifier/alert-copy";
-import { detectFormat, extractActions, parseRequest, parseResponse, type DisplayMessage, type Format, type ParsedRequest, type ToolAction } from "../parsers/parsers";
+import { detectFormat, extractActions, parseRequest, parseResponse, DISPLAY_RESULT_CAP, type DisplayMessage, type Format, type ParsedRequest, type ToolAction } from "../parsers/parsers";
 import { startControlServer, type ControlRequest, type ControlResponse } from "./control";
 import { ViewerServer } from "../viewer/server";
 import { OtlpReceiver } from "../core/otlp/receiver";
@@ -57,6 +57,21 @@ export interface DaemonOptions {
   /** Point the Codex rollout watcher at a fixed sessions root (default: resolve
    *  from CODEX_HOME / ~/.codex) — tests only. */
   codexRolloutRootForTest?: string;
+}
+
+// One derived-text redaction outcome (Daemon.redactDerived). `values` are in
+// the DERIVED form, for scrubbing text built from these parts that is not one
+// of them — the summary's quoted ask, a truncated transcript copy.
+interface DerivedRedaction {
+  /** The request-derived parts, redacted. The response-derived half is scanned
+   *  too but never handed back: nothing stores it directly, and the summary —
+   *  the one surface that quotes the answer — scrubs it by `values`. */
+  outbound: string[];
+  values: Array<{ value: string; type: string }>;
+  /** Outbound-half findings only — what may alert. */
+  leakFindings: Finding[];
+  /** Scan didn't verify the derived text: the caller withholds it. */
+  incomplete: boolean;
 }
 
 interface PendingCall {
@@ -316,6 +331,64 @@ export class Daemon {
     if (result.findings.length > 0) this.viewer?.broadcast("leak", { callId: ctx.callId });
   }
 
+  // Scan a call's DERIVED display strings on their own and offset-redact them
+  // (design §4/R11). The body scan can't stand in for this: the scanner reads
+  // raw bytes while display_messages, the summary and the Mode B half of
+  // searchText render a TRANSFORMED view, and where the transform changes more
+  // than escaping a value-scrub keyed off the raw match structurally cannot
+  // reach it — see redactDerivedParts. Runs on EVERY call, not only ones the
+  // body scan flagged: a secret split across two adjacent content blocks is
+  // manufactured by the join, so the body scan finding nothing proves nothing.
+  //
+  // `outbound` is the request-derived text and `inbound` the response-derived
+  // text, in that order and never interleaved, because only the outbound half
+  // alerts — a secret in the model's answer came FROM the provider, the same
+  // asymmetry the response-body scan holds. A finding straddling the boundary
+  // is counted outbound: fail-safe on an ambiguous span.
+  //
+  // `bodyValues` are the secrets the body scan already reported for this call,
+  // and a derived finding matching one is dropped from the alert set: a secret
+  // found in the bytes AND in their rendering is ONE thing sent once.
+  // leak_events.occurrences answers "how many times did this go out", so
+  // counting a call twice for owning two views of one value would inflate the
+  // number the user reads. Matched by secretKeys, not by the scanner's
+  // fingerprint — an escaped body and its decoded rendering hash differently.
+  // What that can NOT relate is a body match carrying JSON structure the
+  // display dropped (a key split across two messages): the two values are
+  // genuinely different strings, so such a call alerts twice. Over-alerting on
+  // a leak that already alerts — see the spanning-PEM case in
+  // tests/otlp-daemon.test.ts.
+  private async redactDerived(
+    outbound: string[],
+    inbound: string[],
+    bodyValues: Array<{ value: string; type: string }>,
+  ): Promise<DerivedRedaction> {
+    const clean: DerivedRedaction = { outbound, values: [], leakFindings: [], incomplete: false };
+    const parts = [...outbound, ...inbound];
+    const text = derivedScanText(parts);
+    if (text.trim() === "") return clean;
+    const bytes = new TextEncoder().encode(text);
+    const result = await this.scanHost.scan(bytes, {});
+    // Unverified derived text is withheld by the caller, never stored and
+    // hoped over — the same rule the body halves follow (§4).
+    if (result.state === "incomplete") return { ...clean, incomplete: true };
+    const findings = dropIdentityFieldNoise(bytes, result.findings);
+    if (findings.length === 0) return clean;
+    const red = redactDerivedParts(parts, findings);
+    const outboundEnd = derivedSplitAt(outbound);
+    const known = new Set(bodyValues.flatMap((v) => secretKeys(v.value)));
+    return {
+      outbound: red.parts.slice(0, outbound.length),
+      values: red.values,
+      leakFindings: findings.filter(
+        (f) =>
+          f.start < outboundEnd &&
+          !secretKeys(text.slice(f.start, f.end)).some((k) => known.has(k)),
+      ),
+      incomplete: false,
+    };
+  }
+
   private async captureCall(call: CapturedCall): Promise<void> {
     if (!this.isRunning) return; // late delivery during shutdown — store may be closing
     if (this.skipped.delete(call.id)) return; // request-time skip is final
@@ -364,7 +437,7 @@ export class Daemon {
     // A missing stash means these bytes were never scanned (request skipped
     // while paused, pending entry TTL-swept mid-flight, scan pipeline died) —
     // never claim "ok" for a body no scan verified (§4).
-    const scanState: "ok" | "incomplete" = stash?.scanState ?? "incomplete";
+    let scanState: "ok" | "incomplete" = stash?.scanState ?? "incomplete";
     // redact-on-capture (§4/R11): see applyCaptureRedaction for the policy.
     // Run it whenever scanState is unverified even if the stash is gone, so a
     // never-scanned body is held out, not stored raw-and-hoped.
@@ -381,6 +454,28 @@ export class Daemon {
     // Responses echo protocol identity fields (a /responses reply repeats
     // prompt_cache_key) — same noise filter before redaction masks them.
     if (respScan) respScan.findings = dropIdentityFieldNoise(call.response.bodyBytes!, respScan.findings);
+    // The readable projection of this call, scanned on its own (see
+    // redactDerived). The outbound half is exactly what buildSearchText joins;
+    // the inbound half is what the summary quotes back from the response, whose
+    // parsers flatten and re-serialize just as freely.
+    const outboundParts = [parsed?.system ?? "", ...(parsed?.messages ?? []).map((m) => m.content)];
+    const bodyValues = findingValues(
+      call.request.bodyBytes ? new TextDecoder().decode(call.request.bodyBytes) : "",
+      stash?.findings,
+    );
+    const derived = await this.redactDerived(
+      outboundParts,
+      [respParsed?.text ?? "", ...respActions.map((a) => a.detail ?? "")],
+      bodyValues,
+    );
+    // An unverified transcript is an unverified call: the row must not read
+    // "ok" for text no scan checked. It rides the same `incomplete` flag as the
+    // body halves, so the whole call is held out rather than only the derived
+    // surfaces — that discards a body the pre-forward scan DID verify, and it
+    // is the trade taken deliberately: one fail-safe rule beats a second,
+    // subtly different withholding path. Reachable only if the transcript scan
+    // breaches its deadline where the (larger) body scan did not.
+    if (derived.incomplete) scanState = "incomplete";
     const redaction = this.config.redactOnCapture
       ? applyCaptureRedaction({
           incomplete: scanState === "incomplete" || respScan?.state === "incomplete",
@@ -393,21 +488,36 @@ export class Daemon {
     const requestBody = redaction ? redaction.requestBody : call.request.bodyBytes;
     const responseBody = redaction ? redaction.responseBody : (call.response.bodyBytes ?? null);
     let sseRaw: Uint8Array | null = call.response.sseRaw ?? null;
-    let searchText = buildSearchText(parsed, call);
+    // Redacted parts when redact-on-capture is on, raw ones otherwise — the
+    // same line the other stored surfaces hold (only the always-visible summary
+    // scrubs regardless of the setting).
+    let searchText = buildSearchText(parsed, call, redaction ? derived.outbound : outboundParts);
     if (redaction?.heldOut) {
       sseRaw = null; // the raw stream could hold the unverified value
       searchText = "";
     } else if (redaction?.redacted) {
-      // A content-encoded raw stream is compressed bytes — a literal scrub
-      // can't find the secret in it, so keeping it would silently retain an
-      // echoed value. Drop it; the decoded (scrubbed) body remains.
+      // The header says this stream is encoded, and we do not decode it here to
+      // find out otherwise — so nothing below can be trusted to have read what
+      // is in it, and keeping it could silently retain an echoed value. Drop it
+      // on the header's word alone (fail-safe: the cost is a fidelity view, the
+      // alternative is cleartext); the decoded, scrubbed body remains. Note the
+      // same-bytes check below does NOT subsume this: decodeBody falls back to
+      // the raw compressed bytes when it cannot decompress, and then the stream
+      // and the scanned body match while neither pass can read either.
       const contentEncoded = call.response.headers?.some(
         ([n, v]) =>
           n.toLowerCase() === "content-encoding" &&
           v.trim() !== "" &&
           v.trim().toLowerCase() !== "identity",
       );
-      sseRaw = contentEncoded ? null : redactValues(sseRaw, redaction.values);
+      // Otherwise the stream IS the bytes the response scan read, so redact it
+      // from that scan's spans and keep the value pass for echoes — see
+      // redactRawStream for why a value pass alone was not enough here, and for
+      // the same-bytes check that decides between spans and withholding. No
+      // extra scan: the offsets are already paid for.
+      sseRaw = contentEncoded
+        ? null
+        : redactRawStream(sseRaw, call.response.bodyBytes ?? null, respScan?.findings ?? [], redaction.values);
       // Outbound only (see buildSearchText): index the request, not the response.
       searchText = new TextDecoder().decode(requestBody);
     }
@@ -418,11 +528,34 @@ export class Daemon {
           // summary is always-visible feed text, so it must never depend on
           // the redaction setting to keep a secret out.
           ...(redaction?.values ?? []),
-          ...findingValues(
-            call.request.bodyBytes ? new TextDecoder().decode(call.request.bodyBytes) : "",
-            stash?.findings,
-          ),
+          ...bodyValues,
+          // Values in the DERIVED form, which is what buildSummary quotes. It
+          // renders one part at a time (a message, an action's detail, the
+          // reply), so a literal scrub reaches every value that lives inside
+          // one — and a value that only exists across the join of two isn't in
+          // any of them to begin with.
+          ...derived.values,
         ]);
+    // A wire row normally persists NO transcript: the viewer re-parses the
+    // stored body, which is byte-exact, so re-deriving is faithful and free.
+    // Derived redaction breaks that. A secret the display MANUFACTURES by
+    // joining content blocks is not in the body at all, so nothing the body
+    // redaction could do would stop the viewer rebuilding it at read time —
+    // masked in the summary and the index, and rendered whole in the transcript
+    // beside them. Persist the redacted projection for those rows and let it
+    // win over the re-parse (viewer/detail.ts).
+    //
+    // Layout is [system, ...messages], with index 0 ALWAYS the system prompt
+    // (empty when the request had none) — that fixed shape is what lets the
+    // viewer lift it back out unambiguously, even from a body whose own
+    // messages carry a "system" role.
+    const displayMessages =
+      redaction && !redaction.heldOut && derived.values.length > 0 && parsed
+        ? [
+            { role: "system", content: derived.outbound[0]! },
+            ...parsed.messages.map((m, i) => ({ ...m, content: derived.outbound[i + 1]! })),
+          ]
+        : null;
 
     this.store.insertCall({
       id: call.id,
@@ -444,7 +577,13 @@ export class Daemon {
       scanState,
       captureState: call.meta.captureState,
       sessionTier: resolution.tier,
-      redacted: redaction?.redacted ?? false,
+      // Derived findings count: the summary and the search index ARE stored
+      // content, and a manufactured secret rewrites them while leaving the body
+      // untouched — a row that read "not redacted" would deny a rewrite that
+      // happened. Only when redact-on-capture is ON, though: with it off the
+      // derived surfaces keep their raw text (just the always-visible summary
+      // scrubs), and claiming otherwise would mislabel the row.
+      redacted: redaction ? redaction.redacted || derived.values.length > 0 : false,
       // Persist the parser's one-shot verdict: the sessions list badges a
       // session as a utility turn from DATA, never by sniffing content later.
       oneShot: parsed?.oneShot ?? false,
@@ -455,8 +594,30 @@ export class Daemon {
         ? scrubAuthHeaders(call.response.headers, undefined, call.provider)
         : null,
       sseRaw,
+      displayMessages,
       searchText,
     });
+    // A leak the body scan structurally could not see (the display joined two
+    // content blocks into a key that is not in the scanned bytes) alerts HERE,
+    // at capture rather than pre-forward — late, but the alternative was
+    // silence. Only findings the body scan didn't already report reach this
+    // (redactDerived drops the rest), so a secret visible in both views stays
+    // one event with one occurrence. Span-less: these offsets index the
+    // transcript, not the body.
+    if (derived.leakFindings.length > 0) {
+      this.alertEngine.process(
+        {
+          id: call.id,
+          sessionId: resolution.sessionId,
+          agent: call.agent,
+          provider: call.provider,
+          model: parsed?.model ?? respParsed?.model,
+        },
+        derived.leakFindings,
+        false,
+      );
+      this.viewer?.broadcast("leak", { callId: call.id });
+    }
     this.viewer?.broadcast("call", {
       id: call.id,
       sessionId: resolution.sessionId,
@@ -476,7 +637,7 @@ export class Daemon {
       // Honest at broadcast time: with redact-on-capture (the default) the
       // scan has already completed by here, so the findings are final. The
       // "leak" frame refreshes the feed for any straggler orderings.
-      hasLeak: (stash?.findings.length ?? 0) > 0,
+      hasLeak: (stash?.findings.length ?? 0) > 0 || derived.leakFindings.length > 0,
     });
   }
 
@@ -522,9 +683,25 @@ export class Daemon {
         this.config.redactOnCapture && call.response.bodyBytes?.byteLength
           ? await this.scanHost.scan(call.response.bodyBytes, {})
           : null;
+      // The self-report's readable projection, scanned on its own (see
+      // redactDerived). Mode B needs this most: its display messages come from
+      // flattenPromptText, which JSON.parse's a serialized message list and
+      // joins adjacent content blocks with NOTHING between them — the one
+      // transform that can manufacture a secret the scanned bytes never held.
+      const messages = call.request.messages ?? [];
+      const bodyValues = findingValues(
+        new TextDecoder().decode(call.request.bodyBytes),
+        scanResult.findings,
+      );
+      const derived = await this.redactDerived(
+        messages.map((m) => String(m.content)),
+        [call.response.text ?? ""],
+        bodyValues,
+      );
       const redaction = this.config.redactOnCapture
         ? applyCaptureRedaction({
-            incomplete: scanResult.state === "incomplete" || respScan?.state === "incomplete",
+            incomplete:
+              scanResult.state === "incomplete" || respScan?.state === "incomplete" || derived.incomplete,
             requestBytes: call.request.bodyBytes,
             requestFindings: scanResult.findings,
             responseBody: call.response.bodyBytes ?? null,
@@ -539,16 +716,17 @@ export class Daemon {
       // and the stored response body.
       //
       // That outbound surface is the SCANNED BYTES, not the display messages.
-      // A display message is a TRUNCATED view of it: a tool result is built as
-      // `${tool}: ${output.slice(0, 4000)}` and drops the tool INPUT entirely
-      // (otlp-map's buildCodexCall / mapHookToCall). Indexing that copy meant a
-      // secret past the cap — or one that only ever appeared in a command's
-      // arguments — was scanned, alerted and redacted, while `beagle search`
-      // answered "never sent": a false negative on the one question search
-      // exists to answer definitively. Search covers the whole scanned surface
-      // now rather than a truncated slice of it. Offset-redacted bytes, the
-      // copy the findings' spans index (the wire path does this too, see the
-      // redacted branch above), so the value scrub below no-ops on this half.
+      // A display message is a TRUNCATED view of it: a tool result keeps only
+      // the first DISPLAY_RESULT_CAP chars of the output and drops the tool
+      // INPUT entirely (otlp-map's buildCodexCall / mapHookToCall). Indexing
+      // that copy meant a secret past the cap — or one that only ever appeared
+      // in a command's arguments — was scanned, alerted and redacted, while
+      // `beagle search` answered "never sent": a false negative on the one
+      // question search exists to answer definitively. Search covers the whole
+      // scanned surface now rather than a truncated slice of it. Offset-redacted
+      // bytes, the copy the findings' spans index (the wire path does this too,
+      // see the redacted branch above), so the value scrub below no-ops on this
+      // half.
       let searchText = new TextDecoder().decode(redaction ? redaction.requestBody : call.request.bodyBytes);
       // Plus a user message whose flattening actually changed the text: it
       // holds flattenPromptText's plain-text form of a prompt that may sit
@@ -558,19 +736,21 @@ export class Daemon {
       // attribute (buildTurnCall's scanned body is inputs-only) though it rode
       // the real outbound request. Never a tool message's CONTENT: that is the
       // truncated prefix the bytes above already cover in full.
-      for (const m of call.request.messages ?? []) {
-        const flat = String(m.content);
+      //
+      // The flattened form appended here is the DERIVED-REDACTED one when
+      // redact-on-capture is on: it is the copy the derived scan's offsets
+      // index, and the only copy in which a secret the flattening manufactured
+      // exists at all.
+      messages.forEach((m, i) => {
+        const flat = redaction ? derived.outbound[i]! : String(m.content);
         const tool = (m as DisplayMessage).tool; // a parser label; core's Message carries none
         if (m.role === "user" && flat && !searchText.includes(flat)) searchText += "\n" + flat;
         else if (tool && !searchText.includes(tool)) searchText += "\n" + tool;
-      }
-      // What's appended above (and the summary) derives from the display
-      // messages — flattened plain text, not the scanned bytes — so it scrubs
-      // by value, not by the offsets, which don't index that text. The scrub
-      // covers the JSON-decoded form of each value as well as the raw form the
-      // scanner matched, which is what makes it safe on flattened text: a PEM
-      // whose \n arrived escaped inside a JSON-encoded prompt is matched in the
-      // decoded copy too (see redactValuesInText).
+      });
+      // The bytes half above is offset-redacted; the appended half arrives
+      // already offset-redacted from the derived scan. This scrub is the
+      // belt-and-braces pass for the seam between them — the raw values (and
+      // their JSON-decoded forms) against text neither offset set indexes.
       if (redaction) searchText = redaction.heldOut ? "" : redactValuesInText(searchText, redaction.values);
       const summary = redaction?.heldOut
         ? "[REDACTION INCOMPLETE: content withheld]"
@@ -582,23 +762,45 @@ export class Daemon {
               // Same rationale as the wire path: findings scrub the summary
               // regardless of the redact-on-capture setting.
               ...(redaction?.values ?? []),
-              ...findingValues(
-                call.request.bodyBytes ? new TextDecoder().decode(call.request.bodyBytes) : "",
-                scanResult.findings,
-              ),
+              ...bodyValues,
+              // In the DERIVED form — the form buildSummary actually quotes.
+              ...derived.values,
             ],
           );
-      const scanState = redaction?.heldOut ? "incomplete" : scanResult.state;
+      const scanState =
+        redaction?.heldOut || derived.incomplete ? "incomplete" : scanResult.state;
+      // One answer for the row, shared by both writers below (the stitch and
+      // the insert) so they cannot drift. Derived findings count: the summary,
+      // the transcript and the search index ARE stored content, and a
+      // manufactured secret rewrites them while leaving the body untouched — a
+      // row reading "not redacted" would deny a rewrite that happened. Gated on
+      // redact-on-capture: with it off those surfaces keep their raw text (only
+      // the always-visible summary scrubs), so claiming otherwise would
+      // mislabel the row.
+      const redacted = redaction ? redaction.redacted || derived.values.length > 0 : false;
       // Persist the self-report's structure: Mode B bodies are scan text, not
       // provider JSON, so the viewer can't re-parse them the way it does wire
-      // bodies. Scrubbed by value like summary/searchText (same rationale).
+      // bodies. Content comes back OFFSET-redacted from the derived scan, which
+      // is the only thing that reaches a secret this projection manufactured or
+      // re-escaped; a value scrub against the raw matches never could.
+      //
+      // The cap lands HERE, after redaction, and not in the mappers that build
+      // these messages: truncating first cut the tail off a secret straddling
+      // the cap, and the scrub that followed — matching the whole value —
+      // sailed past the raw prefix it left behind in the transcript.
       const displayMessages = redaction?.heldOut
         ? null
-        : (call.request.messages ?? []).map((m) => ({
-            ...m, // keep display labels (tool/kind) — only the content is scrubbed
-            role: m.role,
-            content: redaction ? redactValuesInText(String(m.content), redaction.values) : String(m.content),
-          }));
+        : messages.map((m, i) => {
+            const content = redaction ? derived.outbound[i]! : String(m.content);
+            return {
+              ...m, // keep display labels (tool/kind) — only the content is scrubbed
+              role: m.role,
+              content:
+                (m as DisplayMessage).kind === "result"
+                  ? clampRedacted(content, DISPLAY_RESULT_CAP)
+                  : content,
+            };
+          });
       // Cross-batch turn stitching: Claude Code flushes the prompt in one OTLP
       // batch and the response seconds later in another. A response-only
       // partial rejoins its stored turn row instead of landing as a detached
@@ -646,7 +848,7 @@ export class Daemon {
           // raw call.response.text here, which would undo the redaction.
           composeSummary: (existing) =>
             existing ? `"${firstLine(existing, 40)}" → ${firstLine(summary, 80)}` : summary,
-          redacted: redaction?.redacted ?? false,
+          redacted,
           responseBody: redaction ? redaction.responseBody : (call.response.bodyBytes ?? null),
         })
       ) {
@@ -675,7 +877,7 @@ export class Daemon {
         scanState,
         captureState: "ok",
         sessionTier: resolution.tier,
-        redacted: redaction?.redacted ?? false,
+        redacted,
         requestBody: redaction ? redaction.requestBody : call.request.bodyBytes,
         requestHeaders: null,
         responseBody: redaction ? redaction.responseBody : (call.response.bodyBytes ?? null),
@@ -695,9 +897,28 @@ export class Daemon {
         },
         scanResult.findings,
       );
+      // A secret the flattening MANUFACTURED is not in the scanned bytes, so
+      // scanResult can't see it and this is the only pass that fires for it.
+      // Span-less: those offsets index the transcript, not the stored body.
+      // Same dedup as the wire path — one fingerprint, one event.
+      if (derived.leakFindings.length > 0) {
+        this.alertEngine.process(
+          {
+            id: call.id,
+            sessionId: resolution.sessionId,
+            agent: call.agent,
+            provider: call.provider,
+            model: call.model,
+          },
+          derived.leakFindings,
+          false,
+        );
+      }
       // Same silent leak frame as the wire path — possible-tier findings must
       // refresh open dashboards too.
-      if (scanResult.findings.length > 0) this.viewer?.broadcast("leak", { callId: call.id });
+      if (scanResult.findings.length + derived.leakFindings.length > 0) {
+        this.viewer?.broadcast("leak", { callId: call.id });
+      }
       this.viewer?.broadcast("call", {
         id: call.id,
         sessionId: resolution.sessionId,
@@ -714,7 +935,8 @@ export class Daemon {
         captureState: "ok",
         sessionTier: resolution.tier,
         source: "otel",
-        hasLeak: scanResult.findings.length > 0, // scan completed above — final
+        // Both scans completed above — final.
+        hasLeak: scanResult.findings.length + derived.leakFindings.length > 0,
       });
       // A real (non-rollout) Codex OTel call means that conversation is live —
       // ensure a rollout tailer for it. Triggered here, AFTER the turn row is
@@ -945,9 +1167,11 @@ export function buildSummary(
   secretValues?: Array<{ value: string; type: string }>,
 ): string {
   // Redact-on-capture (R11): the summary derives from the same raw messages
-  // the body redaction already scrubbed, so it must scrub too. Before
-  // truncation — a secret cut by the 100-char cap no longer literal-matches,
-  // and a post-hoc scrub of the finished line would leak its prefix.
+  // the body redaction already scrubbed, so it must scrub too. Before EVERY
+  // truncation — a secret cut by a cap no longer literal-matches, and a
+  // post-hoc scrub of the finished line would leak its prefix. That holds for
+  // firstLine's caps below AND for the tool detail, which is why toolAction no
+  // longer clamps at parse time: that clamp ran before this scrub could see it.
   if (secretValues && secretValues.length > 0) {
     const scrub = (s: string) => redactValuesInText(s, secretValues);
     if (responseText !== undefined) responseText = scrub(responseText);
@@ -1021,15 +1245,19 @@ function summarizeActions(actions: ToolAction[], compact = false): string {
   const files: string[] = [];
   for (const a of actions) {
     const v = verb(a.tool);
+    // EVERY branch goes through firstLine: `detail` arrives unclamped from the
+    // parser (deliberately — a parse-time clamp cut secrets in half before the
+    // scrub could match them, see toolAction), so this is the only thing
+    // bounding what lands in the stored summary and rides every feed frame. A
+    // basename or a bare path is not self-limiting: one 500 KB tool argument
+    // put 500 KB — newlines and all — into a column meant for one line.
     if (v === "ran" && a.detail) parts.push(`ran \`${firstLine(a.detail, 40)}\``);
-    else if (v === "read" && a.detail) files.push(a.detail.split("/").pop() ?? a.detail);
+    else if (v === "read" && a.detail) files.push(firstLine(a.detail.split("/").pop() ?? a.detail, 40));
     else if (a.detail) {
       // URLs keep their head (host says more than a trailing path segment);
       // paths keep their tail (the filename).
-      const label = a.detail.includes("://")
-        ? firstLine(a.detail, 40)
-        : (a.detail.split("/").pop() || a.detail);
-      parts.push(`${v} \`${label}\``);
+      const label = a.detail.includes("://") ? a.detail : (a.detail.split("/").pop() || a.detail);
+      parts.push(`${v} \`${firstLine(label, 40)}\``);
     }
     else parts.push(v);
   }
@@ -1049,7 +1277,7 @@ function firstLine(s: string, max: number): string {
   return line.length > max ? line.slice(0, max - 1) + "…" : line;
 }
 
-function buildSearchText(parsed: ParsedRequest | null, call: CapturedCall): string {
+function buildSearchText(parsed: ParsedRequest | null, call: CapturedCall, outboundParts: string[]): string {
   // OUTBOUND ONLY. `beagle search` answers "was this string SENT" (README:
   // "did that internal hostname ever leave?"), so a hit is definitive proof it
   // left the machine. Indexing the provider's RESPONSE would report a
@@ -1058,8 +1286,10 @@ function buildSearchText(parsed: ParsedRequest | null, call: CapturedCall): stri
   // it's echoed back in the NEXT request — which is itself indexed here.
   // Parsed text where a parser ran (finds secrets that appear \"-escaped in
   // raw JSON); decoded raw request bytes otherwise (R8 / schema note).
-  if (parsed) {
-    return [parsed.system ?? "", ...parsed.messages.map((m) => m.content)].join("\n");
-  }
+  // `outboundParts` is [system, ...message contents] — the caller's copy,
+  // already offset-redacted by the derived scan. Joined by derivedScanText, the
+  // very text those offsets index, so a secret spanning two messages is masked
+  // in the index exactly where the derived scan found it.
+  if (parsed) return derivedScanText(outboundParts);
   return new TextDecoder("utf-8", { fatal: false }).decode(call.request.bodyBytes);
 }

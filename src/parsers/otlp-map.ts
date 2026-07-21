@@ -452,8 +452,11 @@ function mapCodexRecords(records: OtlpRecord[]): OtelCall[] {
         model: g.model,
         endpoint: `otel:codex:tool_result:${g.tool}`,
         scanText: `${g.tool}\n${g.parts.join("\n")}`,
+        // Full output — the daemon clamps it to DISPLAY_RESULT_CAP after
+        // redaction. Clamping here ran before the scrub, so a secret straddling
+        // the cap left its raw prefix in the stored transcript.
         display: {
-          role: "tool", content: `${g.tool}: ${g.lastOutput.slice(0, 4000)}`,
+          role: "tool", content: `${g.tool}: ${g.lastOutput}`,
           tool: sanitizeTool(g.tool), kind: "result",
         },
       }),
@@ -559,8 +562,10 @@ export function mapHookToCall(payload: unknown, ctx: OtlpContext): OtelCall | nu
       endpoint: `otel:tool_output:${toolName}`,
       request: {
         bodyBytes: new TextEncoder().encode(scanText),
+        // Full output; the daemon clamps to DISPLAY_RESULT_CAP after redaction
+        // (see the codex tool_result mapper above for why not here).
         messages: [{
-          role: "tool", content: `${toolName}: ${toolResponse.slice(0, 4000)}`,
+          role: "tool", content: `${toolName}: ${toolResponse}`,
           tool: sanitizeTool(toolName), kind: "result",
         }] as DisplayMessage[],
       },

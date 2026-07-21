@@ -15,6 +15,14 @@ export interface DisplayMessage extends Message {
   detail?: string; // the originating call's short detail, shown in result headers
 }
 
+/** How much of a tool RESULT's text the stored transcript keeps — a `cat` of a
+ *  large file must not be persisted twice at full length (the scanned body
+ *  already holds all of it). Applied by the daemon AFTER redaction, never by
+ *  the mappers that build these messages: clamping first left the raw PREFIX of
+ *  a secret straddling the cap in display_messages, since the scrub that
+ *  followed matched the whole value and found nothing. */
+export const DISPLAY_RESULT_CAP = 4000;
+
 // A tool name is display-critical (it becomes a card header): accept only
 // names that look like identifiers; anything else renders unlabeled.
 export function sanitizeTool(name: unknown): string | undefined {
@@ -218,7 +226,7 @@ function parseSse(format: Format, raw: string): ParsedResponse | null {
 
 export interface ToolAction {
   tool: string;
-  detail?: string; // e.g. the shell command or a file path (clamped at 200)
+  detail?: string; // e.g. the shell command or a file path (bounded by its reader)
   callId?: string; // pairs a call with its result in the NEXT request
   args?: string; // full raw arguments (JSON text) for the display card body
 }
@@ -302,7 +310,11 @@ function toolAction(name: unknown, input: unknown, callId?: unknown, args?: unkn
     (typeof inp.name === "string" && inp.name) || // e.g. skill {"name":"…"}
     undefined;
   const out: ToolAction = { tool };
-  if (detail) out.detail = String(detail).slice(0, 200); // header text — keep it bounded
+  // Full, NOT clamped here. Every reader bounds it for display (summarizeActions
+  // takes 40 chars), and the daemon scrubs detected secrets out of it on the way
+  // to the summary — a parse-time clamp ran BEFORE that scrub, so a secret cut
+  // by it no longer matched and its prefix rode the feed line into the store.
+  if (detail) out.detail = String(detail);
   if (typeof callId === "string") out.callId = callId;
   if (typeof args === "string") out.args = args;
   return out;

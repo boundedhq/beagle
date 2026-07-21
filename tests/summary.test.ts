@@ -66,6 +66,22 @@ describe("buildSummary — wire-order sent half", () => {
     expect(s).toBe('"now run the tests" → ran `bun test`');
   });
 
+  test("every action branch bounds its detail — the summary is one stored line", () => {
+    // `detail` reaches here UNCLAMPED on purpose: a parse-time clamp cut a
+    // secret in half before the scrub could match it (toolAction). That makes
+    // this the only thing bounding what lands in the summary column and rides
+    // every feed frame — and a basename or bare path is not self-limiting, so
+    // it has to be every branch, not just the two that quote a command or URL.
+    const huge = "P".repeat(50_000);
+    for (const detail of [huge, `/a/b/${huge}`, `${huge}\nsecond line`]) {
+      for (const tool of ["Grep", "Read", "Bash", "WebFetch", "Skill"]) {
+        const s = buildSummary(req([]), undefined, [{ tool, detail }]);
+        expect(s.length).toBeLessThan(200);
+        expect(s).not.toContain("\n"); // one line, always
+      }
+    }
+  });
+
   test("trailing tool results lead: N results → actions", () => {
     const s = buildSummary(
       req([

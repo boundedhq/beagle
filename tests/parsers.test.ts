@@ -286,6 +286,23 @@ describe("extractActions (tool-aware summaries, UI fix 3)", () => {
     ]);
   });
 
+  test("a tool detail is NOT clamped at parse time — the scrub has to see the whole value", () => {
+    // The clamp used to live here, at 200 chars, which put it BEFORE the
+    // daemon's secret scrub (buildSummary). A secret straddling 200 came out
+    // cut in half: the scrub matched on the whole value, found nothing, and the
+    // raw head of the key rode the detail onward. Every reader bounds this for
+    // display anyway (summarizeActions takes 40), so the parser hands over what
+    // it was given and truncation happens after redaction.
+    const secret = "AKIAZQ3DRSTUVWXY2345";
+    const command = `deploy --token ${"x".repeat(190)} ${secret}`;
+    const body = JSON.stringify({
+      content: [{ type: "tool_use", name: "Bash", input: { command } }],
+    });
+    const actions = extractActions("anthropic-messages", enc(body));
+    expect(actions[0]!.detail).toBe(command);
+    expect(actions[0]!.detail!.length).toBeGreaterThan(200);
+  });
+
   test("Anthropic tool_use in a streamed SSE response", () => {
     const sse =
       'data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"Grep","input":{"pattern":"TODO"}}}\n\n';

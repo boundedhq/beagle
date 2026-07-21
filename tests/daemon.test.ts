@@ -213,6 +213,121 @@ describe("Daemon end-to-end", () => {
     streamServer.close();
   });
 
+  // Drives a streamed reply through the proxy and returns the stored row. The
+  // frames go out as one chunk; what matters here is the framing the capture
+  // path keeps, not how many TCP writes carried it. `extraHeaders` must end
+  // with its own CRLF when given.
+  async function streamedCall(runId: string, marker: string, frames: string, extraHeaders = "") {
+    let replied = false;
+    const server = createServer((sock) => {
+      sock.on("data", () => {
+        if (replied) return; // the request may arrive chunked — reply exactly once
+        replied = true;
+        sock.write(`HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n${extraHeaders}transfer-encoding: chunked\r\n\r\n`);
+        sock.write(frames.length.toString(16) + "\r\n" + frames + "\r\n0\r\n\r\n");
+      });
+      sock.on("error", () => {});
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const port = (server.address() as { port: number }).port;
+    await controlRequest(daemon.socketPath, {
+      cmd: "register-run",
+      args: { id: runId, agent: "claude-code", provider: "anthropic", upstream: `http://127.0.0.1:${port}`, authLocation: "x-api-key" },
+    });
+    // finally, so a capture that never lands fails on its own assertion rather
+    // than leaking a listening socket and an open store handle behind it.
+    let store: Store | undefined;
+    try {
+      await sendThroughProxy(daemon.proxyPort, runId, requestBody(marker));
+      let hit: { callId: string } | undefined;
+      for (let i = 0; i < 40 && !hit; i++) {
+        await Bun.sleep(50); // stays under bun's 5s default so a miss reports, not hangs
+        store?.close();
+        store = Store.openReadOnly(stateDir);
+        hit = store.searchLiteral(marker)[0];
+      }
+      return store!.getCall(hit!.callId)!;
+    } finally {
+      store?.close();
+      server.close();
+    }
+  }
+
+  // One text_delta frame carrying `text` verbatim.
+  const deltaFrame = (text: string) =>
+    'event: content_block_delta\ndata: ' +
+    JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } }) +
+    "\n\n";
+
+  test("a streamed secret under the value-scrub floor is redacted from the stored raw stream", async () => {
+    // Nothing scans the raw stream on its own — it borrows the response scan's
+    // verdict — and it used to borrow only the VALUES. redactValuesInText floors
+    // at 8 chars while connection-string captures the password alone (four chars
+    // here), so the span was spliced out of the response body while the stream
+    // stored beside it kept the password in cleartext. Same bytes, so that
+    // scan's spans reach it. The secret sits in the SECOND frame: the splice
+    // only lands right if the stream really is the bytes the scan indexed.
+    const call = await streamedCall(
+      "run-short-secret",
+      "stream a short secret",
+      deltaFrame("connecting now, ") + deltaFrame("use postgres://svc:pw12@db.internal/app please"),
+    );
+    const raw = new TextDecoder().decode(call.sseRaw!);
+    expect(raw).not.toContain("pw12");
+    expect(raw).toContain("[REDACTED:connection-string:");
+    // Spliced, not dropped — and still a well-formed stream. The viewer
+    // re-parses this column (viewer/detail.ts), so a splice landing at the
+    // wrong offset would corrupt the detail view rather than fail a test.
+    const payloads = raw.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5));
+    expect(payloads.length).toBe(2);
+    const texts = payloads.map((p) => (JSON.parse(p) as { delta: { text: string } }).delta.text);
+    expect(texts[0]).toBe("connecting now, "); // the untouched frame is byte-exact
+    expect(texts[1]).toContain("[REDACTED:connection-string:");
+    // ...and the body beside it agrees: same bytes in, same redaction out.
+    expect(new TextDecoder().decode(call.responseBody!)).not.toContain("pw12");
+  });
+
+  test("a content-encoded stream is withheld rather than stored on a header's word", async () => {
+    // decodeBody falls back to the RAW bytes whenever it cannot decompress, so
+    // for a stream whose encoding it could not apply, bodyBytes and sseRaw match
+    // byte for byte and the same-bytes check passes — it cannot tell ciphertext
+    // from plaintext. The header check is what actually withholds here; without
+    // it a genuinely compressed stream carrying a secret no pass can read would
+    // be stored. Fixture: an encoding header over a body that is not encoded.
+    const call = await streamedCall(
+      "run-encoded-stream",
+      "stream an encoded secret",
+      deltaFrame("use postgres://svc:pw12@db.internal/app please"),
+      "content-encoding: gzip\r\n",
+    );
+    expect(call.sseRaw).toBeNull(); // withheld outright
+    // The body is still captured and scrubbed — dropping the stream costs the
+    // fidelity view, not the record.
+    expect(new TextDecoder().decode(call.responseBody!)).not.toContain("pw12");
+  });
+
+  test("a secret split across two SSE frames stays split in the stored stream", async () => {
+    // The shape a streaming provider actually produces — deltas cut mid-token.
+    // No rule matches either half, so the scanned bytes (which ARE the stream:
+    // the capture path decodes content-encoding and reassembles nothing) hold
+    // nothing to splice, the same boundary the request-side content-block case
+    // below documents for the request body. This fix does not change that; it
+    // is pinned here because it is what the raw stream gets asked about.
+    //
+    // NOT a claim that the key is unreachable: the join manufactures it in the
+    // readable text, and while the derived scan keeps it out of the summary,
+    // viewer/detail.ts re-parses this column at view time and reassembles it
+    // there. Asserted below only for the surfaces that ARE covered.
+    const call = await streamedCall(
+      "run-split-frames",
+      "stream a split secret",
+      deltaFrame("key AKIAZQ3DRSTUV") + deltaFrame("WXY2345 done"),
+    );
+    expect(call.sseRaw).not.toBeNull(); // kept: nothing here was unverified
+    expect(call.summary).not.toContain("AKIAZQ3DRSTUVWXY2345"); // the derived scan caught it
+    expect(call.redacted).toBe(true);
+  });
+
   test("captures a full call: session, parse, summary, search text", async () => {
     const resp = await sendThroughProxy(daemon.proxyPort, "run-e2e", requestBody("read main.ts"));
     expect(resp).toContain("done!");
@@ -291,6 +406,70 @@ describe("Daemon end-to-end", () => {
     const events = listLeakEvents(store);
     expect(events.length).toBe(1);
     expect(events[0]!.destination).toBe("anthropic");
+    store.close();
+  });
+
+  test("a secret split across two content blocks alerts and stays out of the search index", async () => {
+    // The wire path's own copy of the Mode B hole: flattenContent joins a
+    // message's content blocks with NOTHING between them, so this key exists in
+    // the readable projection — the summary and the search index — while the
+    // scanned bytes hold only the two halves either side of `"},{"type":…`.
+    // Nothing matched, so nothing alerted and `beagle search` answered with the
+    // key. The derived text is scanned on its own now.
+    await sendThroughProxy(
+      daemon.proxyPort, "run-e2e",
+      JSON.stringify({
+        model: "claude-sonnet-5",
+        messages: [{
+          role: "user",
+          content: [
+            { type: "text", text: "block one ends AKIAZQ3DRSTUV" },
+            { type: "text", text: "WXY2345 begins block two" },
+          ],
+        }],
+      }),
+    );
+    await Bun.sleep(150);
+    expect(alerts.length).toBe(1);
+    expect(alerts[0]!.secretType).toBe("aws-access-key-id");
+    const store = Store.openReadOnly(stateDir);
+    expect(listLeakEvents(store).length).toBe(1);
+    // The stored body keeps its bytes — no rule ever matched them, and neither
+    // half is a secret on its own.
+    const call = store.getCall(store.searchLiteral("block one ends")[0]!.callId)!;
+    expect(call.redacted).toBe(true); // the derived surfaces WERE rewritten
+    expect(call.summary).not.toContain("AKIAZQ3DRSTUVWXY2345");
+    expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
+    // …and the VIEWER, which is the surface a human actually reads. A wire row
+    // normally carries no stored transcript and the viewer re-parses the body —
+    // which would re-join these two blocks and render the assembled key, with
+    // the summary and index masked right beside it. The row persists its
+    // redacted projection precisely so that re-derive can't happen.
+    const { buildDetail, leakSpansFor } = await import("../src/viewer/detail");
+    const detail = buildDetail(call, leakSpansFor(store, call.id));
+    expect(JSON.stringify(detail.messages)).not.toContain("AKIAZQ3DRSTUVWXY2345");
+    expect(JSON.stringify(detail.messages)).toContain("[REDACTED:aws-access-key-id:");
+    // The placeholder lives only in the transcript (the body never held the
+    // assembled key), so R7's highlight has to find it there or the one masked
+    // surface renders unmarked.
+    expect(detail.leaks.map((l) => l.secretType)).toContain("aws-access-key-id");
+    store.close();
+  });
+
+  test("an ordinary wire call still renders from its body, with no stored transcript", async () => {
+    // The guard on the row above: persisting a projection is the EXCEPTION, for
+    // rows whose body would re-derive wrongly. Every other call keeps the old
+    // behaviour — nothing extra stored, the viewer re-parses byte-exact bytes —
+    // so the fix can't quietly double every row's storage.
+    await sendThroughProxy(daemon.proxyPort, "run-e2e", requestBody("just an ordinary ask"));
+    await Bun.sleep(150);
+    const store = Store.openReadOnly(stateDir);
+    const call = store.getCall(store.searchLiteral("just an ordinary ask")[0]!.callId)!;
+    expect(call.displayMessages).toBeNull();
+    const { buildDetail } = await import("../src/viewer/detail");
+    const detail = buildDetail(call, []);
+    expect(detail.messages[0]!.content).toBe("just an ordinary ask");
+    expect(detail.system).toBe("You are Claude Code."); // still lifted from the body
     store.close();
   });
 
