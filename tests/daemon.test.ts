@@ -891,6 +891,84 @@ describe("Daemon end-to-end", () => {
     store.close();
   });
 
+  test("under redact-on-capture the derived span is recorded but placeholders win", async () => {
+    // The boundary of the test above, and the reason the re-anchor is narrower
+    // than it looks: ANY derived finding produces a redacted part, so with
+    // redact-on-capture on — the default — the row reads `redacted` and
+    // extractLeaks takes the placeholder branch, discarding every span. The
+    // span is still written (the row may later be read with a different view),
+    // it is simply not what the viewer uses here.
+    //
+    // Pinned because the tempting "improvement" — unioning span-recovered
+    // values into the placeholder branch — is a BUG: on a redacted row the body
+    // was rewritten underneath these offsets, so slicing by them returns a
+    // fragment of whatever now occupies them. If someone removes the gate in
+    // extractLeaks, this fails.
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    await sendThroughProxy(
+      daemon.proxyPort, "run-e2e",
+      JSON.stringify({
+        model: "claude-sonnet-5",
+        messages: [{ role: "user", content: 'cfg has "api_key": "Xk7Qm2Vb9Rt4Ws8Yz1Nc6Pd3aJ5Hf0Lg" here' }],
+      }),
+    );
+    await captured(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    const call = store.getCall(store.searchLiteral("cfg has")[0]!.callId)!;
+    expect(call.redacted).toBe(true);
+    const { leakSpansFor } = await import("../src/viewer/detail");
+    const spans = leakSpansFor(store, call.id);
+    expect(spans.length).toBe(1); // the anchor still ran
+    // …and the viewer ignored it: every leak it reports is a placeholder, none
+    // is a slice taken at those offsets.
+    const leaks = buildDetail(call, spans).leaks;
+    expect(leaks.length).toBeGreaterThan(0);
+    for (const l of leaks) expect(l.value.startsWith("[REDACTED:")).toBe(true);
+    store.close();
+  });
+
+  test("a failure in one derived alert pass does not take the other down with it", () => {
+    // The derived findings go out in TWO alertEngine.process calls, because the
+    // span flag is per-call: re-anchored findings carry body offsets, the rest
+    // are span-less. process() opens a store transaction per finding, so it can
+    // throw — and one call split into two means a throw in the first would lose
+    // every finding in the second. That half is the higher-value one: a secret
+    // the body scan structurally cannot see, which this pass is the only chance
+    // to report. Pinned white-box because there is no way to make the real
+    // store fail on demand.
+    const seen: Array<{ n: number; bodySpans: boolean }> = [];
+    const d = daemon as unknown as {
+      alertEngine: { process: (m: unknown, f: unknown[], b: boolean) => void };
+      alertDerived: (m: unknown, derived: unknown) => number;
+    };
+    d.alertEngine = {
+      process: (_m, f, bodySpans) => {
+        seen.push({ n: f.length, bodySpans });
+        if (bodySpans) throw new Error("store transaction failed");
+      },
+    };
+    const finding = (start: number) => ({
+      detector: "generic-api-key", secretType: "generic", severity: "medium",
+      tier: "possible", start, end: start + 4, fingerprint: `fp${start}`,
+      destinationOwnKey: false,
+    });
+    expect(() =>
+      d.alertDerived(
+        { id: "call-1", sessionId: "sess-1", provider: "anthropic" },
+        {
+          outbound: [], inbound: [], values: [],
+          anchoredFindings: [finding(0)], leakFindings: [finding(9)],
+          incomplete: false,
+        },
+      ),
+    ).toThrow("store transaction failed");
+    // Both passes ran, in order, and the span-less one was not collateral.
+    expect(seen).toEqual([
+      { n: 1, bodySpans: true },
+      { n: 1, bodySpans: false },
+    ]);
+  });
+
   test("protocol identity fields (prompt_cache_key) never create leak events", async () => {
     // The exact false positive from live traffic: opencode's own session id,
     // high-entropy and preceded by "…key", flagged by the generic detector.

@@ -387,11 +387,18 @@ export class Daemon {
   // manufactured a string the body never held. Those findings earn a body
   // highlight; only a genuinely manufactured one stays span-less.
   //
-  // The remapped offsets index the RAW body, which is what the viewer slices
-  // whenever it consults spans at all: a row that redacted anything reads
-  // `redacted`, and extractLeaks then highlights placeholders and ignores spans
-  // entirely (viewer/detail.ts). So a span is only ever used against bytes it
-  // still fits.
+  // WHERE THIS TAKES EFFECT, stated plainly because the reach is narrower than
+  // it looks: any derived finding at all produces a redacted part, so with
+  // redact-on-capture ON — the default — the row reads `redacted`, and
+  // extractLeaks highlights placeholders and ignores spans entirely
+  // (viewer/detail.ts). The span is consulted ONLY with redact-on-capture off,
+  // where the stored body is the raw bytes these offsets were computed against.
+  //
+  // That gate is load-bearing, not an oversight, and the obvious "fix" — having
+  // extractLeaks union span-recovered values into the placeholder branch —
+  // would be a bug: on a redacted row the body has been rewritten underneath
+  // these offsets, so slicing by them returns a fragment of whatever now sits
+  // there. A span is only ever used against bytes it still fits.
   //
   // HIGHLIGHT ONLY — never feed these offsets to redactBody. They come from a
   // text SEARCH, not from the regex's own `d`-flag indices, and the engine
@@ -498,13 +505,34 @@ export class Daemon {
   // finding: re-anchored values carry real body offsets and highlight, the rest
   // are span-less because their offsets index the derived text. Returns how many
   // were reported, for the caller's leak frame.
+  //
+  // Each pass is attempted even if the other throws — process() opens a store
+  // transaction per finding, so it can. Splitting one call into two would
+  // otherwise mean a failure in the first loses EVERY finding in the second,
+  // and the span-less half is the higher-value one: a secret the body scan
+  // structurally cannot see, which this pass is the only chance to report. One
+  // pass failing must cost only that pass. The error still escapes afterwards,
+  // to the same pipeline tracker that caught it before.
   private alertDerived(meta: CallMeta, derived: DerivedRedaction): number {
-    if (derived.anchoredFindings.length > 0) {
-      this.alertEngine.process(meta, derived.anchoredFindings, true);
-    }
-    if (derived.leakFindings.length > 0) {
-      this.alertEngine.process(meta, derived.leakFindings, false);
-    }
+    let failed = false;
+    let failure: unknown;
+    const pass = (findings: Finding[], bodySpans: boolean) => {
+      if (findings.length === 0) return;
+      try {
+        this.alertEngine.process(meta, findings, bodySpans);
+      } catch (e) {
+        if (!failed) [failed, failure] = [true, e];
+      }
+    };
+    // Anchored FIRST, and the order is load-bearing: leak_occurrences is keyed
+    // (event_id, exchange_id) and written INSERT OR IGNORE, so whichever pass
+    // reaches a pair first decides whether it stores the span or NULL. Two
+    // findings can share a fingerprint while their raw slices differ — the
+    // fingerprint decodes escapes and strips whitespace, indexOf matches the
+    // raw slice — and there the real span has to win over the span-less one.
+    pass(derived.anchoredFindings, true);
+    pass(derived.leakFindings, false);
+    if (failed) throw failure;
     return derived.anchoredFindings.length + derived.leakFindings.length;
   }
 
