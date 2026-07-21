@@ -143,28 +143,38 @@ describe("case sensitivity (precision)", () => {
   });
 });
 
-describe("pasted .env lines, JSON-encoded as they arrive on the wire", () => {
-  // The scanner sees the request body, not the chat message: a pasted .env line
-  // reaches it JSON-encoded, so the quotes around a quoted assignment arrive as
-  // \" — a backslash sits between the key name and the value. The separator
-  // class must absorb that escape, or the quoted form silently drops to the
-  // quiet tier while the unquoted form alerts. Tier matters because
-  // AlertEngine.process only fires the loud alert on tier === "structured":
-  // a "possible" finding is recorded but the user is never told.
+describe("pasted secrets, JSON-encoded as they arrive on the wire", () => {
+  // The scanner sees the request body, not the chat message, so a pasted .env
+  // line reaches it JSON-encoded and the quotes around a quoted assignment
+  // arrive as \". A raw body matched that same paste on the bare quote, so a
+  // rule reading only the raw form alerts or stays silent depending purely on
+  // transport. Tier is what carries the consequence: AlertEngine.process fires
+  // the loud alert only on tier === "structured". Unmatched, the paste is not
+  // silent but demoted — the anchor-free aws-secret-shape rule still logs it at
+  // tier "possible", which is recorded and never shown to the user.
   const SECRET = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYZZZZZKEY42";
+  const DIGEST = "3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5e"; // 40 hex: clears the 3.0 entropy gate
   const wireBody = (line: string) =>
     JSON.stringify({ messages: [{ role: "user", content: `here is my env:\n${line}\nplease use it` }] });
 
+  // Separator shapes a paste can put between the key name and the secret. Each
+  // is written raw here and JSON-encoded by wireBody, exactly as a chat client
+  // would encode it. The first two are controls: JSON.stringify escapes neither
+  // = nor ', so they reach the wire byte-identical to their raw form and match
+  // even without the fix. They are here to prove the fix costs nothing, not to
+  // exercise it — every shape below them fails if the fix is reverted.
   const SHAPES: Array<[string, string]> = [
-    ["unquoted", `AWS_SECRET_ACCESS_KEY=${SECRET}`],
+    ["unquoted (control)", `AWS_SECRET_ACCESS_KEY=${SECRET}`],
+    ["single-quoted (control)", `AWS_SECRET_ACCESS_KEY='${SECRET}'`],
     ["double-quoted", `AWS_SECRET_ACCESS_KEY="${SECRET}"`],
-    ["single-quoted", `AWS_SECRET_ACCESS_KEY='${SECRET}'`],
     ["spaced and quoted", `aws_secret_access_key = "${SECRET}"`],
+    ["shell export", `export AWS_SECRET_ACCESS_KEY="${SECRET}"`],
     ["json field", `{"aws_secret_access_key": "${SECRET}"}`],
+    ["pretty-printed json", `{\n  "aws_secret_access_key": "${SECRET}"\n}`],
   ];
 
   for (const [shape, line] of SHAPES) {
-    test(`${shape} assignment alerts at the structured tier`, () => {
+    test(`${shape} alerts at the structured tier, encoded or not`, () => {
       const body = wireBody(line);
       const hit = scanText(body).find((x) => x.secretType === "aws-secret-access-key");
       expect(hit).toBeDefined();
@@ -173,10 +183,15 @@ describe("pasted .env lines, JSON-encoded as they arrive on the wire", () => {
       // Span covers the secret alone: redact-on-capture splices these offsets
       // out of the stored body, so a span that ate the \" would corrupt the JSON.
       expect(body.slice(hit!.start, hit!.end)).toBe(SECRET);
+      // The bug this pins: the same content alerted unquoted but not quoted,
+      // purely because JSON encoding moved a backslash between key and value.
+      // A raw (unencoded) body must reach the same verdict.
+      const rawHit = scanText(line).find((x) => x.secretType === "aws-secret-access-key");
+      expect(rawHit?.tier).toBe("structured");
     });
   }
 
-  test("every shape fingerprints identically (one secret, not five)", () => {
+  test("every shape fingerprints identically (one secret, not seven)", () => {
     const fps = new Set(
       SHAPES.map(([, line]) =>
         scanText(wireBody(line)).find((x) => x.secretType === "aws-secret-access-key")!.fingerprint),
@@ -184,17 +199,32 @@ describe("pasted .env lines, JSON-encoded as they arrive on the wire", () => {
     expect(fps.size).toBe(1);
   });
 
-  // The escape is only a separator when it ESCAPES one. A backslash accepted
-  // on its own would turn every Windows path under an aws-ish directory into a
-  // loud alert, because a 40-char digest is an ordinary path segment.
+  // Only backslash-QUOTE is a separator, and only as a unit. Each case below
+  // is a raw body that a looser rule was measured to fire on, at high severity,
+  // with no secret present — these pin the shapes that were rejected while
+  // arriving at the fix, so a future widening has to re-argue them:
+  //   a bare \ in the class            -> "windows path", "home dir listing"
+  //   \\? before any separator         -> the backslash-then-separator cases
+  //   \\[ntr] for escaped whitespace   -> "hash-named dir after \n"
+  // A raw body carries the single backslash the user typed; wireBody doubles
+  // it, so asserting both covers each form.
   const PATHS: Array<[string, string]> = [
-    ["windows path", "C:\\aws\\3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5e\\cache"],
-    ["unc share", "\\\\server\\aws\\share\\3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5e"],
-    ["home dir listing", "ls ~/.aws\\3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5e"],
+    ["windows path", `C:\\aws\\${DIGEST}\\cache`],
+    ["home dir listing", `ls ~/.aws\\${DIGEST}`],
     ["path to a key-shaped segment", `the path is C:\\aws\\${SECRET}`],
+    ["backslash then space (dir paste)", `dir C:\\aws\\ ${DIGEST}`],
+    ["backslash then newline (dir paste)", `C:\\aws\\\n${DIGEST}`],
+    ["backslash then equals", `C:\\aws\\=${DIGEST}`],
+    ["backslash then colon", `C:\\aws\\:${DIGEST}`],
+    ["backslash then tab", `C:\\aws\\\t${DIGEST}`],
+    // A 41-char hash-named segment beginning with n: \n must not read as an
+    // escaped newline that separates "aws" from a 40-char secret.
+    ["hash-named dir after \\n", `C:\\aws\\n${DIGEST.slice(0, 39)}x\\blob.bin`],
   ];
   for (const [shape, text] of PATHS) {
-    test(`a backslash as a PATH separator stays silent: ${shape}`, () => {
+    test(`a backslash that does not escape a quote stays silent: ${shape}`, () => {
+      // Raw body (single backslash) and wire body (doubled) must both stay quiet.
+      expect(scanText(text).some((x) => x.secretType === "aws-secret-access-key")).toBe(false);
       expect(scanText(wireBody(text)).some((x) => x.secretType === "aws-secret-access-key")).toBe(false);
     });
   }
