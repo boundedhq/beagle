@@ -490,6 +490,40 @@ describe("Mode B end-to-end through the daemon", () => {
     store.close();
   });
 
+  // The pair above asserts the SUMMARY and stops there, which leaves the other
+  // two surfaces a sub-floor value reaches with no assertion at that length: the
+  // stored transcript and the FTS index. Every long-secret test here checks all
+  // three (see the PEM case), so a regression confined to either one would pass
+  // the whole file while shipping a password in cleartext at rest — the exact
+  // shape of the original report, where the body read [REDACTED:…] and
+  // searchLiteral("svc:abcd@") still returned a hit.
+  //
+  // mongodb+srv also exercises the scheme alternation's optional group, which
+  // the postgres cases above do not reach.
+  test("a short Mode B secret reaches NO stored surface — body, transcript, index, summary", async () => {
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    await post(otlpBody(token, "connect with mongodb+srv://svc:abcd@cluster0.mongodb.test/db please", "otel-conv-short-all", null));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    const call = store.getCall(store.searchLiteral("connect with")[0]!.callId)!;
+    expect(call.redacted).toBe(true);
+    const body = new TextDecoder().decode(call.requestBody!);
+    expect(body).not.toContain(":abcd@"); // stored body: offset-redacted
+    expect(body).toContain("[REDACTED:connection-string:");
+    // The transcript the session view renders — re-derived from the parts, so a
+    // span is the only thing that can have masked it.
+    expect(JSON.stringify(call.displayMessages)).not.toContain(":abcd@");
+    expect(JSON.stringify(call.displayMessages)).toContain("[REDACTED:connection-string:");
+    // The index, which would otherwise answer a search with the password.
+    expect(store.searchLiteral("svc:abcd@")).toEqual([]);
+    expect(store.searchLiteral("mongodb+srv://svc:abcd@cluster0.mongodb.test/db")).toEqual([]);
+    // …while the rest of the prompt stays searchable: this masks a secret, not
+    // the line that carried it.
+    expect(store.searchLiteral("connect with").length).toBe(1);
+    expect(call.summary).not.toContain(":abcd@");
+    store.close();
+  });
+
   test("a response arriving in a later OTLP batch rejoins its turn row (cross-batch stitch)", async () => {
     // The real interactive pattern (verified live against Claude Code 2.1.193):
     // the prompt flushes in its own batch ~1s after Enter; the answer lands in
