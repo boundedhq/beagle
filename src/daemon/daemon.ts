@@ -1185,32 +1185,42 @@ export class Daemon {
         !call.request.messages?.length &&
         call.request.bodyBytes.byteLength === 0 &&
         Boolean(call.response.text);
-      if (
-        responseOnly &&
-        !redaction?.heldOut &&
-        this.store.attachOtelResponse({
-          sessionId: resolution.sessionId,
-          promptKey: call.promptId!,
-          tsResponse: call.meta.tsResponse ?? call.meta.tsRequest,
-          model: call.model,
-          tokensIn: call.meta.tokensIn,
-          tokensOut: call.meta.tokensOut,
-          // Read like a turn that arrived in ONE batch: `"question" → answer`
-          // (buildSummary's wire order). Without this the stitched row would
-          // show only the answer, dropping the question the row is about.
-          // Both halves come from already-scrubbed text — `summary` went
-          // through buildSummary's secretValues pass and the stored summary
-          // was scrubbed when its row was written; never re-derive from the
-          // raw call.response.text here, which would undo the redaction.
-          composeSummary: (existing) =>
-            existing ? `"${firstLine(existing, 40)}" → ${firstLine(summary, 80)}` : summary,
-          redacted,
-          responseBody: redaction ? redaction.responseBody : (call.response.bodyBytes ?? null),
-          // Rollout answers grow while their turn runs — grow-only upsert,
-          // routed to the right same-key row by the turn ordinal.
-          extend: fromRollout ? { ordinal: call.promptOrdinal ?? 0 } : undefined,
-        })
-      ) {
+      const attached =
+        responseOnly && !redaction?.heldOut
+          ? this.store.attachOtelResponse({
+              sessionId: resolution.sessionId,
+              promptKey: call.promptId!,
+              tsResponse: call.meta.tsResponse ?? call.meta.tsRequest,
+              model: call.model,
+              tokensIn: call.meta.tokensIn,
+              tokensOut: call.meta.tokensOut,
+              // Read like a turn that arrived in ONE batch: `"question" → answer`
+              // (buildSummary's wire order). Without this the stitched row would
+              // show only the answer, dropping the question the row is about.
+              // Both halves come from already-scrubbed text — `summary` went
+              // through buildSummary's secretValues pass and the stored summary
+              // was scrubbed when its row was written; never re-derive from the
+              // raw call.response.text here, which would undo the redaction.
+              composeSummary: (existing) =>
+                existing ? `"${firstLine(existing, 40)}" → ${firstLine(summary, 80)}` : summary,
+              redacted,
+              responseBody: redaction ? redaction.responseBody : (call.response.bodyBytes ?? null),
+              // Rollout answers grow while their turn runs — grow-only upsert,
+              // routed to the right same-key row by the turn ordinal.
+              extend: fromRollout ? { ordinal: call.promptOrdinal ?? 0 } : undefined,
+            })
+          : null;
+      if (attached) {
+        // The stitch wrote to a row the dashboard ALREADY shows, so the "call"
+        // frame is wrong here — app.js prepends those as new feed rows. A
+        // distinct frame naming the row tells open tabs to refetch what they
+        // already show (the feed line, the session transcript, an expanded
+        // detail pane). Only when something actually changed: a rollout answer
+        // re-emits every poll of its retry window, and refreshing every open
+        // tab on a timer for an unmoved row is a self-inflicted refresh storm.
+        if (attached.changed) {
+          this.viewer?.broadcast("call-updated", { id: attached.id, sessionId: resolution.sessionId });
+        }
         continue;
       }
       // Attach failed (or was skipped for heldOut): a rollout answer drops here

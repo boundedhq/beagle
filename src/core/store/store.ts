@@ -245,9 +245,15 @@ export class Store {
   // Mode B cross-batch turn stitching: Claude Code flushes a turn's prompt in
   // one OTLP batch and its response ~seconds later in another, which used to
   // land as two rows (question with no answer + detached answer). Rejoin the
-  // response to its turn row via (session, prompt_key). Returns false when no
-  // response-less turn row matches — the caller falls back to inserting the
-  // partial as its own row (the old behavior, nothing is ever dropped).
+  // response to its turn row via (session, prompt_key). Returns null when no
+  // turn row matches — the caller falls back to inserting the partial as its
+  // own row (the old behavior, nothing is ever dropped) — otherwise the target
+  // row's id, plus whether this call actually WROTE to it. Those two facts
+  // diverge only in extend mode, and the daemon needs both: it broadcasts the
+  // id so open dashboards refresh that row, but only when `changed`. A rollout
+  // answer re-emits on every poll of its retry window, and each one is
+  // "handled" (never re-inserted) while writing nothing — broadcasting those
+  // would make every open tab refetch on a timer for a row that never moved.
   attachOtelResponse(input: {
     sessionId: string;
     promptKey: string;
@@ -269,7 +275,7 @@ export class Store {
      *  done. `ordinal` picks the Nth same-key row — hash(prompt) is the only
      *  join key, so repeated identical prompts share it. */
     extend?: { ordinal: number };
-  }): boolean {
+  }): { id: string; changed: boolean } | null {
     return this.inTx(() => {
       // The turn's EARLIEST response-less row — the one carrying the question,
       // since a turn's user_prompt always precedes its tool_results. Ordering
@@ -308,9 +314,13 @@ export class Store {
              ORDER BY ts_request ASC, id ASC LIMIT 1`,
             [input.sessionId, input.promptKey, input.tsResponse + ATTACH_MAX_SKEW_MS],
           );
-      if (!target) return false;
+      if (!target) return null;
       const have = target.resp_len ?? 0;
-      if (input.extend && (input.responseBody?.byteLength ?? 0) <= have) return true; // re-emit or stale shorter view — keep what we have
+      // Re-emit or stale shorter view — keep what we have. Handled, so the
+      // caller must not re-insert; unchanged, so nothing to tell the viewer.
+      if (input.extend && (input.responseBody?.byteLength ?? 0) <= have) {
+        return { id: target.id, changed: false };
+      }
       // Compose only when the row first gains a response; re-composing on
       // growth would nest the already-combined "q" → a line inside itself.
       const summary = input.composeSummary && have === 0 ? input.composeSummary(target.summary) : null;
@@ -333,7 +343,7 @@ export class Store {
       // index. There is no parameter for it on purpose: with one, a future
       // caller appending the answer would silently make model-generated text
       // report as sent, the exact hole the wire path's buildSearchText closes.
-      return true;
+      return { id: target.id, changed: true };
     });
   }
 

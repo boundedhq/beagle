@@ -64,6 +64,9 @@ function App() {
   const [banner, setBanner] = useState(null);
   const [expanded, setExpanded] = useState(null);
   const [stats, setStats] = useState(null); // whole-store totals — the feed is a 500-row window
+  // { id, sessionId, n } — the last row that gained a response in place. The
+  // counter is what makes a repeat stitch on the same row a new value.
+  const [stitched, setStitched] = useState(null);
   const searchBox = useRef(null);
 
   useEffect(() => {
@@ -105,6 +108,15 @@ function App() {
       if (ev === "call") {
         setCalls((xs) => [data, ...xs]);
         api.get("/api/stats").then(setStats);
+      }
+      if (ev === "call-updated") {
+        // An EXISTING row grew its response — a turn whose answer arrived in a
+        // later OTLP batch, or a codex rollout answer stitched on seconds after
+        // the prompt. Refetch, never prepend: the row is already in the feed,
+        // and appending it again would double it. The store totals don't move
+        // (no new row), so /api/stats is left alone.
+        api.get("/api/feed").then(setCalls);
+        setStitched((s) => ({ id: data.id, sessionId: data.sessionId, n: (s?.n ?? 0) + 1 }));
       }
       if (ev === "alert") {
         setBanner(data);
@@ -235,6 +247,7 @@ function App() {
         onOpen=${(id) => { setTab("calls"); setOpenSession(null); setExpanded(id); }} />`}
       ${openSession != null &&
       html`<${SessionTranscript} sessionId=${openSession.id} row=${openSession.row}
+        refresh=${stitched?.sessionId === openSession.id ? stitched.n : 0}
         onBack=${() => setOpenSession(null)}
         onPurged=${() => {
           setOpenSession(null); // the session is gone — leave the transcript
@@ -269,6 +282,7 @@ function App() {
                 setOpenSession({ id: x.sessionId, row: { agent: x.agent, model: x.model } })} />
             ${expanded === x.id &&
             html`<${Detail} id=${x.id}
+              refresh=${stitched?.id === x.id ? stitched.n : 0}
               onSession=${(sid) => setOpenSession({ id: sid, row: null })} />`}
           `,
         )}
@@ -454,12 +468,15 @@ function secretLabel(type) {
 // shows only what it ADDED (the server diffs wire histories), flowing as one
 // continuous document: time dividers on gaps, a metadata rail per turn, then
 // the messages (tinted user box, flat assistant text, collapsible tool cards).
-function SessionTranscript({ sessionId, row, onBack, onPurged }) {
+// `refresh` changes when a turn in THIS session gained its answer in place
+// (see the call-updated frame): reload so the thread shows the response
+// instead of sitting on the question until the next unrelated call.
+function SessionTranscript({ sessionId, row, refresh, onBack, onPurged }) {
   const [view, setView] = useState(null);
   const [openCall, setOpenCall] = useState(null);
   const [confirmDel, setConfirmDel] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  useEffect(() => { api.get(`/api/session/${sessionId}`).then(setView); }, [sessionId]);
+  useEffect(() => { api.get(`/api/session/${sessionId}`).then(setView); }, [sessionId, refresh]);
 
   async function purgeSession() {
     setDeleting(true);
@@ -551,7 +568,7 @@ function SessionTranscript({ sessionId, row, onBack, onPurged }) {
                 ${hasLeak && html`<span class="chip leak">secret sent</span>`}
                 <span class="turn-toggle">${open ? "▾ details" : "▸ details"}</span>
               </div>
-              ${open && html`<${Detail} id=${t.id} />`}
+              ${open && html`<${Detail} id=${t.id} refresh=${refresh} />`}
               ${t.messages.length > 0 &&
               html`<div class="dir-label sent"
                 title=${t.source === "wire"
@@ -751,11 +768,13 @@ function spanLabel(first, last) {
   return `${(s / 3600).toFixed(1)} h`;
 }
 
-function Detail({ id, onSession }) {
+// `refresh` bumps when this call gained a response in place — an open detail
+// pane is the view that shows the response body, so it reloads too.
+function Detail({ id, refresh, onSession }) {
   const [detail, setDetail] = useState(null);
   const [raw, setRaw] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
-  useEffect(() => { api.get(`/api/call/${id}`).then(setDetail); }, [id]);
+  useEffect(() => { api.get(`/api/call/${id}`).then(setDetail); }, [id, refresh]);
   if (!detail) return html`<div class="detail">loading…</div>`;
   if (detail.error) return html`<div class="detail">${detail.error}</div>`;
 

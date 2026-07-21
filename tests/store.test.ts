@@ -236,7 +236,9 @@ describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
       composeSummary: (existing) => `"${existing}" → Memory works like this…`,
       responseBody: new TextEncoder().encode("Memory works like this — the long answer"),
     });
-    expect(attached).toBe(true);
+    // Returns the stitched row's id and that it really wrote — what the daemon
+    // broadcasts so an open dashboard refreshes the exact row that changed.
+    expect(attached).toEqual({ id: turn.id, changed: true });
     const got = store.getCall(turn.id)!;
     expect(new TextDecoder().decode(got.responseBody!)).toContain("the long answer");
     expect(got.model).toBe("claude-opus-4-8");
@@ -291,7 +293,7 @@ describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
     store.close();
   });
 
-  test("no matching turn row → false (caller inserts the partial as its own row)", () => {
+  test("no matching turn row → null (caller inserts the partial as its own row)", () => {
     const store = Store.open(dir);
     store.insertCall(promptRow());
     const wrongPrompt = store.attachOtelResponse({
@@ -302,8 +304,8 @@ describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
       sessionId: "sess-9", promptKey: "prompt-1", tsResponse: Date.now(),
       responseBody: new TextEncoder().encode("x"),
     });
-    expect(wrongPrompt).toBe(false);
-    expect(wrongSession).toBe(false);
+    expect(wrongPrompt).toBe(null);
+    expect(wrongSession).toBe(null);
     store.close();
   });
 
@@ -319,8 +321,8 @@ describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
       sessionId: "sess-1", promptKey: "prompt-1", tsResponse: Date.now(),
       responseBody: new TextEncoder().encode("an impostor"),
     });
-    expect(first).toBe(true);
-    expect(second).toBe(false);
+    expect(first).toEqual({ id: turn.id, changed: true });
+    expect(second).toBe(null);
     expect(new TextDecoder().decode(store.getCall(turn.id)!.responseBody!)).toBe("the real answer");
     store.close();
   });
@@ -339,20 +341,20 @@ describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
     expect(store.attachOtelResponse({
       sessionId: "sess-1", promptKey: "prompt-1", tsResponse: ans1Ts,
       responseBody: new TextEncoder().encode("ANSWER ONE"),
-    })).toBe(true);
+    })).toEqual({ id: turn1.id, changed: true });
     const turn2 = promptRow({ id: ulid(t0 + 20_000), tsRequest: t0 + 20_000 });
     store.insertCall(turn2);
     // The re-emit: same answer, same production time — turn 2's row postdates it.
     expect(store.attachOtelResponse({
       sessionId: "sess-1", promptKey: "prompt-1", tsResponse: ans1Ts,
       responseBody: new TextEncoder().encode("ANSWER ONE"),
-    })).toBe(false);
+    })).toBe(null);
     expect(store.getCall(turn2.id)!.responseBody).toBe(null);
     // The real turn-2 answer still lands on turn 2's row.
     expect(store.attachOtelResponse({
       sessionId: "sess-1", promptKey: "prompt-1", tsResponse: t0 + 25_000,
       responseBody: new TextEncoder().encode("ANSWER TWO"),
-    })).toBe(true);
+    })).toEqual({ id: turn2.id, changed: true });
     expect(new TextDecoder().decode(store.getCall(turn1.id)!.responseBody!)).toBe("ANSWER ONE");
     expect(new TextDecoder().decode(store.getCall(turn2.id)!.responseBody!)).toBe("ANSWER TWO");
     store.close();
@@ -368,11 +370,11 @@ describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
     expect(store.attachOtelResponse({
       sessionId: "sess-1", promptKey: "prompt-1", tsResponse: t0 - 5_000,
       responseBody: new TextEncoder().encode("stale"),
-    })).toBe(false);
+    })).toBe(null);
     expect(store.attachOtelResponse({
       sessionId: "sess-1", promptKey: "prompt-1", tsResponse: t0 - 1_000,
       responseBody: new TextEncoder().encode("close enough"),
-    })).toBe(true);
+    })).toEqual({ id: turn.id, changed: true });
     // The bound is one-sided: an answer long AFTER its row (post-retirement
     // back-fill) attaches — only answer-before-row is stale.
     const old = promptRow({ id: ulid(t0 - 3_600_000), tsRequest: t0 - 3_600_000, sessionId: "sess-old" });
@@ -380,7 +382,7 @@ describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
     expect(store.attachOtelResponse({
       sessionId: "sess-old", promptKey: "prompt-1", tsResponse: t0,
       responseBody: new TextEncoder().encode("late back-fill"),
-    })).toBe(true);
+    })).toEqual({ id: old.id, changed: true });
     store.close();
   });
 
@@ -394,7 +396,7 @@ describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
         sessionId: "sess-1", promptKey: "prompt-1", tsResponse: Date.now(),
         responseBody: new TextEncoder().encode("x"),
       }),
-    ).toBe(false);
+    ).toBe(null);
     store.close();
   });
 
@@ -414,24 +416,29 @@ describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
       const store = Store.open(dir);
       const turn = promptRow();
       store.insertCall(turn);
-      expect(attachExtend(store, "I’m checking the docs.")).toBe(true);
-      expect(attachExtend(store, "I’m checking the docs.\n\nThe real answer, at last.")).toBe(true);
+      expect(attachExtend(store, "I’m checking the docs.")).toEqual({ id: turn.id, changed: true });
+      expect(attachExtend(store, "I’m checking the docs.\n\nThe real answer, at last."))
+        .toEqual({ id: turn.id, changed: true }); // growth is a real write — the viewer must hear about it
       const got = store.getCall(turn.id)!;
       expect(new TextDecoder().decode(got.responseBody!)).toBe("I’m checking the docs.\n\nThe real answer, at last.");
       expect(got.bytesResp).toBeGreaterThan("I’m checking the docs.".length);
       store.close();
     });
 
-    test("an equal or shorter re-emit is dropped as done (true), body untouched", () => {
+    test("an equal or shorter re-emit is handled but changes nothing, body untouched", () => {
       const store = Store.open(dir);
       const turn = promptRow();
       store.insertCall(turn);
       attachExtend(store, "the whole answer");
       // Same length again (the tailer's retry window re-emits verbatim)…
-      expect(attachExtend(store, "the whole answer")).toBe(true);
+      expect(attachExtend(store, "the whole answer")).toEqual({ id: turn.id, changed: false });
       // …and a shorter view must never roll the row back.
-      expect(attachExtend(store, "shorter")).toBe(true);
+      expect(attachExtend(store, "shorter")).toEqual({ id: turn.id, changed: false });
       expect(new TextDecoder().decode(store.getCall(turn.id)!.responseBody!)).toBe("the whole answer");
+      // changed:false is load-bearing in two directions. A row id (not null)
+      // keeps the caller from re-inserting the re-emit as its own row; the
+      // false keeps it from telling every open dashboard to refetch a row that
+      // did not move — the tailer re-emits on every poll of its retry window.
       store.close();
     });
 
@@ -457,12 +464,12 @@ describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
       const second = promptRow({ id: ulid(t0 + 5000), tsRequest: t0 + 5000 });
       store.insertCall(first);
       store.insertCall(second);
-      expect(attachExtend(store, "part two", { ordinal: 1, ts: t0 + 6000 })).toBe(true);
-      expect(attachExtend(store, "part one", { ordinal: 0, ts: t0 + 1000 })).toBe(true);
+      expect(attachExtend(store, "part two", { ordinal: 1, ts: t0 + 6000 })).toEqual({ id: second.id, changed: true });
+      expect(attachExtend(store, "part one", { ordinal: 0, ts: t0 + 1000 })).toEqual({ id: first.id, changed: true });
       expect(new TextDecoder().decode(store.getCall(first.id)!.responseBody!)).toBe("part one");
       expect(new TextDecoder().decode(store.getCall(second.id)!.responseBody!)).toBe("part two");
       // An ordinal past the last row has no target: drop-and-retry, never a wrong row.
-      expect(attachExtend(store, "part three", { ordinal: 2, ts: t0 + 9000 })).toBe(false);
+      expect(attachExtend(store, "part three", { ordinal: 2, ts: t0 + 9000 })).toBe(null);
       store.close();
     });
 
@@ -474,7 +481,7 @@ describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
       const t0 = Date.now();
       const newer = promptRow({ id: ulid(t0 + 60_000), tsRequest: t0 + 60_000 });
       store.insertCall(newer);
-      expect(attachExtend(store, "a historical answer", { ordinal: 0, ts: t0 })).toBe(false);
+      expect(attachExtend(store, "a historical answer", { ordinal: 0, ts: t0 })).toBe(null);
       expect(store.getCall(newer.id)!.responseBody).toBe(null);
       store.close();
     });
