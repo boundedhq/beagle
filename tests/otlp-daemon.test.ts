@@ -369,6 +369,35 @@ describe("Mode B end-to-end through the daemon", () => {
     store.close();
   });
 
+  // connection-string's secretGroup captures the password ALONE, so both of
+  // these are FOUR-char findings — under redactValuesInText's 8-char floor. The
+  // body is spliced by span and the summary used to re-derive from the raw text
+  // and scrub it by value, which for a value this short is a no-op. One test
+  // per half, because the two read different parts of the derived scan.
+  test("a short Mode B secret in the prompt never reaches the stored summary", async () => {
+    // response null: the summary falls back to the prompt line itself.
+    await post(otlpBody(token, "connect with postgres://svc:pw12@db.internal/app", "otel-conv-short-out", null));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    const call = store.getCall(store.searchLiteral("connect with")[0]!.callId)!;
+    expect(call.summary).not.toContain("pw12");
+    expect(call.summary).toContain("[REDACTED:connection-string:");
+    expect(call.summary).toContain("connect with"); // the line itself survived
+    store.close();
+  });
+
+  test("a short Mode B secret in the response never reaches the stored summary", async () => {
+    await post(otlpBody(token, "otel reply probe", "otel-conv-short-in", "use postgres://svc:zq77@db.internal/app now"));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    const call = store.getCall(store.searchLiteral("otel reply probe")[0]!.callId)!;
+    expect(call.summary).not.toContain("zq77");
+    expect(call.summary).toContain("[REDACTED:connection-string:");
+    // The question half is untouched — this scrubs a secret, not the line.
+    expect(call.summary).toContain("otel reply probe");
+    store.close();
+  });
+
   test("a response arriving in a later OTLP batch rejoins its turn row (cross-batch stitch)", async () => {
     // The real interactive pattern (verified live against Claude Code 2.1.193):
     // the prompt flushes in its own batch ~1s after Enter; the answer lands in

@@ -306,6 +306,42 @@ describe("Daemon end-to-end", () => {
     expect(new TextDecoder().decode(call.responseBody!)).not.toContain("pw12");
   });
 
+  // Same four-char password, the other derived surface. The summary is the
+  // always-visible feed line, so it is the worst place for the value-scrub's
+  // 8-char floor to hold: the body and the stream beside it were both spliced
+  // by span while the line the user actually reads kept the password.
+  test("a short streamed secret never reaches the stored summary", async () => {
+    const call = await streamedCall(
+      "run-short-summary",
+      "probe short marker",
+      deltaFrame("use postgres://svc:pw12@db.internal/app now"),
+    );
+    expect(call.summary).not.toContain("pw12");
+    expect(call.summary).toContain("[REDACTED:connection-string:");
+    expect(call.summary).toContain("probe short marker"); // the line itself survived
+  });
+
+  test("a short streamed secret stays out of the summary with redact-on-capture off", async () => {
+    // The feed line is the ONE surface that scrubs regardless of the setting,
+    // so it cannot be left depending on `redaction.values` to do it.
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: false } });
+    const call = await streamedCall(
+      "run-short-summary-raw",
+      "probe raw marker",
+      deltaFrame("use postgres://svc:pw12@db.internal/app now"),
+    );
+    expect(call.summary).not.toContain("pw12");
+    expect(call.summary).toContain("[REDACTED:connection-string:");
+    expect(call.summary).toContain("probe raw marker"); // the line itself survived
+    // ...while the stored bytes keep their raw fidelity, which is what the
+    // setting is for. Pinned so the scrub doesn't quietly grow into them.
+    expect(new TextDecoder().decode(call.responseBody!)).toContain("pw12");
+    // And the row still reads "not redacted": the summary's unconditional
+    // scrub deliberately does NOT set that flag, which tracks whether the
+    // stored CONTENT was rewritten. A divergence worth pinning, not a bug.
+    expect(call.redacted).toBe(false);
+  });
+
   test("a secret split across two SSE frames stays split in the stored stream", async () => {
     // The shape a streaming provider actually produces — deltas cut mid-token.
     // No rule matches either half, so the scanned bytes (which ARE the stream:
@@ -717,10 +753,14 @@ describe("Daemon end-to-end", () => {
   // The summary derives from the same raw messages the body redaction already
   // scrubbed — it must not carry the secret into the always-visible feed,
   // `beagle show`, or the viewer.
-  async function silentRun(runId: string): Promise<Awaited<ReturnType<typeof fakeUpstream>>> {
-    // A reply with no text: buildSummary falls back to the last user message —
-    // the line that carries the secret.
-    const silent = await fakeUpstream(JSON.stringify({ model: "claude-sonnet-5", content: [], usage: {} }));
+  // `content` defaults to a reply with no text, so buildSummary falls back to
+  // the last user message — the line that carries the secret. Pass blocks to
+  // put the secret on the RESPONSE side instead.
+  async function silentRun(
+    runId: string,
+    content: unknown[] = [],
+  ): Promise<Awaited<ReturnType<typeof fakeUpstream>>> {
+    const silent = await fakeUpstream(JSON.stringify({ model: "claude-sonnet-5", content, usage: {} }));
     await controlRequest(daemon.socketPath, {
       cmd: "register-run",
       args: { id: runId, agent: "claude-code", provider: "anthropic", upstream: `http://127.0.0.1:${silent.port}`, authLocation: "x-api-key" },
@@ -737,6 +777,50 @@ describe("Daemon end-to-end", () => {
     const ex = listCalls(store, 10).find((e) => e.hasLeak)!;
     expect(ex.summary).not.toContain("AKIAZQ3DRSTUVWXY2345");
     expect(ex.summary).toContain("[REDACTED:aws-access-key-id:");
+    store.close();
+    silent.server.close();
+  });
+
+  test("a short secret in a tool action's detail never reaches the stored summary", async () => {
+    // The action branch is the ONLY reader of the inbound half's i + 1 offset
+    // (inbound is [reply, ...one per action]), and it is the summary's other
+    // response-side surface — a shell command carrying a password is the shape
+    // this rule exists for. Two actions, because one cannot distinguish a
+    // correct offset from one that slid the empty reply into slot 0 and every
+    // detail down by one: `second-cmd` is what pins it. Read at i instead of
+    // i + 1 and the summary misreports what the agent ran.
+    const silent = await silentRun("run-action-secret", [
+      { type: "tool_use", name: "Bash", input: { command: "psql postgres://svc:pw12@db.internal/app" } },
+      { type: "tool_use", name: "Bash", input: { command: "echo second-cmd" } },
+    ]);
+    await sendThroughProxy(daemon.proxyPort, "run-action-secret", requestBody("probe action marker"));
+    await Bun.sleep(200);
+    const store = Store.openReadOnly(stateDir);
+    const call = store.getCall(store.searchLiteral("probe action marker")[0]!.callId)!;
+    expect(call.summary).not.toContain("pw12");
+    // summarizeActions caps each detail at 40 chars AFTER the splice, so only
+    // the placeholder's head survives this branch — enough to prove a splice.
+    expect(call.summary).toContain("[REDACTED:connectio");
+    expect(call.summary).toContain("second-cmd"); // the second action's OWN detail
+    store.close();
+    silent.server.close();
+  });
+
+  test("a short secret in a request message never reaches the stored summary", async () => {
+    // The outbound half of the same hole. The reply is empty, so the summary
+    // quotes the user line the password sits in — and at 100 chars the whole
+    // placeholder survives here, unlike the 40-char action branch above.
+    const silent = await silentRun("run-req-short");
+    await sendThroughProxy(
+      daemon.proxyPort, "run-req-short",
+      requestBody("connect with postgres://svc:pw12@db.internal/app"),
+    );
+    await Bun.sleep(200);
+    const store = Store.openReadOnly(stateDir);
+    const call = store.getCall(store.searchLiteral("connect with")[0]!.callId)!;
+    expect(call.summary).not.toContain("pw12");
+    expect(call.summary).toContain("[REDACTED:connection-string:");
+    expect(call.summary).toContain("connect with"); // the line itself survived
     store.close();
     silent.server.close();
   });

@@ -63,10 +63,14 @@ export interface DaemonOptions {
 // the DERIVED form, for scrubbing text built from these parts that is not one
 // of them — the summary's quoted ask, a truncated transcript copy.
 interface DerivedRedaction {
-  /** The request-derived parts, redacted. The response-derived half is scanned
-   *  too but never handed back: nothing stores it directly, and the summary —
-   *  the one surface that quotes the answer — scrubs it by `values`. */
+  /** The request-derived parts, redacted. */
   outbound: string[];
+  /** The response-derived parts, redacted — the reply then one per action.
+   *  Handed back for the summary, the only surface that quotes the answer.
+   *  Scrubbing it by `values` instead is NOT equivalent: redactValuesInText
+   *  floors at 8 chars and connection-string reports a password on its own, so
+   *  a four-char one survives the scrub and only the spans remove it. */
+  inbound: string[];
   values: Array<{ value: string; type: string }>;
   /** Outbound-half findings only — what may alert. */
   leakFindings: Finding[];
@@ -363,7 +367,7 @@ export class Daemon {
     inbound: string[],
     bodyValues: Array<{ value: string; type: string }>,
   ): Promise<DerivedRedaction> {
-    const clean: DerivedRedaction = { outbound, values: [], leakFindings: [], incomplete: false };
+    const clean: DerivedRedaction = { outbound, inbound, values: [], leakFindings: [], incomplete: false };
     const parts = [...outbound, ...inbound];
     const text = derivedScanText(parts);
     if (text.trim() === "") return clean;
@@ -379,6 +383,7 @@ export class Daemon {
     const known = new Set(bodyValues.flatMap((v) => secretKeys(v.value)));
     return {
       outbound: red.parts.slice(0, outbound.length),
+      inbound: red.parts.slice(outbound.length),
       values: red.values,
       leakFindings: findings.filter(
         (f) =>
@@ -468,6 +473,38 @@ export class Daemon {
       [respParsed?.text ?? "", ...respActions.map((a) => a.detail ?? "")],
       bodyValues,
     );
+    // Positional, mirroring what redactDerived was handed just above: outbound
+    // is [system, ...one per message] and inbound is [reply, ...one per
+    // action], so both message and action sit at i + 1. Lifted out ONCE here
+    // for the two readers that need the redacted messages — the summary below
+    // and the persisted transcript after it — so the offset is stated in one
+    // place. (Mode B builds its outbound half with NO system part, so there a
+    // message is at i; check the construction, not this comment, before
+    // copying either offset.)
+    const redactedMessages = (parsed?.messages ?? []).map((m, i) => ({
+      ...m,
+      content: derived.outbound[i + 1]!,
+    }));
+    // The summary QUOTES these strings into the feed line, so it is handed the
+    // span-redacted copies rather than left to re-scrub the raw ones by value.
+    // A value scrub cannot close this on its own: redactValuesInText floors at
+    // 8 chars, and connection-string's secretGroup captures the password ALONE,
+    // so `postgres://svc:pw12@db.internal/app` yields a FOUR-char value — under
+    // the floor, spliced out of the body and the raw stream by span, and
+    // printed in full on the one line the user cannot avoid reading. Of the
+    // surfaces BUILT FROM THESE PARTS, the summary was the last one still
+    // scrubbing by value.
+    //
+    // Two boundaries that leaves, so nobody reads this as a guarantee:
+    //   - Only `content` is a part. A DisplayMessage's `detail` (the
+    //     originating call's arguments, parsers.ts) rides `redactedMessages`'
+    //     spread untouched and reaches the stored transcript raw — same class
+    //     of hole, different field, not closed here.
+    //   - Spans only cover what the scan REPORTED. The engine stops at
+    //     MAX_FINDINGS_PER_RULE and still returns "ok", so match 501 of a rule
+    //     is invisible to every pass — spans and value scrub alike.
+    const summaryParsed = parsed && { ...parsed, messages: redactedMessages };
+    const summaryActions = respActions.map((a, i) => ({ ...a, detail: derived.inbound[i + 1]! }));
     // An unverified transcript is an unverified call: the row must not read
     // "ok" for text no scan checked. It rides the same `incomplete` flag as the
     // body halves, so the whole call is held out rather than only the derived
@@ -523,17 +560,25 @@ export class Daemon {
     }
     const summary = redaction?.heldOut
       ? "[REDACTION INCOMPLETE: content withheld]"
-      : buildSummary(parsed, respParsed?.text, respActions, [
-          // Scrub from the scan findings even with redact-on-capture OFF: the
-          // summary is always-visible feed text, so it must never depend on
-          // the redaction setting to keep a secret out.
+      : buildSummary(summaryParsed, derived.inbound[0], summaryActions, [
+          // A BACKSTOP now, not the defense: the parts above already arrive
+          // offset-redacted. What still reaches it is redactDerivedParts'
+          // overlap skip — a finding sharing bytes with an already-spliced one
+          // is recorded as a value rather than spliced twice — and an
+          // incomplete derived scan, which hands its parts back RAW.
+          //
+          // Read that second case honestly. With redact-on-capture ON it never
+          // gets here: scanState goes incomplete above and the whole call is
+          // withheld. With it OFF nothing withholds it, so this pass is all
+          // the summary gets — 8-char floor included, which means a value as
+          // short as the one this fix is about would still survive THERE. That
+          // is the same raw-fidelity trade every other surface makes in that
+          // mode (the body beside it is stored raw too), and the row carries
+          // scanState "incomplete" so the reader is told. Runs whatever the
+          // setting: the feed line is always visible, so it must never depend
+          // on redact-on-capture to do its scrubbing.
           ...(redaction?.values ?? []),
           ...bodyValues,
-          // Values in the DERIVED form, which is what buildSummary quotes. It
-          // renders one part at a time (a message, an action's detail, the
-          // reply), so a literal scrub reaches every value that lives inside
-          // one — and a value that only exists across the join of two isn't in
-          // any of them to begin with.
           ...derived.values,
         ]);
     // A wire row normally persists NO transcript: the viewer re-parses the
@@ -551,10 +596,7 @@ export class Daemon {
     // messages carry a "system" role.
     const displayMessages =
       redaction && !redaction.heldOut && derived.values.length > 0 && parsed
-        ? [
-            { role: "system", content: derived.outbound[0]! },
-            ...parsed.messages.map((m, i) => ({ ...m, content: derived.outbound[i + 1]! })),
-          ]
+        ? [{ role: "system", content: derived.outbound[0]! }, ...redactedMessages]
         : null;
 
     this.store.insertCall({
@@ -752,18 +794,24 @@ export class Daemon {
       // belt-and-braces pass for the seam between them — the raw values (and
       // their JSON-decoded forms) against text neither offset set indexes.
       if (redaction) searchText = redaction.heldOut ? "" : redactValuesInText(searchText, redaction.values);
+      // Span-redacted parts, for the reason the wire path spells out: the feed
+      // line must not be the one surface still trusting a value scrub that
+      // floors at 8 chars. Positional against what redactDerived was handed
+      // above — and note this outbound half has NO system part, so a message
+      // is at i, not the wire path's i + 1. Kept separate from the transcript's
+      // copy below, which honours redact-on-capture where this must not.
+      const summaryMessages = messages.map((m, i) => ({ ...m, content: derived.outbound[i]! }));
       const summary = redaction?.heldOut
         ? "[REDACTION INCOMPLETE: content withheld]"
         : buildSummary(
-            { model: call.model, messages: call.request.messages ?? [] } as ParsedRequest,
-            call.response.text,
+            { model: call.model, messages: summaryMessages } as ParsedRequest,
+            derived.inbound[0],
             undefined,
             [
-              // Same rationale as the wire path: findings scrub the summary
-              // regardless of the redact-on-capture setting.
+              // The same backstop the wire path keeps, reaching the same two
+              // cases and carrying the same 8-char limit — see there.
               ...(redaction?.values ?? []),
               ...bodyValues,
-              // In the DERIVED form — the form buildSummary actually quotes.
               ...derived.values,
             ],
           );
@@ -1156,10 +1204,17 @@ function findingValues(
 }
 
 // A plain-English "what happened" line (R7), in wire order: what the request
-// sent (short, bounded) → what came back (actions or reply). The scrub below
-// runs unconditionally with the scan findings, so a detected secret in the
-// quoted ask never reaches the feed; the quote is capped at 40 chars either
-// way. One line, both directions, same reading order as the ⇢/⇠ views.
+// sent (short, bounded) → what came back (actions or reply). One line, both
+// directions, same reading order as the ⇢/⇠ views; the quoted ask is capped at
+// 40 chars either way.
+//
+// Both daemon call sites pass text the derived scan has ALREADY offset-redacted
+// — a value scrub can't be the feed line's only defense, because it floors at
+// 8 chars and connection-string reports a password on its own. `secretValues`
+// is the backstop behind that. It runs unconditionally, so the feed line
+// scrubs whatever redact-on-capture says — but the floor is its limit, and
+// both passes only ever see what the scan reported. The wire call site names
+// the paths where those limits still show.
 export function buildSummary(
   parsed: ParsedRequest | null,
   responseText?: string,
