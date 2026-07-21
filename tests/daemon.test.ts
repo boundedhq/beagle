@@ -509,6 +509,22 @@ describe("Daemon end-to-end", () => {
     store.close();
   });
 
+  test("a pasted QUOTED .env line alerts, end to end", async () => {
+    // The scanner reads the wire body, where requestBody has turned the pasted
+    // quotes into \" — so the secret's separator is an escape, not a bare
+    // quote. This is the whole user-visible point of that rule's escape
+    // handling: before it, the same paste unquoted alerted and quoted did not,
+    // because the demoted finding never cleared AlertEngine's structured gate.
+    await sendThroughProxy(
+      daemon.proxyPort, "run-e2e",
+      requestBody('here is my env:\nAWS_SECRET_ACCESS_KEY="wJalrXUtnFEMI/K7MDENG/bPxRfiCYZZZZZKEY42"\nplease use it'),
+    );
+    await Bun.sleep(150);
+    expect(alerts.length).toBe(1);
+    expect(alerts[0]!.secretType).toBe("aws-secret-access-key");
+    expect(alerts[0]!.subtitle).toBe("AWS secret key");
+  });
+
   test("protocol identity fields (prompt_cache_key) never create leak events", async () => {
     // The exact false positive from live traffic: opencode's own session id,
     // high-entropy and preceded by "…key", flagged by the generic detector.
