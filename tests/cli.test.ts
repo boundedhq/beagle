@@ -297,6 +297,48 @@ describe("CLI commands (headless loop, R12)", () => {
     expect(out).toContain("1 agent-reported (Mode B)");
     expect(out.toLowerCase()).toContain("lag");
   });
+
+  // Codex subscription answers come from codex's own rollout log, not its OTel
+  // self-report. If that log is missing (history logging off, or a CODEX_HOME
+  // the daemon didn't share), the answer can't be recovered — say so, with the
+  // path, rather than leave a silently answer-less turn (Phase 1.5).
+  function seedCodexOtel(dir: string): void {
+    const store = Store.open(dir);
+    store.insertCall({
+      id: ulid(), sessionId: "cx", runId: "rx", source: "otel",
+      agent: "codex", provider: "openai", model: "gpt-5.6-sol",
+      endpoint: "otel:codex:user_prompt", tsRequest: Date.now(), tsResponse: Date.now(),
+      status: 200, tokensIn: 1, tokensOut: 1, bytesReq: 10, bytesResp: 0,
+      summary: "otel", scanState: "ok", captureState: "ok", sessionTier: "run",
+      requestBody: new TextEncoder().encode("{}"), requestHeaders: [],
+      responseBody: null, responseHeaders: [], sseRaw: null, searchText: "otel",
+    });
+    store.close();
+  }
+
+  test("status: warns when codex Mode B calls exist but no session logs are present", () => {
+    seedCodexOtel(stateDir);
+    const noLogs = join(stateDir, "no-such-codex", "sessions"); // does not exist
+    const out = cmdStatus(stateDir, null, () => true, noLogs);
+    expect(out.toLowerCase()).toContain("codex");
+    expect(out.toLowerCase()).toContain("history logging");
+    expect(out).toContain(noLogs); // shows the path, so a wrong CODEX_HOME is self-diagnosing
+  });
+
+  test("status: no codex warning when the session log directory has content", () => {
+    seedCodexOtel(stateDir);
+    const withLogs = mkdtempSync(join(tmpdir(), "beagle-codexlogs-"));
+    writeFileSync(join(withLogs, "2026"), "x"); // any entry ⇒ codex has been logging here
+    const out = cmdStatus(stateDir, null, () => true, withLogs);
+    expect(out.toLowerCase()).not.toContain("history logging");
+  });
+
+  test("status: no codex warning when there are no codex Mode B calls", () => {
+    // default seed() is a claude WIRE call — no codex self-report to worry about
+    const noLogs = join(stateDir, "no-such-codex", "sessions");
+    const out = cmdStatus(stateDir, null, () => true, noLogs);
+    expect(out.toLowerCase()).not.toContain("history logging");
+  });
 });
 
 describe("countPossibleLeaksSince (the run-end quiet-tier surface)", () => {

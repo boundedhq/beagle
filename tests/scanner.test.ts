@@ -163,22 +163,190 @@ describe("rule file integrity", () => {
   });
 });
 
-// Bodies are scanned as raw wire bytes, so every secret arrives wrapped in
-// however many layers of JSON string escaping the client applied. Each case
-// below states the WIRE bytes, because that — not the decoded value — is what
-// the rules actually see. `String.raw` keeps this honest: what you read is
-// byte-for-byte what is scanned.
-const AWS_KEY = "AKIAZQ3DRSTUVWXY2345";
+describe("JSON-escape-prefixed secrets (leading-boundary regression)", () => {
+  const BS = String.fromCharCode(92); // a real backslash, as it appears in raw JSON
+  const FAMILIES: Array<[string, string]> = [
+    ["aws-access-key-id", "AKIAZQ3DRSTUVWXY2345"],
+    ["github-pat", "ghp_A7hK9mP2qR5tW8xZ1cV4bN6jL3gF0dSe2aYb"],
+    ["slack-token", "xoxb-123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx"],
+    ["openai-api-key", "sk-Zx9Yw8Vu7Tt6Ss5Rr4Qq3Pp2Oo1Nn0MmLl2Kk3Jj4H"],
+    ["stripe-live-key", "sk_live_Zx9Yw8Vu7Tt6Ss5Rr4Qq3Pp"],
+    ["google-api-key", "AIzaSyD9Zx8Yw7Vu6Tt5Ss4Rr3Qq2Pp1Oo0Nn9M"],
+    ["npm-token", "npm_Zx9Yw8Vu7Tt6Ss5Rr4Qq3Pp2Oo1Nn0MmLl2K"],
+  ];
 
-describe("JSON-escaped bodies (R5)", () => {
-  // Depth 1: an ordinary JSON body. A secret pasted at the start of a line is
-  // preceded on the wire by the two chars `\` `n` — whose `n` is a word char,
-  // so a `\b`-anchored rule finds no boundary.
-  test("single-encoded: secret first on a line", () => {
-    const body = String.raw`{"messages":[{"content":"# prod creds\n${AWS_KEY}\n"}]}`;
-    expect(body).toContain(String.raw`creds\n` + AWS_KEY);
-    expect(scanText(body).map((f) => f.secretType)).toContain("aws-access-key-id");
+  for (const [detector, secret] of FAMILIES) {
+    test(`${detector} is found after an escape, not just after real whitespace`, () => {
+      // Control: the shapes are detected when a real separator precedes them.
+      expect(scanText(`here is the key ${secret}`).some((f) => f.secretType === detector)).toBe(true);
+      expect(scanText(`here is the key\n${secret}`).some((f) => f.secretType === detector)).toBe(true);
+      // The regression: escapes whose final char is a word char.
+      for (const esc of ["n", "t", "r", "b", "f"]) {
+        const f = scanText(`here is the key${BS}${esc}${secret}`);
+        expect(f.some((x) => x.secretType === detector)).toBe(true);
+      }
+      // \r\n, and the \uXXXX form some encoders emit for control chars.
+      expect(scanText(`key${BS}r${BS}n${secret}`).some((f) => f.secretType === detector)).toBe(true);
+      expect(scanText(`key${BS}u000a${secret}`).some((f) => f.secretType === detector)).toBe(true);
+    });
+  }
+
+  test("a realistic JSON-encoded prompt body is scanned", () => {
+    const secret = "AKIAZQ3DRSTUVWXY2345";
+    const body = JSON.stringify([
+      { role: "user", content: `deploy with this:\n${secret}\nthanks` },
+    ]);
+    const f = scanText(body);
+    expect(f.some((x) => x.secretType === "aws-access-key-id")).toBe(true);
   });
+
+  test("the span covers the secret only, so redaction stays exact", () => {
+    // The escape must not be swallowed into the finding: spans index the raw
+    // bytes, and eating the `n` of `\n` would corrupt the stored JSON.
+    const secret = "AKIAZQ3DRSTUVWXY2345";
+    const body = JSON.stringify([{ role: "user", content: `key:\n${secret}\ndone` }]);
+    const f = scanText(body).find((x) => x.secretType === "aws-access-key-id");
+    expect(f).toBeDefined();
+    expect(body.slice(f!.start, f!.end)).toBe(secret);
+  });
+
+  test("a trailing escape still closes the match", () => {
+    // An escape *starts* with a backslash, so the trailing boundary was never
+    // broken — pin that, since only the leading anchor was widened.
+    const f = scanText(`key ${"AKIAZQ3DRSTUVWXY2345"}${BS}nthanks`);
+    expect(f.some((x) => x.secretType === "aws-access-key-id")).toBe(true);
+  });
+
+  test("widening does not weaken the boundary for real word characters", () => {
+    // The anchor must still reject a secret glued to preceding word chars, or
+    // the fix would trade a miss for a false-positive class.
+    for (const prefix of ["FOO", "x", "9", "_"]) {
+      const f = scanText(`${prefix}AKIAZQ3DRSTUVWXY2345`);
+      expect(f.some((x) => x.secretType === "aws-access-key-id")).toBe(false);
+    }
+  });
+
+  test("masking does not shorten a run into a bounded-length rule's window", () => {
+    // The real FP surface of masking, which the word-char test above does NOT
+    // cover: `aws-secret-shape` wants exactly 40 chars and
+    // `base64-wrapped-secret` at most 256, so blanking a character could drop
+    // an over-long run into range. Masking always eats from a run's HEAD (the
+    // blanked span starts at a backslash, already a delimiter), so an interior
+    // character can never be removed and a run can never be split in two.
+    const run41 = "kR8vQ2mZ7xL4pN9wT3yB6cF1jH5sD0gA8eU2iO4tX"; // 41 chars, high entropy
+    expect(run41.length).toBe(41);
+    // Interior escape: the run is already delimited by the backslash itself,
+    // so neither view invents a 40-char window here.
+    expect(scanText(`note ${run41.slice(0, 20)}${BS}n${run41.slice(20)} end`)
+      .some((f) => f.secretType === "aws-secret-shape")).toBe(false);
+    // And a genuinely 41-char run stays out of the window from either view.
+    expect(scanText(`note ${run41} end`).some((f) => f.secretType === "aws-secret-shape")).toBe(false);
+  });
+
+  test("a backslash that is NOT a JSON escape is left alone", () => {
+    // Regression: masking `\A` as though it were an escape would blank the
+    // key's own first character and turn a detection into a miss. Only the
+    // escapes JSON defines may be masked.
+    const K = "AKIAZQ3DRSTUVWXY2345";
+    for (const text of [`C:${BS}creds${BS}${K}`, `cred=${BS}${K}`, `match ${BS}${K}`]) {
+      expect(maskJsonEscapes(text)).toBe(text); // untouched
+      expect(scanText(text).some((f) => f.secretType === "aws-access-key-id")).toBe(true);
+    }
+  });
+
+  test("a literal backslash cannot hide a secret whose head is an escape letter", () => {
+    // Masking alone could not tell `\r` in `C:\creds\redis://…` from a real
+    // escape, and blanked the `r` — so the HIGH-severity connection-string rule
+    // missed it. Scanning the raw view too is what closes this; `npm_` (n) and
+    // `redis` (r) are the structured rules whose secret starts with an escape
+    // letter, and connection-string's password group accepts backslashes so it
+    // can also lose a character MID-value.
+    const NPM = "npm_Zx9Yw8Vu7Tt6Ss5Rr4Qq3Pp2Oo1Nn0MmLl2K";
+    const has = (t: string, d: string) => scanText(t).some((f) => f.secretType === d);
+    expect(has(`C:${BS}creds${BS}${NPM}`, "npm-token")).toBe(true);
+    expect(has(`C:${BS}${BS}creds${BS}${BS}${NPM}`, "npm-token")).toBe(true); // JSON form
+    expect(has(`${BS}redis://user:hunter2secret@h/0`, "connection-string")).toBe(true);
+    expect(has(`C:${BS}creds${BS}redis://user:hunter2secret@db:6379/0`, "connection-string")).toBe(true);
+    expect(has(`mongodb://u:ab${BS}ncd@host/db`, "connection-string")).toBe(true); // mid-value
+    expect(has(`C:${BS}creds${BS}AKIAZQ3DRSTUVWXY2345`, "aws-access-key-id")).toBe(true);
+  });
+
+  test("the union does not double-report a secret both views agree on", () => {
+    // Every finding is reported once, or the store and the alert engine would
+    // see phantom duplicates on any body carrying an escape.
+    const body = JSON.stringify({ role: "user", content: `key:\nAKIAZQ3DRSTUVWXY2345\n` });
+    expect(scanText(body).filter((f) => f.secretType === "aws-access-key-id").length).toBe(1);
+  });
+
+  test("escape-prefixed decoys stay silent at every tier", () => {
+    // The FP side of the trade. Masking adds boundaries, which widens what the
+    // quiet entropy rules can see — every clean/out-of-scope corpus case must
+    // still produce nothing once it follows an escape.
+    const corpus: { cases: Array<{ text: string; outcome: string }> } = JSON.parse(
+      readFileSync("tests/fixtures/leakproof-corpus.json", "utf8"),
+    );
+    const decoys = corpus.cases.filter((c) => c.outcome !== "caught");
+    expect(decoys.length).toBeGreaterThan(0); // guard against a vacuous pass
+    for (const c of decoys) {
+      expect(scanText(JSON.stringify({ role: "user", content: `see below:\n${c.text}` }))).toEqual([]);
+    }
+  });
+
+  test("masking only ever blanks whole escapes to spaces, in place", () => {
+    // The whole design rests on this: spans index the raw bytes that
+    // redact-on-capture and the store slice. Length alone is too weak an
+    // assertion (an identity function passes it), so also require that every
+    // position either kept its character or became a space.
+    for (const s of [
+      String.raw`a\nb`, String.raw`Ax`, String.raw`\t\r\n`, String.raw`a\\nb`,
+      String.raw`q\"quoted\"`, "no escapes at all", String.raw`\\`,
+      String.raw`Ax`, String.raw`\uZZZZ`, String.raw`\u12`,
+      "dangling" + BS, // a lone trailing backslash must not throw or resize
+    ]) {
+      const m = maskJsonEscapes(s);
+      expect(m.length).toBe(s.length);
+      for (let i = 0; i < s.length; i++) {
+        expect(m[i] === s[i] || m[i] === " ").toBe(true);
+      }
+    }
+  });
+
+  test("offsets stay exact across multi-byte and astral characters", () => {
+    // Offsets are UTF-16 indices; a surrogate pair or a 3-byte character before
+    // the secret must not shift the span redaction slices out.
+    const K = "AKIAZQ3DRSTUVWXY2345";
+    for (const lead of ["日本語のテキスト", "emoji 🙈🙉 here", "mixed 日本 🙈 text"]) {
+      const body = JSON.stringify({ role: "user", content: `${lead}:\n${K}\ndone` });
+      const f = scanText(body).find((x) => x.secretType === "aws-access-key-id");
+      expect(f).toBeDefined();
+      expect(body.slice(f!.start, f!.end)).toBe(K);
+    }
+  });
+
+  test("masking consumes a whole backslash run, at any escape depth", () => {
+    expect(maskJsonEscapes(String.raw`key\nAKIA`)).toBe("key  AKIA");
+    expect(maskJsonEscapes(`key${BS}u000aAKIA`)).toBe("key" + " ".repeat(6) + "AKIA");
+    // Depth 2+: the run is consumed ATOMICALLY, so `\\n` — a newline inside a
+    // tool-call argument string — blanks to three spaces. Reading `\\` as one
+    // escaped backslash and the `n` after it as literal text is the
+    // single-encoding reading; it is what missed secrets nested in tool calls,
+    // and it is why this assertion is the reverse of what it once was.
+    expect(maskJsonEscapes(String.raw`key\\nAKIA`)).toBe("key   AKIA");
+    expect(maskJsonEscapes(String.raw`key\\\\nAKIA`)).toBe("key     AKIA");
+    // `\"` is blanked too: at depth 2 a field reads `\"key\":\"…` and no rule's
+    // separator class contains a backslash, so keyword-adjacency rules missed.
+    expect(maskJsonEscapes(String.raw`key\"AKIA`)).toBe("key  AKIA");
+    // A run with no escape char after it is literal text at every depth.
+    expect(maskJsonEscapes(String.raw`C:\creds`)).toBe(String.raw`C:\creds`);
+    expect(maskJsonEscapes(String.raw`a\\c`)).toBe(String.raw`a\\c`);
+  });
+});
+
+// Depth 2+ shapes: a secret nested inside a tool-call arguments STRING. Each
+// case states the WIRE bytes, because that — not the decoded value — is what
+// the rules see; `String.raw` keeps that honest.
+describe("secrets nested in tool-call arguments (R5)", () => {
+  const AWS_KEY = "AKIAZQ3DRSTUVWXY2345";
 
   // Depth 2 — the shape this suite exists for. OpenAI puts tool-call arguments
   // in a JSON *string* nested inside the request JSON, so a newline in a file
@@ -232,62 +400,6 @@ describe("JSON-escaped bodies (R5)", () => {
     // Capture must stop at the escaped quote, not swallow it — the stored JSON
     // is corrupted if a redaction splices out the delimiter too.
     expect(body.slice(hit.start, hit.end)).toBe("Zx9Yw8Vu7Tt6Ss5Rr4Qq3Pp2Oo1Nn0Mm");
-  });
-
-  // Soundness in the other direction. Nothing on the wire distinguishes a JSON
-  // escape from a literal backslash in a non-JSON body, so treating every
-  // escape-looking run as an escape MUST NOT be the only reading: these are
-  // bodies where the backslash is literal text and the letter after it is part
-  // of the secret. They are caught by scanning the unmasked bytes too.
-  test("literal backslash: windows path glued to a token", () => {
-    const body = String.raw`{"path":"C:\\npm_A7hK9mP2qR5tW8xZ1cV4bN6jL3gF0dSe2aYb"}`;
-    // The masked view reads `\\n` as a depth-2 escape and blanks the token's
-    // own first letter; only the unmasked view can catch this one.
-    expect(maskJsonEscapes(body)).toContain("   pm_");
-    expect(scanText(body).map((f) => f.secretType)).toContain("npm-token");
-  });
-
-  test("literal backslash: windows path before a connection string", () => {
-    const body = String.raw`C:\creds\redis://admin:hunter2secret@db.internal:6379/0`;
-    expect(scanText(body).map((f) => f.secretType)).toContain("connection-string");
-  });
-
-  // A backslash before a non-escape char is literal text in every reading, so
-  // it must never be blanked — blanking would eat the secret's first char.
-  test("literal backslash before a non-escape char is left intact", () => {
-    // Built by concatenation, not interpolation: in String.raw a `\` before
-    // `${` escapes the placeholder instead of interpolating it.
-    const body = String.raw`{"path":"C:\creds` + "\\" + AWS_KEY + `"}`;
-    expect(body).toContain("creds\\" + AWS_KEY);
-    expect(maskJsonEscapes(body)).toBe(body); // neither backslash starts an escape
-    expect(scanText(body).map((f) => f.secretType)).toContain("aws-access-key-id");
-  });
-
-  test("masking is length-preserving at every depth", () => {
-    for (const s of [
-      String.raw`a\nb`,
-      String.raw`a\\nb`,
-      String.raw`a\\\\nb`,
-      String.raw`aAb`,
-      String.raw`a\\u0041b`,
-      String.raw`a\"b`,
-      String.raw`C:\creds`,
-      "no backslashes here",
-    ]) {
-      expect(maskJsonEscapes(s).length).toBe(s.length);
-    }
-  });
-
-  // Masking may only ever turn a character into a space. If it could turn a
-  // space into a word char it could fabricate a boundary inside a secret and
-  // invent findings; this pins the direction.
-  test("masking only ever blanks — it never introduces non-space characters", () => {
-    const s = String.raw`{"a":"x\n\\n\\\\nA\"y\/z"}`;
-    const masked = maskJsonEscapes(s);
-    for (let i = 0; i < s.length; i++) {
-      const m = masked[i]!;
-      expect(m === s[i] || m === " ").toBe(true);
-    }
   });
 });
 
