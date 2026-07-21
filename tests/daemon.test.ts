@@ -213,6 +213,86 @@ describe("Daemon end-to-end", () => {
     streamServer.close();
   });
 
+  // Drives a streamed reply through the proxy and returns the stored row. The
+  // frames go out as one chunk; what matters here is the framing the capture
+  // path keeps, not how many TCP writes carried it.
+  async function streamedCall(runId: string, marker: string, frames: string) {
+    const server = createServer((sock) => {
+      sock.on("data", () => {
+        sock.write("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n");
+        sock.write(frames.length.toString(16) + "\r\n" + frames + "\r\n0\r\n\r\n");
+      });
+      sock.on("error", () => {});
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const port = (server.address() as { port: number }).port;
+    await controlRequest(daemon.socketPath, {
+      cmd: "register-run",
+      args: { id: runId, agent: "claude-code", provider: "anthropic", upstream: `http://127.0.0.1:${port}`, authLocation: "x-api-key" },
+    });
+    await sendThroughProxy(daemon.proxyPort, runId, requestBody(marker));
+    let hit: { callId: string } | undefined;
+    let store = Store.openReadOnly(stateDir);
+    for (let i = 0; i < 40 && !hit; i++) {
+      await Bun.sleep(50); // stays under bun's 5s default so a miss reports, not hangs
+      store.close();
+      store = Store.openReadOnly(stateDir);
+      hit = store.searchLiteral(marker)[0];
+    }
+    const call = store.getCall(hit!.callId)!;
+    store.close();
+    server.close();
+    return call;
+  }
+
+  // One text_delta frame carrying `text` verbatim.
+  const deltaFrame = (text: string) =>
+    'event: content_block_delta\ndata: ' +
+    JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } }) +
+    "\n\n";
+
+  test("a streamed secret under the value-scrub floor is redacted from the stored raw stream", async () => {
+    // The raw stream is the one stored surface with no scan of its own, and it
+    // used to be value-scrubbed and nothing else. redactValuesInText floors at
+    // 8 chars while connection-string captures the password alone — four chars
+    // here — so the span was spliced out of the response body while the stream
+    // stored beside it kept the password in cleartext. Same bytes, so the
+    // response scan's own spans redact it.
+    const call = await streamedCall(
+      "run-short-secret",
+      "stream a short secret",
+      deltaFrame("connect with postgres://svc:pw12@db.internal/app please"),
+    );
+    const raw = new TextDecoder().decode(call.sseRaw!);
+    expect(raw).not.toContain("pw12");
+    expect(raw).toContain("[REDACTED:connection-string:");
+    // The frame around the span survives — this is a splice, not a drop.
+    expect(raw).toContain("event: content_block_delta");
+    // ...and the body beside it agrees: same bytes in, same redaction out.
+    expect(new TextDecoder().decode(call.responseBody!)).not.toContain("pw12");
+  });
+
+  test("a secret split across two SSE frames: the stream keeps the halves, no surface holds the key", async () => {
+    // The shape a streaming provider actually produces — deltas cut mid-token.
+    // No rule matches either half, so the scanned bytes (which ARE the stream:
+    // the capture path decodes content-encoding and reassembles nothing) hold
+    // no secret to splice, exactly as the request-side content-block case
+    // above. What the join manufactures is the READABLE text, and that is
+    // scanned on its own, so the key never reaches the summary. Pinned so the
+    // boundary is a decision, not an accident.
+    const call = await streamedCall(
+      "run-split-frames",
+      "stream a split secret",
+      deltaFrame("key AKIAZQ3DRSTUV") + deltaFrame("WXY2345 done"),
+    );
+    const raw = new TextDecoder().decode(call.sseRaw!);
+    expect(raw).not.toContain("AKIAZQ3DRSTUVWXY2345"); // never assembled in the bytes
+    expect(raw).toContain("AKIAZQ3DRSTUV"); // the halves DO remain, either side of the framing
+    expect(raw).toContain("WXY2345");
+    expect(call.summary).not.toContain("AKIAZQ3DRSTUVWXY2345"); // the derived scan caught it
+    expect(call.redacted).toBe(true);
+  });
+
   test("captures a full call: session, parse, summary, search text", async () => {
     const resp = await sendThroughProxy(daemon.proxyPort, "run-e2e", requestBody("read main.ts"));
     expect(resp).toContain("done!");

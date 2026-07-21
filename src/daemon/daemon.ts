@@ -14,7 +14,7 @@ import { SessionResolver, type Resolution } from "../core/session/resolver";
 import { Store } from "../core/store/store";
 import { ScanHost, dropIdentityFieldNoise } from "../adapters/scan-host";
 import type { Finding } from "../core/scanner/engine";
-import { applyCaptureRedaction, clampRedacted, derivedScanText, redactDerivedParts, redactValues, redactValuesInText, secretKeys } from "../transform/redact";
+import { applyCaptureRedaction, clampRedacted, derivedScanText, redactDerivedParts, redactRawStream, redactValuesInText, secretKeys } from "../transform/redact";
 import { scrubAuthHeaders } from "../core/normalize/normalize";
 import { Notifier, type AlertMessage } from "../notifier/notifier";
 import { buildAlertMessage } from "../notifier/alert-copy";
@@ -490,8 +490,8 @@ export class Daemon {
       sseRaw = null; // the raw stream could hold the unverified value
       searchText = "";
     } else if (redaction?.redacted) {
-      // A content-encoded raw stream is compressed bytes — a literal scrub
-      // can't find the secret in it, so keeping it would silently retain an
+      // A content-encoded raw stream is compressed bytes — neither a scrub nor
+      // a scan can read a secret in it, so keeping it would silently retain an
       // echoed value. Drop it; the decoded (scrubbed) body remains.
       const contentEncoded = call.response.headers?.some(
         ([n, v]) =>
@@ -499,7 +499,14 @@ export class Daemon {
           v.trim() !== "" &&
           v.trim().toLowerCase() !== "identity",
       );
-      sseRaw = contentEncoded ? null : redactValues(sseRaw, redaction.values);
+      // Otherwise the stream IS the bytes the response scan read, so redact it
+      // from that scan's spans and keep the value pass for echoes — see
+      // redactRawStream for why a value pass alone was not enough here, and for
+      // the same-bytes check that decides between spans and withholding. No
+      // extra scan: the offsets are already paid for.
+      sseRaw = contentEncoded
+        ? null
+        : redactRawStream(sseRaw, call.response.bodyBytes ?? null, respScan?.findings ?? [], redaction.values);
       // Outbound only (see buildSearchText): index the request, not the response.
       searchText = new TextDecoder().decode(requestBody);
     }

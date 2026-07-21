@@ -70,8 +70,15 @@ function jsonUnescaped(value: string): string | null {
 // the stored bytes, so a body-side redaction can't be undone by a re-derive.
 // The 8-char floor avoids mangling unrelated text on common substrings; a
 // shorter value is still span-redacted from the body it was found in but
-// would survive here — no rule matches anything that short today, so revisit
-// the floor before adding one that does. Re-checked per form, because decoding
+// SURVIVES here. A rule matching that short is not hypothetical —
+// connection-string captures the password alone, so `postgres://u:pw12@host/db`
+// yields a four-char value. That is why every surface with bytes of its own to
+// point at redacts by SPAN and keeps this as the echo pass only (redactBody,
+// redactRawStream, redactDerivedParts). One caller still leans on it alone:
+// buildSummary scrubs raw parsed text by value, so a password under the floor
+// reaches the always-visible feed line. Known and unfixed here — a floor low
+// enough to catch it would blank four-char substrings everywhere. Do not read
+// this floor as safe for short values. Re-checked per form, because decoding
 // only shortens — but note the floor is a weaker guarantee for a decoded form
 // than for a raw one: 48 chars of \uXXXX escapes decode to the 8-char word
 // "password", and scrubbing that would blank the word wherever it appears.
@@ -207,6 +214,42 @@ export function redactValues(
   const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
   const out = redactValuesInText(text, values);
   return out === text ? bytes : new TextEncoder().encode(out);
+}
+
+// The raw event stream kept beside a streamed response (the Layer 2 fidelity
+// view). Despite the name it is not a RENDER of the response body — for a
+// stream that carries no content-encoding it is the very SAME bytes: the
+// capture path content-decodes into bodyBytes and reassembles nothing, so
+// bodyBytes IS sseRaw there. That is what makes the response scan's offsets
+// index this stream exactly, and why the spans are worth applying rather than
+// leaving a value-scrub as the only pass over it: redactValuesInText carries an
+// 8-char floor, and connection-string's secretGroup captures the password alone
+// — `postgres://u:pw12@host/db` yields a FOUR-char value, spliced out of the
+// body and silently left raw here. The stream is the one stored surface with no
+// scan of its own to fall back on. Spans first, then the value scrub, so an
+// echoed request-side secret is caught too: the order applyCaptureRedaction
+// already uses on the two bodies.
+//
+// The spans hold only while the two really are the same bytes. If that ever
+// stops being true — a capture path that reassembles deltas into bodyBytes —
+// a splice would land at the wrong offset and corrupt the stream rather than
+// fail, so verify instead of assuming, and withhold the stream when the check
+// fails: never store bytes whose redaction nothing vouched for (§4).
+export function redactRawStream(
+  sseRaw: Uint8Array | null,
+  scannedBody: Uint8Array | null,
+  findings: Finding[],
+  values: Array<{ value: string; type: string }>,
+): Uint8Array | null {
+  if (!sseRaw || !scannedBody || !sameBytes(sseRaw, scannedBody)) return null;
+  const spanned = findings.length > 0 ? redactBody(sseRaw, findings).bytes : sseRaw;
+  return redactValues(spanned, values) ?? spanned;
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }
 
 export interface CaptureRedaction {

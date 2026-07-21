@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/core/store/store";
-import { applyCaptureRedaction, clampRedacted, redactBody, redactDerivedParts, redactValues, redactValuesInText, redactionPlaceholder, secretKeys } from "../src/transform/redact";
+import { applyCaptureRedaction, clampRedacted, redactBody, redactDerivedParts, redactRawStream, redactValues, redactValuesInText, redactionPlaceholder, secretKeys } from "../src/transform/redact";
 import { DEFAULT_CONFIG } from "../src/core/config/config";
 import { quarantineCorruptDb } from "../src/core/store/quarantine";
 import type { Finding } from "../src/core/scanner/engine";
@@ -197,6 +197,43 @@ describe("redact-on-capture (R11)", () => {
     // Two genuinely different secrets must not collide.
     expect(secretKeys("AKIAZQ3DRSTUVWXY2345").some((k) => secretKeys("AKIAZQ3DRSTUVWXY9999").includes(k)))
       .toBe(false);
+  });
+
+  test("redactRawStream span-redacts a value the scrub floor skips", () => {
+    // The gap this closes: redactValuesInText ignores values under 8 chars, and
+    // connection-string captures the password alone. The raw stream was
+    // value-scrubbed and nothing else, so a short password stayed cleartext
+    // there while the body beside it was spliced clean.
+    const stream = 'data: {"text":"postgres://svc:pw12@db.internal/app"}\n\n';
+    const start = stream.indexOf("pw12");
+    const spans = [finding(start, start + 4, "connection-string")];
+    const out = redactRawStream(enc(stream), enc(stream), spans, [{ value: "pw12", type: "connection-string" }]);
+    expect(dec(out!)).not.toContain("pw12");
+    expect(dec(out!)).toContain("[REDACTED:connection-string:");
+    // and the surrounding stream is intact — the splice is the span, not the frame
+    expect(dec(out!)).toContain('data: {"text":"postgres://svc:');
+  });
+
+  test("redactRawStream still scrubs echoed values that no span covers", () => {
+    const secret = "AKIAZQ3DRSTUVWXY2345";
+    const stream = `data: {"text":"echoing ${secret}"}\n\n`;
+    // No findings of its own (the echo was detected request-side) — the value
+    // pass must still reach it.
+    const out = redactRawStream(enc(stream), enc(stream), [], [{ value: secret, type: "aws-access-key-id" }]);
+    expect(dec(out!)).not.toContain(secret);
+    expect(dec(out!)).toContain("[REDACTED:aws-access-key-id:");
+  });
+
+  test("redactRawStream withholds the stream when it is NOT the scanned bytes", () => {
+    // The spans index the scanned body. If the capture path ever stops handing
+    // the stream those same bytes, splicing at those offsets would corrupt the
+    // stream instead of failing — so it is dropped, not guessed at (§4).
+    const stream = 'data: {"text":"key AKIAZQ3DRSTUVWXY2345"}\n\n';
+    const scanned = "reassembled: key AKIAZQ3DRSTUVWXY2345";
+    const start = scanned.indexOf("AKIA");
+    expect(redactRawStream(enc(stream), enc(scanned), [finding(start, start + 20)], [])).toBeNull();
+    // same length, different bytes — the check is content, not size
+    expect(redactRawStream(enc("aaaa"), enc("aaab"), [], [])).toBeNull();
   });
 
   test("applyCaptureRedaction holds all content out on an incomplete scan", () => {
