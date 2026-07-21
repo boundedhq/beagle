@@ -373,6 +373,7 @@ describe("rule file integrity", () => {
 // no alert, no redaction, raw in the store.
 describe("JSON-escape-prefixed secrets (leading-boundary regression)", () => {
   const BS = String.fromCharCode(92); // a real backslash, as it appears in raw JSON
+  const inJson = (s: string) => `{"content":"${s}"}`; // the wire copy of a prompt
   const FAMILIES: Array<[string, string]> = [
     ["aws-access-key-id", "AKIAZQ3DRSTUVWXY2345"],
     ["github-pat", "ghp_A7hK9mP2qR5tW8xZ1cV4bN6jL3gF0dSe2aYb"],
@@ -388,14 +389,17 @@ describe("JSON-escape-prefixed secrets (leading-boundary regression)", () => {
       // Control: the shapes are detected when a real separator precedes them.
       expect(scanText(`here is the key ${secret}`).some((f) => f.secretType === detector)).toBe(true);
       expect(scanText(`here is the key\n${secret}`).some((f) => f.secretType === detector)).toBe(true);
-      // The regression: escapes whose final char is a word char.
+      // The regression: escapes whose final char is a word char. Wrapped in the
+      // JSON string they always arrive inside — a backslash escapes nothing
+      // outside one, and a bare fragment would be asserting on a shape the wire
+      // never carries (`C:\aws\n…\blob.bin` has these very bytes and is a path).
       for (const esc of ["n", "t", "r", "b", "f"]) {
-        const f = scanText(`here is the key${BS}${esc}${secret}`);
+        const f = scanText(inJson(`here is the key${BS}${esc}${secret}`));
         expect(f.some((x) => x.secretType === detector)).toBe(true);
       }
       // \r\n, and the \uXXXX form some encoders emit for control chars.
-      expect(scanText(`key${BS}r${BS}n${secret}`).some((f) => f.secretType === detector)).toBe(true);
-      expect(scanText(`key${BS}u000a${secret}`).some((f) => f.secretType === detector)).toBe(true);
+      expect(scanText(inJson(`key${BS}r${BS}n${secret}`)).some((f) => f.secretType === detector)).toBe(true);
+      expect(scanText(inJson(`key${BS}u000a${secret}`)).some((f) => f.secretType === detector)).toBe(true);
     });
   }
 
@@ -532,14 +536,48 @@ describe("JSON-escape-prefixed secrets (leading-boundary regression)", () => {
   });
 
   test("masking blanks only word-tailed escapes, and tokenizes left to right", () => {
-    expect(maskJsonEscapes(String.raw`key\nAKIA`)).toBe("key  AKIA");
-    expect(maskJsonEscapes(`key${BS}u000aAKIA`)).toBe("key" + " ".repeat(6) + "AKIA");
+    const q = (s: string) => `"${s}"`; // a backslash escapes only inside a string
+    expect(maskJsonEscapes(q(String.raw`key\nAKIA`))).toBe(q("key  AKIA"));
+    expect(maskJsonEscapes(q(`key${BS}u000aAKIA`))).toBe(q("key" + " ".repeat(6) + "AKIA"));
     // `\"` and `\\` already end in a non-word char — left intact so the stored
     // JSON keeps its shape.
-    expect(maskJsonEscapes(String.raw`key\"AKIA`)).toBe(String.raw`key\"AKIA`);
+    expect(maskJsonEscapes(q(String.raw`key\"AKIA`))).toBe(q(String.raw`key\"AKIA`));
     // In `\\n` the `n` is literal text, not an escape: consuming `\\` first
     // keeps it suppressing the boundary.
-    expect(maskJsonEscapes(String.raw`key\\nAKIA`)).toBe(String.raw`key\\nAKIA`);
+    expect(maskJsonEscapes(q(String.raw`key\\nAKIA`))).toBe(q(String.raw`key\\nAKIA`));
+  });
+
+  test("a Windows path is not a row of escapes", () => {
+    // Regression: in a raw body the `\n` and `\b` here are a path separator plus
+    // a filename, not escapes. Blanking them rewrote the path to
+    // `C:\aws  3f9c…d5x  lob.bin`, standing the `aws` keyword two spaces from a
+    // 40-char run — and aws-secret-access-key fired LOUD on a path carrying no
+    // secret at all (space is in its separator class; 40 hex chars clear its
+    // entropy gate). The masked view's hit is additive, so the raw view staying
+    // silent could not take it back.
+    const path = String.raw`C:\aws\n3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5x\blob.bin`;
+    expect(maskJsonEscapes(path)).toBe(path); // untouched
+    // Bare, shell-quoted, and properly JSON-encoded: silent in all three. The
+    // encoded form doubles its backslashes, which the mask leaves alone anyway.
+    for (const body of [path, `run "${path}" now`, JSON.stringify({ path })]) {
+      expect(scanText(body)).toEqual([]);
+    }
+  });
+
+  test("escapes count only inside a well-formed JSON string", () => {
+    // The gate that fixes the case above, stated directly. A conforming encoder
+    // writes a literal backslash `\\`, so a lone one means the run is not JSON
+    // and none of its backslashes escape anything.
+    const K = "AKIAZQ3DRSTUVWXY2345";
+    expect(maskJsonEscapes(String.raw`{"c":"key\n${K}"}`)).toBe(`{"c":"key  ${K}"}`);
+    for (const s of [
+      String.raw`key\n${K}`, // unquoted
+      String.raw`"key\n${K}`, // unterminated
+      String.raw`"key\n${K}\qx"`, // one stray escape disqualifies the whole run
+      String.raw`"C:\node\bin\x.exe"`, // …which is what keeps a quoted path out
+    ]) {
+      expect(maskJsonEscapes(s)).toBe(s); // untouched
+    }
   });
 
 });
@@ -565,5 +603,33 @@ describe("performance budget (R5/R9)", () => {
     scan(bytes, {}, rules);
     const ms = performance.now() - start;
     expect(ms).toBeLessThan(100);
+  });
+
+  test("1 MB escape-dense body scans under 200 ms", () => {
+    // The body above holds no backslash, so it returns on maskJsonEscapes()'s
+    // fast path and never walks a string. This one pays the full price: string
+    // context is found for every escape, and both views are scanned because
+    // they differ. Budget is doubled because the second pass IS the second scan.
+    const chunk = '{"role":"user","content":"line one\\nline two\\ttabbed\\npath C:\\\\tmp\\\\node\\n"},\n';
+    let body = "";
+    while (body.length < 1 << 20) body += chunk;
+    const bytes = new TextEncoder().encode(body);
+    const start = performance.now();
+    scan(bytes, {}, rules);
+    const ms = performance.now() - start;
+    expect(ms).toBeLessThan(200);
+  });
+
+  test("quote- and backslash-dense text cannot blow up the string scan", () => {
+    // JSON_STRING is scanned with a regex; a body engineered to make every
+    // candidate string fail late must stay linear, not quadratic. Each shape is
+    // 256 KB of the worst case it can build.
+    for (const unit of ['"', '\\', '"\\', 'a"\\x', '"aaaa\\q', '"\\\\"']) {
+      let body = "";
+      while (body.length < 1 << 18) body += unit;
+      const start = performance.now();
+      maskJsonEscapes(body);
+      expect(performance.now() - start).toBeLessThan(200);
+    }
   });
 });
