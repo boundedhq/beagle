@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { compileRules, scan, shannonEntropy, luhnValid, maskJsonEscapes } from "../src/core/scanner/engine";
+import { compileRules, scan, shannonEntropy, luhnValid, maskJsonEscapes, fingerprint } from "../src/core/scanner/engine";
 import { loadRuleFile } from "../src/core/scanner/rules";
 import { readFileSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -143,14 +143,58 @@ describe("case sensitivity (precision)", () => {
   });
 });
 
-describe("fingerprint whitespace stability", () => {
+describe("fingerprint stability across wrapping and wire encoding", () => {
+  const BODY = "MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn";
+  const pem = (body: string) =>
+    `-----BEGIN RSA PRIVATE KEY-----\n${body}\n-----END RSA PRIVATE KEY-----`;
+  const fpOf = (text: string) =>
+    scanText(text).find((x) => x.secretType === "private-key")!.fingerprint;
+
   test("re-wrapped PEM block fingerprints identically", () => {
-    const body = "MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn";
-    const pem1 = `-----BEGIN RSA PRIVATE KEY-----\n${body}\n-----END RSA PRIVATE KEY-----`;
-    const pem2 = `-----BEGIN RSA PRIVATE KEY-----\n${body.slice(0, 16)}\n${body.slice(16)}\n-----END RSA PRIVATE KEY-----`;
-    const f1 = scanText(pem1).find((x) => x.secretType === "private-key")!;
-    const f2 = scanText(pem2).find((x) => x.secretType === "private-key")!;
-    expect(f1.fingerprint).toBe(f2.fingerprint);
+    expect(fpOf(pem(BODY))).toBe(fpOf(pem(`${BODY.slice(0, 16)}\n${BODY.slice(16)}`)));
+  });
+
+  test("JSON-encoded PEM fingerprints identically to one with real newlines", () => {
+    // A body is scanned as raw bytes, so the JSON copy carries its newlines as
+    // the two characters \ + n — neither is whitespace, so a /\s+/-only strip
+    // hashes them and the one key dedups as two.
+    expect(fpOf(JSON.stringify({ content: pem(BODY) }))).toBe(fpOf(`file:\n${pem(BODY)}`));
+  });
+
+  test("a slash-escaping JSON encoder fingerprints identically too", () => {
+    // maskJsonEscapes() leaves `\/` alone by design, so this case is the reason
+    // fingerprint() decodes rather than reusing the mask.
+    const withSlash = pem("MIIEowIBAAKCAQEA0Z3/VS5JJcds3xfn");
+    expect(fpOf(JSON.stringify({ c: withSlash }).replace(/\//g, "\\/"))).toBe(fpOf(withSlash));
+  });
+
+  test("\\uXXXX-escaped newlines fingerprint identically", () => {
+    expect(fpOf(JSON.stringify({ c: pem(BODY) }).replace(/\\n/g, "\\u000a"))).toBe(fpOf(pem(BODY)));
+  });
+
+  test("CRLF line endings fingerprint identically", () => {
+    expect(fpOf(JSON.stringify({ c: pem(BODY) }).replace(/\\n/g, "\\r\\n"))).toBe(fpOf(pem(BODY)));
+  });
+
+  test("distinct PEM bodies stay distinct", () => {
+    expect(fpOf(JSON.stringify({ c: pem(BODY) }))).not.toBe(fpOf(pem(BODY.replace("0Z3", "0Z4"))));
+  });
+
+  test("an escaped backslash does not decode into the escape after it", () => {
+    // `\\n` is a literal backslash then n, NOT a newline — true only because the
+    // single left-to-right pass consumes `\\` whole. A refactor that collapsed
+    // `\\` before decoding `\n` would merge these two distinct values onto one
+    // fingerprint, and R6 would stop alerting on the second.
+    expect(fingerprint("a\\\\nb", HMAC_KEY)).not.toBe(fingerprint("a\nb", HMAC_KEY));
+  });
+
+  test("lone surrogates do not collapse distinct secrets onto one fingerprint", () => {
+    // Decoded, every lone surrogate UTF-8-encodes to U+FFFD; if they collapsed,
+    // the second secret would dedup as the first and never alert.
+    const fps = ["\\ud800", "\\udfff", "\\ud900"].map((s) => fingerprint(`ab${s}cd`, HMAC_KEY));
+    expect(new Set(fps).size).toBe(3);
+    // A non-surrogate escape still decodes.
+    expect(fingerprint("ab\\u0041cd", HMAC_KEY)).toBe(fingerprint("abAcd", HMAC_KEY));
   });
 });
 
