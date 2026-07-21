@@ -31,65 +31,123 @@ export interface ScanCtx {
 const STOPWORDS = ["example", "sample", "placeholder", "dummy", "xxxxxx", "changeme"];
 
 const MAX_FINDINGS_PER_RULE = 500;
+const MAX_PROBES = 1 << 16;
 
-// Bodies are scanned as raw bytes — nothing on the scan path JSON-unescapes
-// them — so a secret pasted at the start of a line arrives preceded by the
-// TWO-character sequence `\n`, not a newline. Its `n` is a word character, so
-// a rule anchored with a leading `\b` finds no boundary and misses outright:
-// "here is the key\nAKIA…" reported nothing at all. That shape — secret first
-// on a line — is exactly how a key gets pasted into a chat prompt.
+// Bodies are scanned as raw wire bytes — nothing on the scan path decodes them
+// — so every secret arrives wrapped in however many layers of JSON string
+// escaping the client applied, and the rules see the ESCAPES, not the decoded
+// text. Two shapes were missed outright:
 //
-// Fixed by masking rather than by loosening the rules: every escape whose
-// final character is a word char is blanked to spaces before matching, so the
-// separator the rules already expect is really there. Two properties make
-// this safe:
+//   depth 1  {"content":"# creds\nAKIA…"}          wire: `\` `n` AKIA…
+//   depth 2  {"arguments":"{\"content\":\"…\\nAKIA…"}  wire: `\` `\` `n` AKIA…
+//
+// In both, the char immediately before the secret is `n` — a word char — so a
+// rule anchored `\b(AKIA…)` finds no boundary and reports nothing at all.
+// Depth 2 is not exotic: OpenAI-style tool calls put their arguments in a JSON
+// string nested inside the request JSON, so "the agent writes a .env file" —
+// the mainstream form of the leak this tool exists to catch — lands there.
+// Depth grows with relaying (a sub-agent forwarding a tool call adds a layer),
+// so the MASKING below assumes no maximum. Detection does not follow it all the
+// way: a `\b`-anchored rule needs one separator and is depth-independent, but a
+// keyword-adjacency rule (generic-api-key, aws-secret-access-key) matches at
+// most 5 separator chars between keyword and value, and every layer of encoding
+// DOUBLES the backslashes in `":"` — 3 chars at depth 1, 5 at depth 2, 9 at
+// depth 3. So those rules reach depth 2 and stop, and a PRETTY-PRINTED file
+// stops one depth sooner still, because the space after the colon spends one of
+// the five. Both pinned by tests; widening the quantifier is a rules-data
+// change, not an engine one.
+//
+// Fixed by masking rather than by loosening the rules: an escape run is blanked
+// to spaces before matching, so the separator the rules already expect is
+// really there. Three properties make this safe:
 //   - Length is preserved, so match offsets still index the raw bytes that
-//     redaction and the store slice (values are re-read from the raw text).
-//   - Masking only ever turns word chars into spaces, so it can add a
-//     boundary but never fabricate one inside a secret — no rule's charset
-//     contains a backslash, so no secret can span an escape.
-// It also leaves every rule regex untouched, which matters: anchoring a rule
-// with a leading lookaround instead costs ~100x scan time (V8 can no longer
-// fast-scan for the literal prefix) and blows the R5 budget.
+//     redaction splices and the store slices.
+//   - Masking only ever writes spaces, so it can add a boundary but never
+//     fabricate a non-space character inside a value. It CAN still shorten one:
+//     two rules admit a backslash in what they capture (`private-key` via
+//     `[\s\S]`, and `connection-string`'s password group via the negated
+//     `[^\s@\/]`), so a password holding a literal `\n` is truncated in this
+//     view. That is not a gap only because the raw view below also runs — it
+//     is one of the concrete reasons that second pass is not optional.
+//   - Every rule regex is left untouched. Anchoring rules with a leading
+//     lookaround instead costs ~100x scan time (V8 can no longer fast-scan for
+//     the literal prefix) and blows the R5 budget.
+//
+// The whole backslash run is consumed as ONE token, which is what makes depth
+// fall out for free. Pairing backslashes off left-to-right instead (the
+// single-encoding reading, where `\\` is one escaped backslash and the `n`
+// after it is literal) is precisely what misses depth 2.
+//
+// But only the trailing 2^k backslashes belong to the escape, and the rest are
+// literal. A newline at depth d is written with 2^(d-1) backslashes — 1, 2, 4,
+// 8 — so an ODD run longer than one is never a pure nested escape; it is a
+// literal backslash the sender typed, followed by a shallower escape. Blanking
+// the whole run there erases that literal backslash, and it is load-bearing:
+// `C:\aws\` + newline + a 40-char digest arrives as a 3-run, and with the
+// backslash gone the digest reads as an aws-keyed secret at HIGH severity. So
+// the run is split — leading literals kept, the 2^k suffix and its escape char
+// blanked — which detects every depth AND keeps that false positive silent.
+//
+// That reading cannot be the only one, because nothing on the wire tells an
+// escape apart from a literal backslash in a body that is not JSON:
+// `C:\creds\redis://u:pw@h/0` loses the `r` of `redis` and the high-severity
+// connection-string rule misses it, and `C:\\npm_A7hK…` loses the `n` of the
+// token. It also blanks the `t` of a literal `\token`, destroying the keyword
+// the prescan needs. That is why scan() runs the rules over BOTH the masked
+// and the unmasked view and unions the results — the two readings bracket an
+// ambiguity the bytes genuinely do not resolve.
 //
 // Only the escapes JSON actually defines are recognized. A backslash before
-// anything else is literal text — a Windows path (`C:\creds\AKIA…`), a regex,
-// a LaTeX macro — and blanking it would EAT the secret's own first character
-// and turn a detection into a miss.
+// anything else is literal text — a Windows path, a regex, a LaTeX macro — and
+// blanking it would EAT the secret's own first character, turning a detection
+// into a miss.
 //
-// `\\`, `\"` and `\/` are matched but left alone: they already end in a
-// non-word char. Consuming them still matters for correct left-to-right
-// tokenizing — in `\\n` the `n` is literal text, not an escape, and must keep
-// suppressing the boundary.
-//
-// Masking alone is still not enough, because a body that is NOT JSON can carry
-// a bare backslash that looks exactly like an escape and nothing here can tell
-// the two apart. `C:\creds\redis://u:pw@h/0` loses the `r` of `redis` and the
-// high-severity connection-string rule misses it; the same rule's password
-// group accepts backslashes, so `mongodb://u:ab\ncd@h/db` loses a character
-// mid-value. That is why scan() runs the rules over BOTH views and unions the
-// results rather than trusting the masked view alone.
-const JSON_ESCAPE = /\\(?:u[0-9a-fA-F]{4}|[bfnrt"\\/])/g;
+// `\"` and `\/` are blanked even though their tail is already a non-word char,
+// because a keyword-adjacency rule matches a keyword, a short run of separator
+// chars, then the value: at depth 2, `"key":"…"` is on the wire as
+// `\"key\":\"…` and backslash is in no rule's separator class, so those rules
+// missed too. Blanking leaves `  key  :  …`, which they do match. Both chars
+// are non-word, so this only ever adds separators.
+const ESCAPE_RUN = /\\+(?:u[0-9a-fA-F]{4}|[bfnrt"/])?/g;
 
-// Hot path: an 8 MiB escape-dense body runs this millions of times, so the
-// replacement avoids a per-match regex test. A match is either a 6-char
-// `\uXXXX` or a 2-char `\X`; only `"`, `\` and `/` end in a non-word char.
-const SPACES_2 = "  ";
-const SPACES_6 = "      ";
-const QUOTE = 34, BACKSLASH = 92, SLASH = 47;
+// Hot path: an escape-dense 8 MiB body runs the replacer millions of times, so
+// blanking returns a shared, prebuilt string rather than building one per match
+// (~28% faster than slicing a longer one). Runs are short in practice — 2 for
+// `\n`, 3 for `\\n`, 7 for `\\uXXXX` — so the table covers every real case.
+//
+// The `repeat` fallback is NOT redundant, and dropping it would fail SILENTLY:
+// a body padded with more than 32 consecutive backslashes would blank to a
+// shorter string, and length preservation is what every span offset, redaction
+// splice and store slice depends on.
+const BLANKS = Array.from({ length: 33 }, (_, n) => " ".repeat(n));
+const BACKSLASH = 92;
 
 export function maskJsonEscapes(text: string): string {
   if (!text.includes("\\")) return text; // fast path: nothing to mask
-  return text.replace(JSON_ESCAPE, (esc) => {
-    if (esc.length === 6) return SPACES_6; // \uXXXX — tail is a hex digit
-    const c = esc.charCodeAt(1);
-    return c === QUOTE || c === BACKSLASH || c === SLASH ? esc : SPACES_2;
+  return text.replace(ESCAPE_RUN, (run) => {
+    // A run ending in a backslash consumed no escape char, so it is literal
+    // text at every depth — leave it exactly as it arrived.
+    if (run.charCodeAt(run.length - 1) === BACKSLASH) return run;
+    // Only the trailing 2^k backslashes belong to the escape; anything before
+    // them is a literal backslash the sender really typed, and blanking it
+    // would erase a separator the rules rely on. See ESCAPE_RUN.
+    let bs = 0;
+    while (run.charCodeAt(bs) === BACKSLASH) bs++;
+    let used = 1;
+    while (used * 2 <= bs) used *= 2;
+    const keep = bs - used;
+    const blank = run.length - keep;
+    return run.slice(0, keep) + (BLANKS[blank] ?? " ".repeat(blank));
   });
 }
 
 export function compileRules(specs: RuleSpec[], hmacKey: Uint8Array): CompiledRules {
+  // `d` (hasIndices) is added to every rule so matchAll can read a capture
+  // group's REAL offsets instead of searching for its text — see the span
+  // comment there for the leak that search caused. Rule data is untouched, so
+  // the file's sha256 pin still validates.
   return {
-    rules: specs.map((spec) => ({ spec, re: new RegExp(spec.regex, spec.flags ?? "g") })),
+    rules: specs.map((spec) => ({ spec, re: new RegExp(spec.regex, (spec.flags ?? "g") + "d") })),
     hmacKey,
   };
 }
@@ -97,27 +155,42 @@ export function compileRules(specs: RuleSpec[], hmacKey: Uint8Array): CompiledRu
 export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): Finding[] {
   const raw = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
   const masked = maskJsonEscapes(raw);
-  // Both views, unioned. The masked view finds a secret whose separator is a
-  // JSON escape; the raw view finds one whose backslash was literal text after
-  // all. Neither view alone is sound — see JSON_ESCAPE — and a miss costs more
-  // than the second pass, which only runs when the views actually differ.
-  // Offsets agree because masking is length-preserving, so a finding from
-  // either view indexes the same raw bytes and dedupes by span.
-  const findings = matchAll(raw, masked, ctx, compiled);
+  // Both readings of the bytes, unioned — see ESCAPE_RUN for why neither alone
+  // is sound. Offsets agree because masking is length-preserving, so a finding
+  // from either view indexes the same raw bytes and dedupes by span. The second
+  // pass only runs when the views actually differ, i.e. when the body contains a
+  // backslash followed by an escape character — whether that is a real escape or
+  // literal text is exactly what cannot be known here, which is the point. A
+  // miss costs far more than the extra pass.
+  //
+  // The caps are shared ACROSS both passes, not per pass. They are stated per
+  // rule per body, and a second view silently doubling them would double what a
+  // crafted body can push into suppressOverlaps below — the opposite of what a
+  // deadline backstop is for.
+  const budget: ScanBudget = { probes: MAX_PROBES, perRule: new Map() };
+  const findings = matchAll(raw, masked, ctx, compiled, budget);
   if (masked !== raw) {
-    for (const f of matchAll(raw, raw, ctx, compiled)) {
-      if (!findings.some((g) => g.start === f.start && g.end === f.end && g.detector === f.detector)) {
-        findings.push(f);
-      }
+    // Keyed dedup, not a scan of `findings` per candidate: both views can hit
+    // the per-rule cap, and pairwise comparison would square that into a
+    // pathological body's cheapest way to burn the scan deadline.
+    const key = (f: Finding) => `${f.start}:${f.end}:${f.detector}`;
+    const seen = new Set(findings.map(key));
+    for (const f of matchAll(raw, raw, ctx, compiled, budget)) {
+      if (!seen.has(key(f))) findings.push(f);
     }
   }
   return suppressOverlaps(findings);
 }
 
-// Run every rule over `view`, reporting spans into `raw`. Split out of scan()
-// only so both views share one implementation.
-function matchAll(raw: string, view: string, ctx: ScanCtx, compiled: CompiledRules): Finding[] {
-  const text = view;
+/** Per-body caps, shared by both views so each means what its name says. */
+interface ScanBudget {
+  probes: number;
+  perRule: Map<string, number>;
+}
+
+// Run every rule over `text` (one view of the body), reporting spans that index
+// `raw`. Split out of scan() only so both views share one implementation.
+function matchAll(raw: string, text: string, ctx: ScanCtx, compiled: CompiledRules, budget: ScanBudget): Finding[] {
   const lower = text.toLowerCase();
   const authNorm = ctx.authValue ? normalize(ctx.authValue) : undefined;
   const findings: Finding[] = [];
@@ -129,14 +202,18 @@ function matchAll(raw: string, view: string, ctx: ScanCtx, compiled: CompiledRul
     // anchor-free entropy rules) have no anchor substring to prescan for.
     if (spec.keywords.length > 0 && !spec.keywords.some((k) => lower.includes(k))) continue;
     re.lastIndex = 0;
-    // probeBudget: decode-probe attempts are capped per rule pass because
-    // rejected candidates don't count toward MAX_FINDINGS_PER_RULE. The cap is
-    // a deadline backstop, not a detection limit: a probe is ~0.35µs, so even
-    // an 8 MB body (the capture cap) full of ~134k base64 runs adds well under
-    // 50ms — the cap is set far above any realistic blob count so a genuine
-    // wrapped secret isn't lost behind a wall of benign base64, while a truly
-    // pathological body still can't ride the probe past the scan deadline.
-    let ruleFindings = 0, probeBudget = 1 << 16;
+    // Decode-probe attempts are capped per body because rejected candidates
+    // don't count toward MAX_FINDINGS_PER_RULE. The cap is a deadline backstop,
+    // not a detection limit: it sits far above any realistic blob count, so a
+    // genuine wrapped secret isn't lost behind a wall of benign base64.
+    //
+    // It is NOT cheap enough to ignore, which an earlier version of this note
+    // claimed — it put a probe at ~0.35µs and concluded a saturated 8 MiB body
+    // stayed "well under 50ms". Measured here: 0.84µs for a 16-char blob, 2.64µs
+    // at 256 chars. A saturated budget is therefore on the order of 100ms+, i.e.
+    // a real fraction of the 500ms worker deadline rather than a rounding error.
+    // The deadline, not this cap, is what actually bounds a pathological body.
+    let ruleFindings = budget.perRule.get(spec.id) ?? 0;
     let m: RegExpExecArray | null;
     while (ruleFindings < MAX_FINDINGS_PER_RULE && (m = re.exec(text)) !== null) {
       if (m[0].length === 0) { re.lastIndex++; continue; } // zero-width guard
@@ -144,13 +221,20 @@ function matchAll(raw: string, view: string, ctx: ScanCtx, compiled: CompiledRul
       // delimiters and keyword prefixes must not leak into the span, or
       // redact-on-capture splices them out too (e.g. eating a quote corrupts
       // the stored JSON) and echo-scrubbing fails to match the bare secret.
-      // indexOf is exact when the group text appears once in the match; on a
-      // duplicate it still spans an identical occurrence of the same value.
-      const matched = m[spec.secretGroup] ?? m[0];
-      const start = m.index + m[0].indexOf(matched);
+      //
+      // Read the group's REAL offsets from the `d` flag. This used to search the
+      // match for the group's text, which silently spans the WRONG occurrence
+      // when a capture repeats text appearing earlier in the match — and that is
+      // not a curiosity: `mongodb://root:root@host` (password same as username,
+      // an ordinary dev-config shape) reported the USERNAME's span, so redaction
+      // spliced the username and left the password in cleartext. Only the
+      // 8-char floor on echo-scrubbing hid it for longer passwords.
+      const at = m.indices?.[spec.secretGroup] ?? m.indices?.[0];
+      const [start, end] = at ?? [m.index, m.index + m[0].length];
       // Masking is length-preserving, so the span maps straight back onto the
-      // unmasked bytes — every gate below judges the value that really shipped.
-      const secretRaw = raw.slice(start, start + matched.length);
+      // unmasked bytes — every gate below judges the value that really shipped,
+      // and the finding reports the bytes redaction will splice.
+      const secretRaw = raw.slice(start, end);
       const secret = normalize(secretRaw);
       if (secret.length === 0) continue;
       const secretLower = secret.toLowerCase();
@@ -167,7 +251,7 @@ function matchAll(raw: string, view: string, ctx: ScanCtx, compiled: CompiledRul
       // in-flight cursor is never touched; probed regexes need no lastIndex
       // restore because this loop resets lastIndex before every rule's scan.
       if (spec.validators?.includes("base64-secret")) {
-        const decoded = --probeBudget >= 0 ? Buffer.from(secret, "base64").toString("utf8") : "";
+        const decoded = --budget.probes >= 0 ? Buffer.from(secret, "base64").toString("utf8") : "";
         if (decoded.length < 8 || STOPWORDS.some((w) => decoded.toLowerCase().includes(w)) || !compiled.rules.some(({ spec: s, re: r }) =>
           s.tier === "structured" && !s.validators?.length && ((r.lastIndex = 0), r.test(decoded)))) continue;
       }
@@ -178,12 +262,13 @@ function matchAll(raw: string, view: string, ctx: ScanCtx, compiled: CompiledRul
         severity: spec.severity,
         tier: spec.tier,
         start,
-        end: start + secretRaw.length,
+        end,
         fingerprint: fingerprint(secretRaw, compiled.hmacKey),
         destinationOwnKey:
           authNorm !== undefined && (authNorm === secret || authNorm.includes(secret)),
       });
     }
+    budget.perRule.set(spec.id, ruleFindings); // carries into the second view
   }
 
   return findings;
@@ -194,6 +279,13 @@ function matchAll(raw: string, view: string, ctx: ScanCtx, compiled: CompiledRul
 // not double-report). Runs on the UNION of both views, so a structured hit
 // found only in the raw view still silences a quiet-tier hit from the masked
 // one.
+//
+// This is O(possible x structured) and stays that way. What bounds it is
+// MAX_FINDINGS_PER_RULE, which is per rule PER BODY — shared across both views
+// on purpose (see scan). That caps the union at rules x 500 ≈ 15k findings,
+// where this measures ~30ms, comfortably inside the worker's 500ms deadline.
+// Were the cap ever made per-view again, or raised, this is the term that grows
+// quadratically and the one to rewrite as a sweep over sorted spans.
 function suppressOverlaps(findings: Finding[]): Finding[] {
   const structuredSpans = findings.filter((f) => f.tier === "structured");
   const result = findings.filter(
@@ -207,6 +299,15 @@ function suppressOverlaps(findings: Finding[]): Finding[] {
 export function normalize(s: string): string {
   return s.trim().replace(/^["']+|["']+$/g, "").trim();
 }
+
+// A SINGLE escape, tokenized one level deep — deliberately not ESCAPE_RUN, and
+// the two must not be merged. Masking asks "could an escape at ANY depth be
+// gluing a word char to this secret", and answers by consuming a whole
+// backslash run; fingerprinting asks "what one level of JSON encoding did this
+// value pick up in transit", and must decode exactly one, left to right. Using
+// the run form here would collapse `\\n` to a newline and merge two values that
+// really did differ on the wire.
+const JSON_ESCAPE = /\\(?:u[0-9a-fA-F]{4}|[bfnrt"\\/])/g;
 
 // Only the escapes that decode to a DIFFERENT character. `\"` `\\` `\/` — the
 // other three JSON_ESCAPE admits — decode to themselves and fall through below.
@@ -223,11 +324,13 @@ const ESCAPE_CHARS: Record<string, string> = { b: "\b", f: "\f", n: "\n", r: "\r
 // `pass\"`, and stripping the bare quote first left the dangling `pass\` — one
 // secret, a fingerprint per encoding (`\u0022` split a third way). Decoded
 // first, every arrival reaches the strip in its raw spelling and converges.
-// Decoding, not maskJsonEscapes(): the mask leaves `\/` `\"` `\\` in place, right
-// for its boundary job, wrong here, where a slash-escaping encoder would still
-// split a base64 body's fingerprint. ONE left-to-right pass, so `\\n` stays a
-// backslash then `n`; collapsing `\\` in an earlier pass would merge it with a
-// real newline.
+// Decoding, not maskJsonEscapes(): the mask BLANKS `\/` and `\"` (it used to
+// leave them, which is what an earlier version of this note said), so reusing it
+// here would delete the escaped character outright — the whitespace strip then
+// eats the blank, and two values differing only by a slash would hash the same.
+// Wrong direction: this function must not merge values that really did differ.
+// ONE left-to-right pass, so `\\n` stays a backslash then `n`; collapsing `\\`
+// in an earlier pass would merge it with a real newline.
 //
 // Stored fingerprints are NOT migrated. Only a capture containing a backslash
 // hashes differently than before; every other rule's alphabet excludes one, so
@@ -245,6 +348,18 @@ const ESCAPE_CHARS: Record<string, string> = { b: "\b", f: "\f", n: "\n", r: "\r
 // equally MERGE with a different password whose literal spelling matches the
 // decoded one. Both are far narrower than the systematic split fixed here, which
 // hits every JSON-encoded PEM.
+//
+// One more instance of that residue, reachable only since the scanner started
+// finding secrets nested inside tool-call arguments: at depth 2 the capture
+// carries `\\n`, which this ONE pass decodes to a literal backslash + `n` that
+// the whitespace strip does not eat, so a PEM sent inside a tool call
+// fingerprints apart from the same PEM sent in an ordinary body. Deliberately
+// not fixed by decoding to a fixpoint — that is the merge direction this
+// function must not fail in, per the paragraph above. It costs one extra alert
+// on the same two rules named above, private-key and connection-string, since
+// only a capture that can contain a backslash is affected; every fixed-alphabet
+// secret (AKIA…, ghp_…, sk-ant-…) still fingerprints identically at every depth.
+// Both halves are pinned by tests.
 export function fingerprint(secretRaw: string, hmacKey: Uint8Array): string {
   const decoded = secretRaw.replace(JSON_ESCAPE, (esc) => {
     if (esc.length !== 6) return ESCAPE_CHARS[esc[1]!] ?? esc[1]!; // \X, not \uXXXX
