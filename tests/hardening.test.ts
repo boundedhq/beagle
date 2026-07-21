@@ -406,8 +406,10 @@ describe("redact-on-capture (R11)", () => {
       const joined = derivedScanText([...head, ...tail]);
       const at = derivedSplitAt(head);
       expect(joined.slice(at)).toBe(derivedScanText(tail));
-      // …and it lands one past the last head part, on the separator, so a
-      // finding starting exactly there counts as head — the fail-safe side.
+      // …and it lands one PAST the separator, on the tail's first character
+      // (at - 1 is the separator's closing newline), so the daemon's strict
+      // `f.start < at` assigns a finding starting exactly there to the tail —
+      // whose content that position actually is.
       if (head.length > 0) expect(joined[at - 1]).toBe("\n");
     }
   });
