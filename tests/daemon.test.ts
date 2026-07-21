@@ -93,6 +93,25 @@ function sendThroughProxy(port: number, runId: string, body: string, path = "/v1
   });
 }
 
+// Wait until the daemon has finished capturing everything sent so far. Capture
+// is a tracked pipeline promise, so inflight===0 means the call is scanned,
+// stored and alerted and nothing more is coming. A fixed sleep cannot say that,
+// and a NEGATIVE assertion ("no alert fired") is exactly the shape that passes
+// against a sleep for the wrong reason — because the work had not happened yet.
+// Timeout stays under bun's 5s per-test default so the diagnostic surfaces.
+async function captured(socketPath: string, minCalls = 1, timeoutMs = 4_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const status = await controlRequest(socketPath, { cmd: "status" });
+    const d = status.data as { calls: number; inflight: number };
+    if (d.calls >= minCalls && d.inflight === 0) return;
+    if (Date.now() > deadline) {
+      throw new Error(`timed out waiting for the daemon to capture ${minCalls} call(s)`);
+    }
+    await Bun.sleep(10);
+  }
+}
+
 describe("Daemon end-to-end", () => {
   let stateDir: string;
   let daemon: Daemon;
@@ -766,6 +785,188 @@ describe("Daemon end-to-end", () => {
     expect(result.detail).toContain("[REDACTED:aws-access-key-id:");
     expect(result.detail).toContain("deploy --key");
     store.close();
+  });
+
+  test("a secret only the JOINED prompt reveals is detected on the wire path", async () => {
+    // The block-split case above is manufactured by flattenContent's join("").
+    // This is the OTHER join, the one derivedScanText itself owns: messages are
+    // joined with "\n", so a multi-line secret whose halves sit in two adjacent
+    // messages is whole in the derived text while the scanned bytes run
+    // BEGIN…END straight through the structural `"},{"role":"user","content":"`.
+    // The wire equivalent of tests/otlp-daemon.test.ts's spanning-PEM case,
+    // which until now covered Mode B only.
+    await sendThroughProxy(
+      daemon.proxyPort, "run-e2e",
+      JSON.stringify({
+        model: "claude-sonnet-5",
+        messages: [
+          { role: "user", content: "part one:\n-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAwireSplitAcrossMessages" },
+          { role: "user", content: "part two:\nbbb\n-----END RSA PRIVATE KEY-----" },
+        ],
+      }),
+    );
+    await captured(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    // The body scan sees a PEM too — its value carries the `"},{"role":…` the
+    // display drops, so the two are different strings that nothing can key
+    // together. Same deliberate double-alert the Mode B test pins.
+    expect(listLeakEvents(store).length).toBe(2);
+    expect(alerts.some((a) => a.secretType === "private-key")).toBe(true);
+    const call = store.getCall(store.searchLiteral("part one")[0]!.callId)!;
+    const dm = JSON.stringify(call.displayMessages);
+    expect(dm).not.toContain("MIIEowIBAAKCAQEAwireSplitAcrossMessages");
+    expect(dm).toContain("[REDACTED:private-key:");
+    expect(store.searchLiteral("MIIEowIBAAKCAQEAwireSplitAcrossMessages")).toEqual([]);
+    store.close();
+  });
+
+  test("a benign message boundary cannot manufacture an alert", async () => {
+    // The false-positive guard the derived scan never had on any path. Joining
+    // every message with "\n" puts text next to text that was never adjacent,
+    // and the generic detector is context-gated — `(?:key|secret|token…)` then
+    // ["':=\s]{1,5} then the value — so an ordinary message ending in one of
+    // those words, followed by an ordinary one starting with a token-shaped
+    // string, is exactly the shape that would manufacture a leak out of nothing.
+    // Measured over 671 real captured/reassembled wire calls this never fired,
+    // and that has to stay true: an alert here is a lie about what was sent.
+    await sendThroughProxy(
+      daemon.proxyPort, "run-e2e",
+      JSON.stringify({
+        model: "claude-sonnet-5",
+        messages: [
+          { role: "user", content: "remind me how the store handles the refresh token" },
+          { role: "assistant", content: "It rotates on every call; see store.ts." },
+          { role: "user", content: "ExchangesFtsContentRowid is the column, right?" },
+        ],
+      }),
+    );
+    // Quiesce, not a sleep: this asserts an ABSENCE, so it has to be able to
+    // tell "nothing fired" from "nothing has run yet".
+    await captured(daemon.socketPath);
+    expect(alerts.length).toBe(0);
+    const store = Store.openReadOnly(stateDir);
+    expect(listLeakEvents(store).length).toBe(0);
+    const call = store.getCall(store.searchLiteral("refresh token")[0]!.callId)!;
+    // Nothing was rewritten, so the row must not claim it was — and it keeps
+    // the cheap no-transcript shape rather than persisting a projection.
+    expect(call.redacted).toBe(false);
+    expect(call.displayMessages).toBeNull();
+    store.close();
+  });
+
+  test("a derived-only leak that sits verbatim in the body keeps a usable highlight", async () => {
+    // Why the body scan can miss a value the body plainly contains: the generic
+    // rule allows ["':=\s]{1,5} between keyword and value, and a JSON body
+    // spends six characters on `\": \"` where the unescaped derived text spends
+    // four on `": "`. Measured on real traffic this is the COMMON reason a
+    // derived-only finding exists — 35 of 35 such findings re-anchored — so
+    // these earn a body span instead of being span-less on principle, which
+    // left the one masked surface rendering unmarked.
+    // redact-on-capture off: that is the only state in which the viewer
+    // consults spans at all (a redacted row highlights placeholders instead).
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: false } });
+    await sendThroughProxy(
+      daemon.proxyPort, "run-e2e",
+      JSON.stringify({
+        model: "claude-sonnet-5",
+        messages: [{ role: "user", content: 'config has "api_key": "Xk7Qm2Vb9Rt4Ws8Yz1Nc6Pd3aJ5Hf0Lg" in it' }],
+      }),
+    );
+    await captured(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    const events = listLeakEvents(store);
+    expect(events.length).toBe(1);
+    expect(events[0]!.secretType).toBe("generic-api-key");
+    const call = store.getCall(store.searchLiteral("config has")[0]!.callId)!;
+    const { buildDetail, leakSpansFor } = await import("../src/viewer/detail");
+    const spans = leakSpansFor(store, call.id);
+    // The span was recorded and it indexes the STORED body: slicing it back has
+    // to return the secret itself, not neighbouring JSON.
+    expect(spans.length).toBe(1);
+    const raw = new TextDecoder().decode(call.requestBody!);
+    expect(raw.slice(spans[0]!.start, spans[0]!.end)).toBe("Xk7Qm2Vb9Rt4Ws8Yz1Nc6Pd3aJ5Hf0Lg");
+    expect(buildDetail(call, spans).leaks.map((l) => l.value)).toContain(
+      "Xk7Qm2Vb9Rt4Ws8Yz1Nc6Pd3aJ5Hf0Lg",
+    );
+    store.close();
+  });
+
+  test("under redact-on-capture the derived span is recorded but placeholders win", async () => {
+    // The boundary of the test above, and the reason the re-anchor is narrower
+    // than it looks: ANY derived finding produces a redacted part, so with
+    // redact-on-capture on — the default — the row reads `redacted` and
+    // extractLeaks takes the placeholder branch, discarding every span. The
+    // span is still written (the row may later be read with a different view),
+    // it is simply not what the viewer uses here.
+    //
+    // Pinned because the tempting "improvement" — unioning span-recovered
+    // values into the placeholder branch — is a BUG: on a redacted row the body
+    // was rewritten underneath these offsets, so slicing by them returns a
+    // fragment of whatever now occupies them. If someone removes the gate in
+    // extractLeaks, this fails.
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    await sendThroughProxy(
+      daemon.proxyPort, "run-e2e",
+      JSON.stringify({
+        model: "claude-sonnet-5",
+        messages: [{ role: "user", content: 'cfg has "api_key": "Xk7Qm2Vb9Rt4Ws8Yz1Nc6Pd3aJ5Hf0Lg" here' }],
+      }),
+    );
+    await captured(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    const call = store.getCall(store.searchLiteral("cfg has")[0]!.callId)!;
+    expect(call.redacted).toBe(true);
+    const { leakSpansFor } = await import("../src/viewer/detail");
+    const spans = leakSpansFor(store, call.id);
+    expect(spans.length).toBe(1); // the anchor still ran
+    // …and the viewer ignored it: every leak it reports is a placeholder, none
+    // is a slice taken at those offsets.
+    const leaks = buildDetail(call, spans).leaks;
+    expect(leaks.length).toBeGreaterThan(0);
+    for (const l of leaks) expect(l.value.startsWith("[REDACTED:")).toBe(true);
+    store.close();
+  });
+
+  test("a failure in one derived alert pass does not take the other down with it", () => {
+    // The derived findings go out in TWO alertEngine.process calls, because the
+    // span flag is per-call: re-anchored findings carry body offsets, the rest
+    // are span-less. process() opens a store transaction per finding, so it can
+    // throw — and one call split into two means a throw in the first would lose
+    // every finding in the second. That half is the higher-value one: a secret
+    // the body scan structurally cannot see, which this pass is the only chance
+    // to report. Pinned white-box because there is no way to make the real
+    // store fail on demand.
+    const seen: Array<{ n: number; bodySpans: boolean }> = [];
+    const d = daemon as unknown as {
+      alertEngine: { process: (m: unknown, f: unknown[], b: boolean) => void };
+      alertDerived: (m: unknown, derived: unknown) => number;
+    };
+    d.alertEngine = {
+      process: (_m, f, bodySpans) => {
+        seen.push({ n: f.length, bodySpans });
+        if (bodySpans) throw new Error("store transaction failed");
+      },
+    };
+    const finding = (start: number) => ({
+      detector: "generic-api-key", secretType: "generic", severity: "medium",
+      tier: "possible", start, end: start + 4, fingerprint: `fp${start}`,
+      destinationOwnKey: false,
+    });
+    expect(() =>
+      d.alertDerived(
+        { id: "call-1", sessionId: "sess-1", provider: "anthropic" },
+        {
+          outbound: [], inbound: [], values: [],
+          anchoredFindings: [finding(0)], leakFindings: [finding(9)],
+          incomplete: false,
+        },
+      ),
+    ).toThrow("store transaction failed");
+    // Both passes ran, in order, and the span-less one was not collateral.
+    expect(seen).toEqual([
+      { n: 1, bodySpans: true },
+      { n: 1, bodySpans: false },
+    ]);
   });
 
   test("protocol identity fields (prompt_cache_key) never create leak events", async () => {

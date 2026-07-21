@@ -5,7 +5,7 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { Server, Socket } from "node:net";
-import { AlertEngine, type AlertEvent } from "../core/alert/engine";
+import { AlertEngine, type AlertEvent, type CallMeta } from "../core/alert/engine";
 import { loadConfig, saveConfig, loadOrCreateInstallKey, type BeagleConfig } from "../core/config/config";
 import type { Message } from "../core/call";
 import { ProxyServer, type CapturedCall, type ScanContext } from "../core/proxy/server";
@@ -72,7 +72,11 @@ interface DerivedRedaction {
    *  a four-char one survives the scrub and only the spans remove it. */
   inbound: string[];
   values: Array<{ value: string; type: string }>;
-  /** Outbound-half findings only — what may alert. */
+  /** Outbound-half findings whose value also sits VERBATIM in the request body,
+   *  with `start`/`end` remapped to that body occurrence — a real highlight. */
+  anchoredFindings: Finding[];
+  /** Outbound-half findings the body does not contain in that form. Span-less:
+   *  their offsets index the derived text, which is not what the viewer slices. */
   leakFindings: Finding[];
   /** Scan didn't verify the derived text: the caller withholds it. */
   incomplete: boolean;
@@ -372,13 +376,51 @@ export class Daemon {
   // after it dedup this way: an echo can decode one escaping level further than
   // the part it echoes, so a secret readable only there is genuinely reachable
   // only there, and still alerts.
+  //
+  // `bodyText` is the decoded request body, used to RE-ANCHOR a derived finding
+  // whose value happens to sit verbatim in those bytes. Measured on real
+  // captured traffic, that is the common case rather than the exception: the
+  // reason the body scan missed such a value is usually that JSON escaping
+  // pushed the rule's context out of reach (generic-api-key allows
+  // `["':=\s]{1,5}` between keyword and value — a body's `\": \"` is six chars
+  // and misses where the unescaped `": "` matches), not that the display
+  // manufactured a string the body never held. Those findings earn a body
+  // highlight; only a genuinely manufactured one stays span-less.
+  //
+  // WHERE THIS TAKES EFFECT, stated plainly because the reach is narrower than
+  // it looks: any derived finding at all produces a redacted part, so with
+  // redact-on-capture ON — the default — the row reads `redacted`, and
+  // extractLeaks highlights placeholders and ignores spans entirely
+  // (viewer/detail.ts). The span is consulted ONLY with redact-on-capture off,
+  // where the stored body is the raw bytes these offsets were computed against.
+  //
+  // That gate is load-bearing, not an oversight, and the obvious "fix" — having
+  // extractLeaks union span-recovered values into the placeholder branch —
+  // would be a bug: on a redacted row the body has been rewritten underneath
+  // these offsets, so slicing by them returns a fragment of whatever now sits
+  // there. A span is only ever used against bytes it still fits.
+  //
+  // HIGHLIGHT ONLY — never feed these offsets to redactBody. They come from a
+  // text SEARCH, not from the regex's own `d`-flag indices, and the engine
+  // holds the opposite invariant for anything that splices: a search returns
+  // the first occurrence of the value, which for a repeated value need not be
+  // the occurrence a rule matched (mongodb://root:root@host reported the
+  // username's span and shipped the password — the bug that put the `d` flag
+  // in compileRules). Recovering the VALUE is insensitive to which occurrence
+  // wins, because every occurrence is the same string; splicing is not.
+  // applyCaptureRedaction is deliberately still handed the body scan's findings
+  // alone. If a later change masks derived-only values in the body too, it must
+  // carry its own exact offsets rather than reuse these.
   private async redactDerived(
     outbound: string[],
     inbound: string[],
     bodyValues: Array<{ value: string; type: string }>,
+    bodyText: string,
     echoAt = Infinity,
   ): Promise<DerivedRedaction> {
-    const clean: DerivedRedaction = { outbound, inbound, values: [], leakFindings: [], incomplete: false };
+    const clean: DerivedRedaction = {
+      outbound, inbound, values: [], anchoredFindings: [], leakFindings: [], incomplete: false,
+    };
     const parts = [...outbound, ...inbound];
     const text = derivedScanText(parts);
     if (text.trim() === "") return clean;
@@ -392,15 +434,20 @@ export class Daemon {
     const red = redactDerivedParts(parts, findings);
     const outboundEnd = derivedSplitAt(outbound);
     const known = new Set(bodyValues.flatMap((v) => secretKeys(v.value)));
-    // Keyed ONCE per outbound finding, because both checks below want the same
+    // Keyed ONCE per outbound finding, because every check below wants the same
     // keys and secretKeys JSON-parses: the shape this module budgets for is a
     // conversation saturating every rule's finding cap (see redactDerivedParts),
     // where keying twice is thousands of redundant parses on the single writer.
     // Inbound findings are dropped first — they can never alert, so they are
-    // never keyed at all.
+    // never keyed at all. The matched value rides along for the same reason:
+    // the re-anchor below needs the raw slice, and `keys` are the normalized
+    // forms, not it.
     const keyed = findings
       .filter((f) => f.start < outboundEnd)
-      .map((f) => ({ f, keys: secretKeys(text.slice(f.start, f.end)) }));
+      .map((f) => {
+        const value = text.slice(f.start, f.end);
+        return { f, value, keys: secretKeys(value) };
+      });
     // What the pre-echo parts report, so the echo half can't re-report it.
     // Built BEFORE the `known` test, not after: when a body value and its
     // rendering are two escaping levels apart, the pre-echo finding is dropped
@@ -409,19 +456,84 @@ export class Daemon {
     const reported = new Set(
       echoAt === Infinity ? [] : keyed.filter((k) => k.f.start < echoAt).flatMap((k) => k.keys),
     );
+    const anchoredFindings: Finding[] = [];
+    const leakFindings: Finding[] = [];
+    // Memoised per VALUE, on the same budget argument as `keyed` above: the way
+    // a conversation reaches the finding cap is one secret recurring through a
+    // long history, so the cap is hit with a handful of distinct values and
+    // thousands of findings. A miss scans the whole body, so searching per
+    // finding costs ~1s of the single writer's time on a saturated 1.5 MB
+    // request where searching per distinct value costs ~5ms (measured).
+    // Residual: values that are all distinct AND all derived-only degrade back
+    // to a search each, which no memo can help — that needs a prompt built to
+    // defeat the body rule thousands of times over, and it stalls capture
+    // rather than misreporting anything.
+    const anchors = new Map<string, number>();
+    for (const { f, value, keys } of keyed) {
+      if (keys.some((k) => known.has(k))) continue; // the body scan already reported it
+      if (f.start >= echoAt && keys.some((k) => reported.has(k))) continue; // an earlier part did
+      // indexOf, not a re-scan: the question is only "do these exact bytes
+      // appear in the body", and the first occurrence is enough — extractLeaks
+      // de-dups by value and needs one correct offset to recover it.
+      let at = anchors.get(value);
+      if (at === undefined) {
+        at = value === "" ? -1 : bodyText.indexOf(value);
+        anchors.set(value, at);
+      }
+      if (at >= 0) anchoredFindings.push({ ...f, start: at, end: at + value.length });
+      else leakFindings.push(f);
+    }
     return {
       outbound: red.parts.slice(0, outbound.length),
       inbound: red.parts.slice(outbound.length),
       values: red.values,
-      leakFindings: keyed
-        .filter(
-          ({ f, keys }) =>
-            !keys.some((k) => known.has(k)) &&
-            (f.start < echoAt || !keys.some((k) => reported.has(k))),
-        )
-        .map(({ f }) => f),
+      anchoredFindings,
+      leakFindings,
       incomplete: false,
     };
+  }
+
+  // Alert a call's derived-only findings — the leaks the body scan structurally
+  // could not see (the display joined two content blocks into a key that is not
+  // in the scanned bytes, or JSON escaping pushed the rule's context out of
+  // reach). Fires at capture rather than pre-forward: late, but the alternative
+  // was silence. Only findings the body scan didn't already report get here
+  // (redactDerived drops the rest), so a secret visible in both views stays one
+  // event with one occurrence.
+  //
+  // Two passes because alertEngine.process takes the span flag per CALL, not per
+  // finding: re-anchored values carry real body offsets and highlight, the rest
+  // are span-less because their offsets index the derived text. Returns how many
+  // were reported, for the caller's leak frame.
+  //
+  // Each pass is attempted even if the other throws — process() opens a store
+  // transaction per finding, so it can. Splitting one call into two would
+  // otherwise mean a failure in the first loses EVERY finding in the second,
+  // and the span-less half is the higher-value one: a secret the body scan
+  // structurally cannot see, which this pass is the only chance to report. One
+  // pass failing must cost only that pass. The error still escapes afterwards,
+  // to the same pipeline tracker that caught it before.
+  private alertDerived(meta: CallMeta, derived: DerivedRedaction): number {
+    let failed = false;
+    let failure: unknown;
+    const pass = (findings: Finding[], bodySpans: boolean) => {
+      if (findings.length === 0) return;
+      try {
+        this.alertEngine.process(meta, findings, bodySpans);
+      } catch (e) {
+        if (!failed) [failed, failure] = [true, e];
+      }
+    };
+    // Anchored FIRST, and the order is load-bearing: leak_occurrences is keyed
+    // (event_id, exchange_id) and written INSERT OR IGNORE, so whichever pass
+    // reaches a pair first decides whether it stores the span or NULL. Two
+    // findings can share a fingerprint while their raw slices differ — the
+    // fingerprint decodes escapes and strips whitespace, indexOf matches the
+    // raw slice — and there the real span has to win over the span-less one.
+    pass(derived.anchoredFindings, true);
+    pass(derived.leakFindings, false);
+    if (failed) throw failure;
+    return derived.anchoredFindings.length + derived.leakFindings.length;
   }
 
   private async captureCall(call: CapturedCall): Promise<void> {
@@ -515,10 +627,8 @@ export class Daemon {
     // the runs would spread the starvation instead of concentrating it — at the
     // cost of the byte-identical content offsets the line above depends on.
     const detailParts = (parsed?.messages ?? []).map((m) => m.detail ?? "");
-    const bodyValues = findingValues(
-      call.request.bodyBytes ? new TextDecoder().decode(call.request.bodyBytes) : "",
-      stash?.findings,
-    );
+    const requestText = call.request.bodyBytes ? new TextDecoder().decode(call.request.bodyBytes) : "";
+    const bodyValues = findingValues(requestText, stash?.findings);
     const derived = await this.redactDerived(
       [...contentParts, ...detailParts],
       // [reply, then detail+args PER ACTION in order]. `args` is a scanned part
@@ -534,6 +644,7 @@ export class Daemon {
         ...respActions.flatMap((a) => [a.detail ?? "", a.args ?? ""]),
       ],
       bodyValues,
+      requestText,
       derivedSplitAt(contentParts), // details echo their own call's arguments
     );
     // The outbound half splits back into the two runs it was built from, so
@@ -782,27 +893,17 @@ export class Daemon {
       displayMessages,
       searchText,
     });
-    // A leak the body scan structurally could not see (the display joined two
-    // content blocks into a key that is not in the scanned bytes) alerts HERE,
-    // at capture rather than pre-forward — late, but the alternative was
-    // silence. Only findings the body scan didn't already report reach this
-    // (redactDerived drops the rest), so a secret visible in both views stays
-    // one event with one occurrence. Span-less: these offsets index the
-    // transcript, not the body.
-    if (derived.leakFindings.length > 0) {
-      this.alertEngine.process(
-        {
-          id: call.id,
-          sessionId: resolution.sessionId,
-          agent: call.agent,
-          provider: call.provider,
-          model: parsed?.model ?? respParsed?.model,
-        },
-        derived.leakFindings,
-        false,
-      );
-      this.viewer?.broadcast("leak", { callId: call.id });
-    }
+    const derivedLeaks = this.alertDerived(
+      {
+        id: call.id,
+        sessionId: resolution.sessionId,
+        agent: call.agent,
+        provider: call.provider,
+        model: parsed?.model ?? respParsed?.model,
+      },
+      derived,
+    );
+    if (derivedLeaks > 0) this.viewer?.broadcast("leak", { callId: call.id });
     this.viewer?.broadcast("call", {
       id: call.id,
       sessionId: resolution.sessionId,
@@ -822,7 +923,7 @@ export class Daemon {
       // Honest at broadcast time: with redact-on-capture (the default) the
       // scan has already completed by here, so the findings are final. The
       // "leak" frame refreshes the feed for any straggler orderings.
-      hasLeak: (stash?.findings.length ?? 0) > 0 || derived.leakFindings.length > 0,
+      hasLeak: (stash?.findings.length ?? 0) > 0 || derivedLeaks > 0,
     });
   }
 
@@ -874,14 +975,13 @@ export class Daemon {
       // joins adjacent content blocks with NOTHING between them — the one
       // transform that can manufacture a secret the scanned bytes never held.
       const messages = call.request.messages ?? [];
-      const bodyValues = findingValues(
-        new TextDecoder().decode(call.request.bodyBytes),
-        scanResult.findings,
-      );
+      const requestText = new TextDecoder().decode(call.request.bodyBytes);
+      const bodyValues = findingValues(requestText, scanResult.findings);
       const derived = await this.redactDerived(
         messages.map((m) => String(m.content)),
         [call.response.text ?? ""],
         bodyValues,
+        requestText,
       );
       const redaction = this.config.redactOnCapture
         ? applyCaptureRedaction({
@@ -1095,24 +1195,19 @@ export class Daemon {
       );
       // A secret the flattening MANUFACTURED is not in the scanned bytes, so
       // scanResult can't see it and this is the only pass that fires for it.
-      // Span-less: those offsets index the transcript, not the stored body.
-      // Same dedup as the wire path — one fingerprint, one event.
-      if (derived.leakFindings.length > 0) {
-        this.alertEngine.process(
-          {
-            id: call.id,
-            sessionId: resolution.sessionId,
-            agent: call.agent,
-            provider: call.provider,
-            model: call.model,
-          },
-          derived.leakFindings,
-          false,
-        );
-      }
+      const derivedLeaks = this.alertDerived(
+        {
+          id: call.id,
+          sessionId: resolution.sessionId,
+          agent: call.agent,
+          provider: call.provider,
+          model: call.model,
+        },
+        derived,
+      );
       // Same silent leak frame as the wire path — possible-tier findings must
       // refresh open dashboards too.
-      if (scanResult.findings.length + derived.leakFindings.length > 0) {
+      if (scanResult.findings.length + derivedLeaks > 0) {
         this.viewer?.broadcast("leak", { callId: call.id });
       }
       this.viewer?.broadcast("call", {
@@ -1132,7 +1227,7 @@ export class Daemon {
         sessionTier: resolution.tier,
         source: "otel",
         // Both scans completed above — final.
-        hasLeak: scanResult.findings.length + derived.leakFindings.length > 0,
+        hasLeak: scanResult.findings.length + derivedLeaks > 0,
       });
       // A real (non-rollout) Codex OTel call means that conversation is live —
       // ensure a rollout tailer for it. Triggered here, AFTER the turn row is
