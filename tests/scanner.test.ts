@@ -109,7 +109,12 @@ describe("hyphenated aws key names (tier regression)", () => {
   test("hyphenated and underscored spellings agree", () => {
     // The bug was that these two disagreed: same secret, same shape, and the
     // verdict turned on the separator character alone.
-    expect(loud(`aws-secret-access-key=${KEY}`)).toEqual(loud(`aws_secret_access_key=${KEY}`));
+    const hyphen = loud(`aws-secret-access-key=${KEY}`);
+    expect(hyphen).toEqual(loud(`aws_secret_access_key=${KEY}`));
+    // Pinned non-empty: equality alone would also hold if a later change
+    // silenced BOTH spellings, which is the regression this test exists to
+    // catch. Agreeing at zero is not agreement.
+    expect(hyphen).toContain("aws-secret-access-key");
   });
 
   test("the 'secret-access' prescan keyword is reachable without 'aws'", () => {

@@ -34,9 +34,11 @@ const NEGATIVES: string[] = [
   'a bearer token goes in the Authorization header',
   'the private key lives in ~/.ssh/id_ed25519',
   'card numbers are validated with the Luhn algorithm',
+  // Both fire under a looser hyphen window, so both hold this corpus to the
+  // formulation that shipped. A negative no candidate ever trips would only
+  // pad the denominator and make this gate easier to pass.
   'aws-cdk-lib-construct-x 3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5e',
   'aws-object-key: 3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5e',
-  'uses: aws-actions/configure-aws-credentials@3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5e',
 ];
 
 // Positives: bodies that SHOULD trip the structured tier.
