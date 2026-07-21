@@ -609,6 +609,18 @@ describe("Codex OTLP → Call mapping (Codex Mode B, codex.* schema)", () => {
     expect(decode(oneScope[0]!.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
   });
 
+  test("a frozen record still maps — grouping is a side table, never a write to the record", () => {
+    // Records are caller-owned parsed JSON. Stamping the group ordinal onto
+    // them threw on a frozen record (strict mode) OUTSIDE any per-record catch,
+    // and the outer catch then dropped the whole batch unscanned (R3).
+    const rec = Object.freeze(
+      codexEvent("codex.user_prompt", { "conversation.id": "c", prompt: "still scanned AKIAZQ3DRSTUVWXY2345" }),
+    );
+    const calls = mapCodexOtlpToCalls(codexLogs([rec]));
+    expect(calls.length).toBe(1);
+    expect(decode(calls[0]!.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
+  });
+
   test("sse_event token counts attach to the conversation's prompt Call", () => {
     const calls = mapCodexOtlpToCalls(
       codexLogs([

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CodexRolloutTailer, CodexRolloutWatcher } from "../src/adapters/codex-rollout-tailer";
@@ -164,6 +164,54 @@ describe("CodexRolloutTailer", () => {
     clock = 2000;
     t.poll(); // now the tailer locates it and emits
     expect(out.map((c) => c.response.text)).toEqual(["ALPHA111"]);
+  });
+
+  test("a stray non-date entry can't stop the walk short of the live date tree", () => {
+    const root = tmp();
+    // A stale copy under a non-date dir that reverse-lex order visits FIRST
+    // ("stray" > "2026"). Pruning on the global best bound this copy with the
+    // real tree still unseen; only a digit-named (date) match may prune.
+    mkdirSync(join(root, "stray"), { recursive: true });
+    const copy = join(root, "stray", "rollout-old-conv1.jsonl");
+    writeFileSync(copy, turn(PA, "STALE9999") + "\n");
+    utimesSync(copy, new Date(2000000), new Date(2000000)); // backdated: must also lose the mtime tiebreak
+    mkdirSync(join(root, "2026", "07", "20"), { recursive: true });
+    writeFileSync(join(root, "2026", "07", "20", "rollout-2026-07-20T21-00-00-conv1.jsonl"), turn(PA, "ALPHA111") + "\n");
+    const out: OtelCall[] = [];
+    const t = new CodexRolloutTailer({ convId: "conv1", sessionsRoot: root, emit: (c) => out.push(...c), now: () => 1000 });
+    t.poll();
+    expect(out.map((c) => c.response.text)).toEqual(["ALPHA111"]);
+  });
+
+  test("stat-failure rebinds are bounded: a delete/recreate flap can't walk and re-read forever", () => {
+    const root = tmp();
+    const day = join(root, "2026", "07", "20");
+    mkdirSync(day, { recursive: true });
+    const path1 = join(day, "rollout-2026-07-20T21-00-00-conv1.jsonl");
+    writeFileSync(path1, turn(PA, "ALPHA111") + "\n");
+    let clock = 1000;
+    const out: OtelCall[][] = [];
+    const t = new CodexRolloutTailer({ convId: "conv1", sessionsRoot: root, emit: (c) => out.push(c), now: () => clock, retryWindowMs: 0 });
+    t.poll();
+    expect(out.flat().map((c) => c.response.text)).toEqual(["ALPHA111"]);
+    // Eight delete/recreate cycles: each spends one budgeted rebind (unbind on
+    // the stat failure, re-locate and re-read on the next poll — all settled
+    // content, so nothing re-emits).
+    for (let i = 0; i < 8; i++) {
+      rmSync(path1);
+      clock += 1500; t.noteActivity(); t.poll();
+      writeFileSync(path1, turn(PA, "ALPHA111") + "\n");
+      clock += 1500; t.noteActivity(); t.poll();
+    }
+    expect(out).toHaveLength(1);
+    // The ninth deletion is past the budget: the dead binding is KEPT, so a
+    // resume-style file at a NEW path is not picked up — the accepted cost;
+    // retirement + renewed activity later rebuilds the tailer fresh.
+    rmSync(path1);
+    clock += 1500; t.noteActivity(); t.poll();
+    writeFileSync(join(day, "rollout-2026-07-20T22-00-00-conv1.jsonl"), turn(PA, "ALPHA111") + "\n" + turn(PB, "BRAVO222") + "\n");
+    clock += 1500; t.noteActivity(); t.poll();
+    expect(out).toHaveLength(1); // BRAVO not captured — no more rebinds
   });
 
   test("locate retries are bounded: a rollout that never appears stops being searched", () => {

@@ -31,6 +31,12 @@ const RETIRE_MS = 120000;
 const LOCATE_FAST_ATTEMPTS = 4; // first attempts run on the poll cadence
 const LOCATE_BACKOFF_MAX_MS = 30000; // cap between backed-off attempts
 const LOCATE_MAX_ATTEMPTS = 12; // then stop locating (≈3 min of coverage)
+// Stat-failure re-locates per tailer. `codex resume` is user-paced (a handful
+// per session at most), so the cap only bites a delete/recreate flap — which
+// must not buy a fresh walk plus a full re-read of a multi-MB resume replay
+// forever. Past it the binding just ages out; retirement + renewed activity
+// rebuilds the tailer with everything fresh.
+const REBIND_MAX = 8;
 
 /** ~/.codex/sessions, honoring CODEX_HOME. The daemon inherits the launching
  *  shell's env (commands.ts spreads process.env into the daemon spawn), so a
@@ -42,24 +48,28 @@ export function codexSessionsRoot(): string {
 
 // Locate a conversation's rollout by filename suffix. The sessions tree is
 // date-partitioned (YYYY/MM/DD, zero-padded, so lexicographic order IS date
-// order) and unbounded over time — visit names newest-first and stop once a
-// directory's subtree has matched: the live file for a conversation is always
-// in the most recent day that has one (`codex resume` starts a fresh rollout
-// dated now, it never appends to an old day's file). Only a no-match walk
-// still visits the whole tree, and poll() caps how many of those run.
+// order) and unbounded over time — visit names newest-first, and once a
+// DIGIT-named subtree (a date component) has matched, skip its older siblings:
+// the live file is always under the most recent date that has one (`codex
+// resume` starts a fresh rollout dated now, it never appends to an old day's
+// file). A match under a non-date name (a stray archive dir, a loose copy —
+// reverse-lex order visits letters BEFORE digits) proves nothing about date
+// order, so the walk keeps going and newest mtime picks the winner; pruning on
+// the global best here bound a stale copy with the live file still unseen.
+// Only a no-match walk visits the whole tree, and poll() caps how many run.
 function locateRollout(root: string, convId: string): string | null {
   const suffix = `-${convId}.jsonl`;
   let bestPath: string | null = null;
   let bestMtime = -Infinity;
-  let done = false;
-  const walk = (dir: string): void => {
+  const walk = (dir: string): boolean => {
     let names: string[];
     try {
       names = readdirSync(dir).sort();
     } catch {
-      return; // unreadable dir — skip
+      return false; // unreadable dir — skip
     }
-    for (let i = names.length - 1; i >= 0 && !done; i--) {
+    let matched = false;
+    for (let i = names.length - 1; i >= 0; i--) {
       const name = names[i]!;
       const full = join(dir, name);
       let st: ReturnType<typeof lstatSync>;
@@ -70,15 +80,20 @@ function locateRollout(root: string, convId: string): string | null {
       } catch {
         continue; // raced unlink — ignore
       }
-      if (st.isDirectory()) walk(full);
-      else if (st.isFile() && name.startsWith("rollout-") && name.endsWith(suffix) && st.mtimeMs > bestMtime) {
-        bestPath = full;
-        bestMtime = st.mtimeMs;
+      if (st.isDirectory()) {
+        if (walk(full)) {
+          matched = true;
+          if (/^\d+$/.test(name)) break; // newest matching date component — older siblings are staler
+        }
+      } else if (st.isFile() && name.startsWith("rollout-") && name.endsWith(suffix)) {
+        matched = true;
+        if (st.mtimeMs > bestMtime) {
+          bestPath = full;
+          bestMtime = st.mtimeMs;
+        }
       }
     }
-    // Everything in this directory has been seen; if any of it matched, older
-    // siblings up the whole stack can only be staler files — stop the walk.
-    if (bestPath) done = true;
+    return matched;
   };
   walk(root);
   return bestPath;
@@ -147,6 +162,7 @@ export class CodexRolloutTailer {
   private carry: Buffer = Buffer.alloc(0); // partial trailing line, as BYTES — a UTF-8 char can split across reads
   private locateAttempts = 0;
   private nextLocateAt = 0; // clock gate for backed-off locate retries
+  private rebinds = 0; // stat-failure re-locates spent (REBIND_MAX)
   private lastSize = -1;
   private lastChange: number;
   private lastActivity: number;
@@ -188,10 +204,14 @@ export class CodexRolloutTailer {
       // a fresh rollout for the same conversation. Drop the binding and
       // re-locate (with a fresh locate budget) instead of aging toward
       // retirement while the conversation may still be live under a new file.
-      this.filePath = null;
-      this.resetReadState();
-      this.locateAttempts = 0;
-      this.nextLocateAt = 0;
+      // Bounded by REBIND_MAX — past it, keep the dead binding and just age.
+      if (this.rebinds < REBIND_MAX) {
+        this.rebinds++;
+        this.filePath = null;
+        this.resetReadState();
+        this.locateAttempts = 0;
+        this.nextLocateAt = 0;
+      }
       this.checkRetire();
       return;
     }

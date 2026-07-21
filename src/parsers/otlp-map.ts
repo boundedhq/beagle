@@ -138,11 +138,15 @@ interface OtlpRecord {
   timeUnixNano?: string | number;
   observedTimeUnixNano?: string | number;
   startTimeUnixNano?: string | number;
-  /** Flatten-group ordinal (one per scopeLogs/scopeSpans array), stamped by
-   *  collectRecords — records in different groups come from different
-   *  exporters, so cross-record grouping must never span groups. */
-  gi?: number;
 }
+
+// Flatten-group ordinal per record (one group per scopeLogs/scopeSpans array),
+// filled by collectRecords — records in different groups come from different
+// exporters, so cross-record grouping must never span groups. A side table,
+// not a field stamped onto the record: records are caller-owned parsed JSON,
+// and writing to one (frozen, exotic) can throw — outside any per-record
+// catch, costing the whole batch its scan (R3).
+const recordGroup = new WeakMap<object, number>();
 
 // Only these event types carry content we keep; everything else Claude Code
 // emits (hook_*, mcp_server_connection, plugin_loaded, tool_decision,
@@ -171,9 +175,9 @@ function collectRecords(payload: unknown): OtlpRecord[] {
   const out: OtlpRecord[] = [];
   let gi = 0;
   const push = (rec: OtlpRecord, group: number): void => {
-    // Guarded: a primitive in a logRecords array must stay a skipped record,
-    // not a TypeError that discards the whole batch.
-    if (rec && typeof rec === "object") rec.gi = group;
+    // Object-guarded for the WeakMap key; a primitive in a logRecords array
+    // stays a skipped record downstream (get() on it just returns undefined).
+    if (rec && typeof rec === "object") recordGroup.set(rec, group);
     out.push(rec);
   };
   const p = payload as { resourceLogs?: unknown; resourceSpans?: unknown };
@@ -463,7 +467,7 @@ function mapCodexRecords(records: OtlpRecord[]): OtelCall[] {
         // two convId-less conversations in one batch (e.g. two exporters behind
         // one collector) that reused a call_id concatenated their outputs into
         // one row. Chunks of one call always share a scope, so reassembly holds.
-        const key = callId ? `${convId ?? `#g${rec.gi ?? i}`}::${callId}` : `orphan-${i}`;
+        const key = callId ? `${convId ?? `#g${recordGroup.get(rec) ?? i}`}::${callId}` : `orphan-${i}`;
         let g = tools.get(key);
         if (!g) {
           g = { order: i, ts, convId, model, tool, args: [], output: "" };
