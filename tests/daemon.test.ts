@@ -325,6 +325,36 @@ describe("Daemon end-to-end", () => {
     expect(call.redacted).toBe(true); // the derived surfaces WERE rewritten
     expect(call.summary).not.toContain("AKIAZQ3DRSTUVWXY2345");
     expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
+    // …and the VIEWER, which is the surface a human actually reads. A wire row
+    // normally carries no stored transcript and the viewer re-parses the body —
+    // which would re-join these two blocks and render the assembled key, with
+    // the summary and index masked right beside it. The row persists its
+    // redacted projection precisely so that re-derive can't happen.
+    const { buildDetail, leakSpansFor } = await import("../src/viewer/detail");
+    const detail = buildDetail(call, leakSpansFor(store, call.id));
+    expect(JSON.stringify(detail.messages)).not.toContain("AKIAZQ3DRSTUVWXY2345");
+    expect(JSON.stringify(detail.messages)).toContain("[REDACTED:aws-access-key-id:");
+    // The placeholder lives only in the transcript (the body never held the
+    // assembled key), so R7's highlight has to find it there or the one masked
+    // surface renders unmarked.
+    expect(detail.leaks.map((l) => l.secretType)).toContain("aws-access-key-id");
+    store.close();
+  });
+
+  test("an ordinary wire call still renders from its body, with no stored transcript", async () => {
+    // The guard on the row above: persisting a projection is the EXCEPTION, for
+    // rows whose body would re-derive wrongly. Every other call keeps the old
+    // behaviour — nothing extra stored, the viewer re-parses byte-exact bytes —
+    // so the fix can't quietly double every row's storage.
+    await sendThroughProxy(daemon.proxyPort, "run-e2e", requestBody("just an ordinary ask"));
+    await Bun.sleep(150);
+    const store = Store.openReadOnly(stateDir);
+    const call = store.getCall(store.searchLiteral("just an ordinary ask")[0]!.callId)!;
+    expect(call.displayMessages).toBeNull();
+    const { buildDetail } = await import("../src/viewer/detail");
+    const detail = buildDetail(call, []);
+    expect(detail.messages[0]!.content).toBe("just an ordinary ask");
+    expect(detail.system).toBe("You are Claude Code."); // still lifted from the body
     store.close();
   });
 

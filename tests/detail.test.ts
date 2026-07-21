@@ -89,9 +89,56 @@ describe("buildDetail — response reassembly (UI fix 1)", () => {
     expect(d.responseText).toBe("Running them now.");
   });
 
-  test("wire call ignores displayMessages: its body parses on its own", () => {
-    const d = buildDetail(call({ displayMessages: [{ role: "user", content: "stale" }] }), []);
+  test("wire call with no stored transcript parses its body — the usual case", () => {
+    const d = buildDetail(call(), []);
     expect(d.messages).toEqual([{ role: "user", content: "hi" }]);
+    expect(d.system).toBe("be brief");
+  });
+
+  test("a wire call's STORED transcript wins over re-parsing its body", () => {
+    // This used to go the other way, on the reasoning that a wire body parses
+    // on its own so a stored copy could only be stale. Derived redaction broke
+    // that: a secret the display MANUFACTURES by joining content blocks is not
+    // in the body, so the body redaction cannot remove it and re-parsing at
+    // read time rebuilds it whole. A wire row now persists a transcript only
+    // when that happened, which makes the stored copy the authoritative one.
+    // Layout is [system, ...messages], system always at index 0.
+    const d = buildDetail(
+      call({
+        displayMessages: [
+          { role: "system", content: "be brief" },
+          { role: "user", content: "here is the key [REDACTED:aws-access-key-id:abc123] use it" },
+        ],
+      }),
+      [],
+    );
+    expect(d.messages).toEqual([
+      { role: "user", content: "here is the key [REDACTED:aws-access-key-id:abc123] use it" },
+    ]);
+    expect(d.system).toBe("be brief");
+    // Same authority for the delta walk-back, which reads messages on its own.
+    expect(detailMessages(call({ displayMessages: [{ role: "system", content: "" }, { role: "user", content: "masked" }] })))
+      .toEqual([{ role: "user", content: "masked" }]);
+  });
+
+  test("a redacted row's placeholder is highlighted even when only the transcript holds it", () => {
+    // The derived-only case: the body never contained the assembled secret, so
+    // there is no placeholder in it and no span to slice. Without searching the
+    // stored transcript, R7's highlight would find nothing on the one surface
+    // that was actually masked.
+    const d = buildDetail(
+      call({
+        redacted: true,
+        displayMessages: [
+          { role: "system", content: "" },
+          { role: "user", content: "key [REDACTED:aws-access-key-id:abc123] sent" },
+        ],
+      }),
+      [],
+    );
+    expect(d.leaks).toEqual([
+      { value: "[REDACTED:aws-access-key-id:abc123]", secretType: "aws-access-key-id", tier: "structured" },
+    ]);
   });
 
   test("unparseable response falls back to raw, never throws", () => {

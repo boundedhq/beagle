@@ -140,6 +140,15 @@ export function derivedScanText(parts: string[]): string {
   return parts.join(DERIVED_SEP);
 }
 
+/** Where `rest` begins in `derivedScanText([...head, ...rest])`, so a caller can
+ *  split findings between the two halves without joining `head` a second time
+ *  just to measure it — on a long conversation that join is megabytes. Lands one
+ *  past the last head part, on the separator: a finding starting exactly there
+ *  counts as head, which is the fail-safe side for the outbound/inbound split. */
+export function derivedSplitAt(head: string[]): number {
+  return head.reduce((n, p) => n + p.length + DERIVED_SEP.length, 0);
+}
+
 /** Splice each finding out of every part it overlaps. Findings carry offsets
  *  into `derivedScanText(parts)`; a finding that spans the join is spliced out
  *  of BOTH parts it touches, so neither is left holding a readable half —
@@ -164,16 +173,27 @@ export function redactDerivedParts(
   // Descending, with the same overlap guard as redactBody: splicing from the
   // end keeps every lower offset valid, and two rules flagging the same bytes
   // must not double-splice. The skipped finding's value is still recorded.
+  //
+  // `hi` rides that same descending order — the highest part a finding can
+  // touch only ever falls — so parts are walked once across the whole loop
+  // rather than rescanned per finding. Not a micro-optimization: the input is
+  // attacker-shaped (a long conversation saturated with secret-shaped values
+  // hits the scanner's per-rule finding cap in every rule), and the quadratic
+  // form costs ~100ms of the single-writer daemon's time per such call where
+  // this costs ~4ms.
   let lastStart = Infinity;
+  let hi = parts.length - 1;
   for (const f of [...findings].sort((a, b) => b.start - a.start)) {
     const value = joined.slice(f.start, f.end);
     values.push({ value, type: f.secretType });
+    while (hi > 0 && starts[hi]! >= f.end) hi--; // begins at/after the span: no overlap
     if (f.end > lastStart) continue;
     const placeholder = redactionPlaceholder(f.secretType, value);
-    for (let i = 0; i < out.length; i++) {
+    for (let i = hi; i >= 0; i--) {
       const s = starts[i]!;
       const e = s + parts[i]!.length;
-      if (f.start >= e || f.end <= s) continue; // no overlap with this part
+      if (f.start >= e) break; // this part ends before the span, as do all below it
+      if (f.end <= s) continue;
       out[i] = out[i]!.slice(0, Math.max(f.start, s) - s) + placeholder + out[i]!.slice(Math.min(f.end, e) - s);
     }
     lastStart = f.start;
@@ -181,18 +201,29 @@ export function redactDerivedParts(
   return { parts: out, values };
 }
 
+// A placeholder in full, anchored — NOT just the `[REDACTED:` opener, which is
+// an ordinary literal any captured tool output may contain. Matching the opener
+// alone and running to its next `]` let content defeat the cap outright: a
+// result holding `[REDACTED:` before the cut and its next bracket megabytes
+// later was stored whole. secretType is a rule id from the pinned corpus, and
+// the hash is six hex, so the shape is exact and short.
+const PLACEHOLDER_RE = /^\[REDACTED:[^\s:\]]+:[0-9a-f]{6}\]/;
+
 /** Bound redacted text to `max` without cutting a placeholder in half. Callers
  *  clamp AFTER redacting (clamping first spares the raw head of a secret that
  *  straddles the cap), which makes a placeholder straddling it the normal case
  *  — and `…ffff [REDACTED:` reads as a corrupted transcript rather than as a
- *  masked secret. Run past the closing bracket instead: a placeholder is a few
- *  dozen characters, so the cap stays a cap. */
+ *  masked secret. Run past the closing bracket instead, but only for a
+ *  well-formed placeholder: the overshoot is then bounded by the shape itself,
+ *  so the cap stays a cap no matter what the captured content says. */
 export function clampRedacted(text: string, max: number): string {
   if (text.length <= max) return text;
   const open = text.lastIndexOf("[REDACTED:", max - 1);
   if (open >= 0) {
-    const close = text.indexOf("]", open);
-    if (close >= max) return text.slice(0, close + 1);
+    // 128 is comfortably past the longest possible placeholder, and bounds the
+    // slice so a huge tail is never copied just to test its head.
+    const m = PLACEHOLDER_RE.exec(text.slice(open, open + 128));
+    if (m && open + m[0].length > max) return text.slice(0, open + m[0].length);
   }
   return text.slice(0, max);
 }
