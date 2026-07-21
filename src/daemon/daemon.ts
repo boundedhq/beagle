@@ -623,6 +623,18 @@ export class Daemon {
         ...redactedMessages.map((m) =>
           m.detail ? { ...m, detail: redactValuesInText(m.detail, values) } : m,
         ),
+        // The REPLY is stored too, as a trailing kind:"response" entry, because
+        // the viewer re-derives it the same way and for the same reason:
+        // parseResponse REASSEMBLES a streamed answer, so a key the provider
+        // split across two text_delta frames is in no single frame of the
+        // stored body and the re-parse rebuilds it whole however well those
+        // bytes are masked. The summary already reads derived.inbound[0]; this
+        // is the surface that still re-derived it. `kind` is the writer's own
+        // marker, never a value the parsers produce, so a stored reply is as
+        // unambiguous as the system prompt at index 0.
+        ...(respParsed?.text !== undefined
+          ? [{ role: "assistant", kind: "response" as const, content: derived.inbound[0] ?? "" }]
+          : []),
       ];
     }
 
@@ -1369,9 +1381,13 @@ function buildSearchText(parsed: ParsedRequest | null, call: CapturedCall, outbo
   // Parsed text where a parser ran (finds secrets that appear \"-escaped in
   // raw JSON); decoded raw request bytes otherwise (R8 / schema note).
   // `outboundParts` is [system, ...message contents] — the caller's copy,
-  // already offset-redacted by the derived scan. Joined by derivedScanText, the
-  // very text those offsets index, so a secret spanning two messages is masked
-  // in the index exactly where the derived scan found it.
-  if (parsed) return derivedScanText(outboundParts);
+  // already offset-redacted by the derived scan, so a secret spanning two
+  // messages is masked here exactly where that scan found it.
+  //
+  // Joined with a plain newline, NOT derivedScanText: that separates parts with
+  // a NUL so no rule can match across the join, which is right for the scan and
+  // wrong for the index. The masking already happened at the PART level, so the
+  // index needs no offset agreement with the scan text — only readable content.
+  if (parsed) return outboundParts.join("\n");
   return new TextDecoder("utf-8", { fatal: false }).decode(call.request.bodyBytes);
 }

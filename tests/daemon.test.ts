@@ -676,6 +676,147 @@ describe("Daemon end-to-end", () => {
     store.close();
   });
 
+  test("a secret MANUFACTURED by SSE delta reassembly is scrubbed from the summary", async () => {
+    // The response-side twin of the split-content-block case, and the reason
+    // the derived scan can't be gated on the body scan having found something.
+    // The provider streams the key across two text_delta frames, so it is split
+    // in the raw stream AND split in the response body — the only place it is
+    // contiguous is parseResponse's reassembly, which is exactly what the
+    // summary renders. Both scans come back clean, so there is no matched value
+    // for a scrub to key off: only scanning the reassembled text reaches it.
+    //
+    // Inbound, so it must NOT alert — the key came FROM the provider, the same
+    // asymmetry redactDerived holds by scanning the response half separately.
+    //
+    // Asserted on every surface the value reached, INCLUDING the detail view.
+    // That one is the reason `display_derived` exists: buildDetail re-derives
+    // at read time, and a manufactured secret leaves the stored body untouched
+    // (there was nothing in the bytes to rewrite), so the re-parse handed the
+    // key back on every page load even once the summary and index were clean.
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    const key = "AKIAZQ3DRSTUVWXY2345";
+    const delta = (text: string) =>
+      `event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"${text}"}}\n\n`;
+    // Split mid-key so neither frame carries anything a rule can match.
+    const frames = delta(`key is ${key.slice(0, 11)}`) + delta(`${key.slice(11)} ok`);
+    const streamServer = createServer((sock) => {
+      sock.on("data", () => {
+        sock.write("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n");
+        sock.write(frames.length.toString(16) + "\r\n" + frames + "\r\n0\r\n\r\n");
+      });
+      sock.on("error", () => {});
+    });
+    await new Promise<void>((r) => streamServer.listen(0, "127.0.0.1", () => r()));
+    let store: Store | undefined;
+    // finally, not a trailing close(): an assertion below throws past any
+    // cleanup after it, and a leaked listener outlives the test.
+    try {
+      const sport = (streamServer.address() as { port: number }).port;
+      await controlRequest(daemon.socketPath, {
+        cmd: "register-run",
+        args: { id: "run-split-sse", agent: "claude-code", provider: "anthropic", upstream: `http://127.0.0.1:${sport}`, authLocation: "x-api-key" },
+      });
+      await sendThroughProxy(daemon.proxyPort, "run-split-sse", requestBody("hello there"));
+      let hit: { callId: string } | undefined;
+      store = Store.openReadOnly(stateDir);
+      for (let i = 0; i < 40 && !hit; i++) {
+        await Bun.sleep(50);
+        store.close();
+        store = Store.openReadOnly(stateDir);
+        hit = store.searchLiteral("hello there")[0];
+      }
+      // Named, so a capture that never lands reads as that rather than as a
+      // TypeError on `undefined.callId` two lines later.
+      if (!hit) throw new Error("timed out waiting for the streamed call to be captured");
+      const call = store.getCall(hit.callId)!;
+      // Neither scanned surface ever held it contiguously, which is what makes
+      // this unreachable by any scrub keyed off the body's matched values.
+      expect(new TextDecoder().decode(call.sseRaw!)).not.toContain(key);
+      expect(new TextDecoder().decode(call.responseBody!)).not.toContain(key);
+      expect(call.summary).not.toContain(key);
+      expect(call.summary).toContain("[REDACTED:aws-access-key-id:");
+      expect(call.redacted).toBe(true); // the derived pass rewrote content, so the row says so
+      expect(listLeakEvents(store).length).toBe(0); // inbound: redacted, never alerted
+      expect(alerts.length).toBe(0);
+      // …and the DETAIL view, which is where this leaked longest: it re-runs
+      // parseResponse on the stored body, and the body was never rewritten
+      // (the scan found nothing in it to rewrite), so the reassembly handed
+      // the key back on every page load. The stored projection is what stops
+      // that — assert through buildDetail, not through the row.
+      const { buildDetail } = await import("../src/viewer/detail");
+      const detail = buildDetail(call, []);
+      expect(detail.responseText).not.toContain(key);
+      expect(detail.responseText).toContain("[REDACTED:aws-access-key-id:");
+    } finally {
+      store?.close();
+      streamServer.close();
+    }
+  });
+
+  test("the derived join does NOT fuse two innocuous messages into a leak", async () => {
+    // The cost of scanning parts joined: the separator is whitespace, and the
+    // quiet rules' delimiter classes accept whitespace — generic-api-key is
+    // `(?:…|token|…)["':=\s]{1,5}(value)`. So a message ending "…an API token"
+    // followed by one starting with a base64-ish word matches ACROSS the join,
+    // and nothing like it was ever sent: the two are adjacent only here.
+    //
+    // It cost twice. A bogus leak event, and — worse — the genuinely-sent text
+    // replaced by a placeholder in the search index, so `beagle search` denies
+    // a string that DID leave the machine. That is a false negative on the one
+    // question search answers definitively, manufactured by a false positive.
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    const benign = "aG9sZDEyMzQ1Njc4OTB4eXo3Nzc";
+    const body = JSON.stringify({
+      model: "claude-sonnet-5",
+      messages: [
+        { role: "user", content: "FPSENTINEL yes - that endpoint needs an API token" },
+        { role: "assistant", content: `${benign} please try again` },
+      ],
+    });
+    await sendThroughProxy(daemon.proxyPort, "run-e2e", body);
+    await Bun.sleep(250);
+    const store = Store.openReadOnly(stateDir);
+    expect(listLeakEvents(store).length).toBe(0); // no leak was manufactured
+    expect(alerts.length).toBe(0);
+    // The text was genuinely sent, so search must still find it.
+    expect(store.searchLiteral(benign).length).toBe(1);
+    const call = store.getCall(store.searchLiteral("FPSENTINEL")[0]!.callId)!;
+    expect(call.redacted).toBe(false);
+    store.close();
+  });
+
+  test("summary stays bounded when a tool detail is huge and isn't a path", async () => {
+    // toolAction deliberately stops clamping so the secret scrub sees whole
+    // values, which makes bounding the READER's job. Two summarizeActions
+    // branches take `detail.split("/").pop()` — and that returns the WHOLE
+    // string when there is no "/" in it. A Grep `pattern` or a `query` is
+    // exactly that, so the stored summary grew to the size of the tool input.
+    // summary is the always-visible feed line, stored per row and broadcast to
+    // every open dashboard.
+    const pattern = "z".repeat(5000); // no "/" — the tail-taking branch
+    const reply = JSON.stringify({
+      model: "claude-sonnet-5",
+      content: [{ type: "tool_use", id: "t1", name: "Grep", input: { pattern } }],
+      usage: { input_tokens: 5, output_tokens: 2 },
+    });
+    const up = await fakeUpstream(reply);
+    try {
+      await controlRequest(daemon.socketPath, {
+        cmd: "register-run",
+        args: { id: "run-bigdetail", agent: "claude-code", provider: "anthropic", upstream: `http://127.0.0.1:${up.port}`, authLocation: "x-api-key" },
+      });
+      await sendThroughProxy(daemon.proxyPort, "run-bigdetail", requestBody("find it"));
+      await Bun.sleep(250);
+      const store = Store.openReadOnly(stateDir);
+      const call = store.getCall(store.searchLiteral("find it")[0]!.callId)!;
+      expect(call.summary).not.toContain(pattern);
+      expect(call.summary?.length ?? 0).toBeLessThan(200);
+      store.close();
+    } finally {
+      up.server.close();
+    }
+  });
+
   test("auth header is scrubbed in the persisted call", async () => {
     await sendThroughProxy(daemon.proxyPort, "run-e2e", requestBody("hello"));
     await Bun.sleep(150);
