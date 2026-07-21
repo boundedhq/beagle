@@ -99,6 +99,7 @@ export function buildDetail(call: CallRecord, spans: LeakSpan[]): CallDetail {
   const format = detectFormat(call.endpoint ?? "");
 
   const parsedReq = call.requestBody ? parseRequest(format, call.requestBody) : null;
+  const stored = storedProjection(call);
   // Reassemble from the decoded body; fall back to the raw SSE for streamed
   // responses whose decoded body is the event stream.
   const parsedResp =
@@ -124,13 +125,20 @@ export function buildDetail(call: CallRecord, spans: LeakSpan[]): CallDetail {
     scanState: call.scanState,
     captureState: call.captureState,
     source: call.source,
-    system: parsedReq?.system ?? null,
+    system: stored?.system ?? parsedReq?.system ?? null,
     // Mode B bodies are scan text, not provider JSON — their structure rides
     // the persisted display_messages instead, and the stored response body IS
-    // the response text (the mapper wrote it that way).
-    messages: parsedReq?.messages ?? call.displayMessages ?? [],
+    // the response text (the mapper wrote it that way). A stored projection
+    // WINS over the re-parse: see storedProjection for why re-deriving would be
+    // wrong wherever one exists.
+    messages: stored?.messages ?? parsedReq?.messages ?? [],
+    // Stored reply first, for the same reason `messages` prefers its stored
+    // copy: the re-parse below REASSEMBLES a streamed answer, rebuilding a key
+    // the provider split across frames that no single frame of the body holds.
     responseText:
-      parsedResp?.text ?? (call.source === "otel" && responseRaw ? responseRaw : null),
+      stored?.responseText ??
+      parsedResp?.text ??
+      (call.source === "otel" && responseRaw ? responseRaw : null),
     // Mode B bodies are plain text — extractActions parses nothing there and
     // returns [], so the section simply doesn't render for self-reports.
     // The tool name becomes a card HEADER label — sanitize at this boundary
@@ -147,8 +155,46 @@ export function buildDetail(call: CallRecord, spans: LeakSpan[]): CallDetail {
     requestRaw,
     responseRaw,
     sseRaw,
-    leaks: extractLeaks(requestRaw, spans, call.redacted ?? false),
+    leaks: extractLeaks(requestRaw, spans, call.redacted ?? false, storedText(call)),
   };
+}
+
+// The transcript a row PERSISTED, split back into its system prompt and its
+// messages. It exists in exactly two cases, and in both, re-deriving from the
+// stored body instead would be wrong:
+//   - a Mode B row, whose body is scan text with no provider JSON to parse;
+//   - a wire row whose derived scan masked text the body redaction could not
+//     (a secret the display manufactures by joining content blocks is not in
+//     the body to mask), so re-parsing rebuilds the very string that was
+//     removed. See Daemon.captureCall.
+// The wire writer always puts the system prompt at index 0 — empty string when
+// the request had none — so lifting it back is unambiguous even for a body
+// whose own messages carry a "system" role. Mode B rows never write one, and
+// their roles are user/tool, so they fall through with system undefined.
+// A wire row's REPLY rides the same array as a trailing kind:"response" entry —
+// the writer's own marker, never a value the parsers produce — because the
+// re-derive is wrong for it too: parseResponse REASSEMBLES a streamed answer,
+// so a key the provider split across two text_delta frames is in no single
+// frame of the stored body and re-parsing rebuilds it whole.
+function storedProjection(
+  call: CallRecord,
+): { system?: string; messages: DisplayMessage[]; responseText?: string } | null {
+  let stored = call.displayMessages as DisplayMessage[] | undefined | null;
+  if (!stored?.length) return null;
+  let responseText: string | undefined;
+  if (stored[stored.length - 1]!.kind === "response") {
+    responseText = stored[stored.length - 1]!.content;
+    stored = stored.slice(0, -1);
+    if (!stored.length) return { messages: [], responseText };
+  }
+  if (stored[0]!.role !== "system") return { messages: stored, responseText };
+  return { system: stored[0]!.content || undefined, messages: stored.slice(1), responseText };
+}
+
+// Every string a row stores as its own transcript, for placeholder discovery
+// (extractLeaks). Empty for the rows that keep none.
+function storedText(call: CallRecord): string {
+  return (call.displayMessages ?? []).map((m) => m.content).join("\n");
 }
 
 // Just the parsed request messages — same result as buildDetail(call).messages,
@@ -158,8 +204,8 @@ export function buildDetail(call: CallRecord, spans: LeakSpan[]): CallDetail {
 export function detailMessages(call: CallRecord): DisplayMessage[] {
   const format = detectFormat(call.endpoint ?? "");
   return (
+    storedProjection(call)?.messages ??
     (call.requestBody ? parseRequest(format, call.requestBody)?.messages : undefined) ??
-    call.displayMessages ??
     []
   );
 }
@@ -169,18 +215,28 @@ export function detailMessages(call: CallRecord): DisplayMessage[] {
 // (R7 backward highlight) without building its whole CallDetail.
 export function detailLeaks(call: CallRecord, spans: LeakSpan[]): DetailLeak[] {
   const requestRaw = call.requestBody ? new TextDecoder("utf-8", { fatal: false }).decode(call.requestBody) : "";
-  return extractLeaks(requestRaw, spans, call.redacted ?? false);
+  return extractLeaks(requestRaw, spans, call.redacted ?? false, storedText(call));
 }
 
-function extractLeaks(requestText: string, spans: LeakSpan[], redacted: boolean): DetailLeak[] {
+function extractLeaks(
+  requestText: string,
+  spans: LeakSpan[],
+  redacted: boolean,
+  transcript = "",
+): DetailLeak[] {
   // A redacted body no longer holds the secret at the recorded offsets — the
   // placeholders ARE the markers, so highlight those instead. Driven by the
   // stored redaction flag, not a string sniff (which could false-match a body
   // that legitimately contains the literal "[REDACTED:").
+  // The stored transcript is searched alongside the body, and ONLY here: a
+  // derived-only redaction leaves its placeholder in the transcript and nothing
+  // in the body, so without it the one surface that was masked would render
+  // unhighlighted. The span branch below must never see it — those offsets
+  // index the body alone.
   if (redacted) {
     const seen = new Set<string>();
     const out: DetailLeak[] = [];
-    for (const m of requestText.matchAll(REDACTED_RE)) {
+    for (const m of `${requestText}\n${transcript}`.matchAll(REDACTED_RE)) {
       if (seen.has(m[0])) continue;
       seen.add(m[0]);
       const type = m[0].split(":")[1] ?? "secret";

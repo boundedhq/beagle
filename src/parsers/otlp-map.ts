@@ -360,8 +360,8 @@ interface CodexToolGroup {
   convId?: string;
   model?: string;
   tool: string;
-  parts: string[]; // arguments + outputs across the call's records, in order
-  lastOutput: string;
+  args: string[]; // distinct `arguments` blobs seen across the call's records
+  output: string; // the call's output, chunks CONCATENATED (see below)
 }
 
 function mapCodexRecords(records: OtlpRecord[]): OtelCall[] {
@@ -369,6 +369,15 @@ function mapCodexRecords(records: OtlpRecord[]): OtelCall[] {
   // Tool results are grouped by call_id: codex can stream one exec's output
   // across several tool_result records (chunks), and a secret split across a
   // chunk boundary must land in ONE scan surface to match the detector regex.
+  //
+  // Output chunks are joined with NOTHING, which is the whole point of the
+  // grouping. Joining them with "\n" put a separator exactly AT the seam the
+  // reassembly exists to erase: `AKIA…` split 10/10 across two records became
+  // `AKIA…\n…`, which no rule matches, so a split secret raised no alert and
+  // was never redacted — a detection hole, strictly worse than a display one.
+  // Concatenation reconstructs the byte stream codex actually emitted. The
+  // `arguments` blobs are a different field, not a stream, so they stay
+  // newline-separated from each other and from the output.
   const tools = new Map<string, CodexToolGroup>();
   // Token counts ride codex.sse_event (kind=response.completed), not the
   // content events; collected per conversation, attached to its prompt Call
@@ -429,15 +438,12 @@ function mapCodexRecords(records: OtlpRecord[]): OtelCall[] {
         const key = callId ? `${convId ?? ""}::${callId}` : `orphan-${i}`;
         let g = tools.get(key);
         if (!g) {
-          g = { order: i, ts, convId, model, tool, parts: [], lastOutput: "" };
+          g = { order: i, ts, convId, model, tool, args: [], output: "" };
           tools.set(key, g);
         }
         // Chunks of one call repeat the same arguments — dedupe; outputs concat.
-        if (args && !g.parts.includes(args)) g.parts.push(args);
-        if (output) {
-          g.parts.push(output);
-          g.lastOutput = output;
-        }
+        if (args && !g.args.includes(args)) g.args.push(args);
+        g.output += output;
       }
     } catch {
       /* skip a single malformed record; the rest of the batch still maps */
@@ -451,9 +457,18 @@ function mapCodexRecords(records: OtlpRecord[]): OtelCall[] {
         convId: g.convId,
         model: g.model,
         endpoint: `otel:codex:tool_result:${g.tool}`,
-        scanText: `${g.tool}\n${g.parts.join("\n")}`,
+        scanText: [g.tool, ...g.args, g.output].filter(Boolean).join("\n"),
+        // Full output — the daemon clamps it to DISPLAY_RESULT_CAP after
+        // redaction. Clamping here ran before the scrub, so a secret straddling
+        // the cap left its raw prefix in the stored transcript.
+        //
+        // "Full" means the WHOLE reassembled output, not just the tail chunk.
+        // The scan surface above is every chunk, so a value matched across a
+        // seam has to be a substring of the display text or the derived
+        // redaction cannot line it up — and rendering one chunk of a
+        // multi-chunk result silently dropped the rest of what the agent saw.
         display: {
-          role: "tool", content: `${g.tool}: ${g.lastOutput.slice(0, 4000)}`,
+          role: "tool", content: `${g.tool}: ${g.output}`,
           tool: sanitizeTool(g.tool), kind: "result",
         },
       }),
@@ -559,8 +574,10 @@ export function mapHookToCall(payload: unknown, ctx: OtlpContext): OtelCall | nu
       endpoint: `otel:tool_output:${toolName}`,
       request: {
         bodyBytes: new TextEncoder().encode(scanText),
+        // Full output; the daemon clamps to DISPLAY_RESULT_CAP after redaction
+        // (see the codex tool_result mapper above for why not here).
         messages: [{
-          role: "tool", content: `${toolName}: ${toolResponse.slice(0, 4000)}`,
+          role: "tool", content: `${toolName}: ${toolResponse}`,
           tool: sanitizeTool(toolName), kind: "result",
         }] as DisplayMessage[],
       },

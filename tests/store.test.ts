@@ -509,7 +509,11 @@ describe("Retention & purge", () => {
     expect(store.countCalls()).toBeLessThan(200);
     expect(store.countCalls()).toBeGreaterThan(0);
     store.close();
-  });
+    // Explicit timeout: 4500 inserts plus a batched sweep is ~1s on a dev box
+    // but ~9s on CI's Linux runner, which overran bun's 5s default and failed
+    // the whole suite. The work is inherently slow, not hung — the row count
+    // is what makes the EVICT_BATCH boundaries this test exists to cross.
+  }, 30_000);
 
   test("sweep ages out sessions and runs on the payload window (R11)", () => {
     const store = Store.open(dir);

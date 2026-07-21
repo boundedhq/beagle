@@ -73,12 +73,20 @@ const MAX_PROBES = 1 << 16;
 //     lookaround instead costs ~100x scan time (V8 can no longer fast-scan for
 //     the literal prefix) and blows the R5 budget.
 //
-// The run is consumed ATOMICALLY — all consecutive backslashes, then one
-// escape char — which is what makes depth fall out for free. Pairing them off
-// left-to-right instead (the single-encoding reading, where `\\` is one
-// escaped backslash and the `n` after it is literal) is precisely what misses
-// depth 2. So the masked view deliberately takes the MAXIMALLY-DECODED reading
-// of every run.
+// The whole backslash run is consumed as ONE token, which is what makes depth
+// fall out for free. Pairing backslashes off left-to-right instead (the
+// single-encoding reading, where `\\` is one escaped backslash and the `n`
+// after it is literal) is precisely what misses depth 2.
+//
+// But only the trailing 2^k backslashes belong to the escape, and the rest are
+// literal. A newline at depth d is written with 2^(d-1) backslashes — 1, 2, 4,
+// 8 — so an ODD run longer than one is never a pure nested escape; it is a
+// literal backslash the sender typed, followed by a shallower escape. Blanking
+// the whole run there erases that literal backslash, and it is load-bearing:
+// `C:\aws\` + newline + a 40-char digest arrives as a 3-run, and with the
+// backslash gone the digest reads as an aws-keyed secret at HIGH severity. So
+// the run is split — leading literals kept, the 2^k suffix and its escape char
+// blanked — which detects every depth AND keeps that false positive silent.
 //
 // That reading cannot be the only one, because nothing on the wire tells an
 // escape apart from a literal backslash in a body that is not JSON:
@@ -120,7 +128,16 @@ export function maskJsonEscapes(text: string): string {
     // A run ending in a backslash consumed no escape char, so it is literal
     // text at every depth — leave it exactly as it arrived.
     if (run.charCodeAt(run.length - 1) === BACKSLASH) return run;
-    return BLANKS[run.length] ?? " ".repeat(run.length);
+    // Only the trailing 2^k backslashes belong to the escape; anything before
+    // them is a literal backslash the sender really typed, and blanking it
+    // would erase a separator the rules rely on. See ESCAPE_RUN.
+    let bs = 0;
+    while (run.charCodeAt(bs) === BACKSLASH) bs++;
+    let used = 1;
+    while (used * 2 <= bs) used *= 2;
+    const keep = bs - used;
+    const blank = run.length - keep;
+    return run.slice(0, keep) + (BLANKS[blank] ?? " ".repeat(blank));
   });
 }
 
@@ -246,7 +263,7 @@ function matchAll(raw: string, text: string, ctx: ScanCtx, compiled: CompiledRul
         tier: spec.tier,
         start,
         end,
-        fingerprint: fingerprint(secret, compiled.hmacKey),
+        fingerprint: fingerprint(secretRaw, compiled.hmacKey),
         destinationOwnKey:
           authNorm !== undefined && (authNorm === secret || authNorm.includes(secret)),
       });
@@ -296,26 +313,34 @@ const JSON_ESCAPE = /\\(?:u[0-9a-fA-F]{4}|[bfnrt"\\/])/g;
 // other three JSON_ESCAPE admits — decode to themselves and fall through below.
 const ESCAPE_CHARS: Record<string, string> = { b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" };
 
-// Transport noise dropped before hashing: JSON string escapes decoded, then all
-// whitespace stripped. The same PEM must fingerprint identically re-wrapped AND
-// carried in a JSON body, or R6 dedup re-alerts on the one key — matchAll() hands
-// us the RAW slice on purpose (every gate judges what really shipped), so there
-// the newlines are still the two characters \ + n and /\s+/ alone keeps both.
+// Transport noise dropped before hashing: JSON string escapes decoded, THEN
+// surrounding quotes and all whitespace stripped. The same PEM must fingerprint
+// identically re-wrapped AND carried in a JSON body, or R6 dedup re-alerts on
+// the one key — matchAll() hands us its RAW capture (the gates judge the
+// normalize()d value; the hash canonicalizes from what really shipped), so the
+// newlines arrive as the two characters \ + n.
+// The decode runs BEFORE normalize()'s quote-strip because the decoration
+// itself can arrive encoded: a password ending in `"` ships JSON-encoded as
+// `pass\"`, and stripping the bare quote first left the dangling `pass\` — one
+// secret, a fingerprint per encoding (`\u0022` split a third way). Decoded
+// first, every arrival reaches the strip in its raw spelling and converges.
 // Decoding, not maskJsonEscapes(): the mask BLANKS `\/` and `\"` (it used to
 // leave them, which is what an earlier version of this note said), so reusing it
-// here would delete the escaped character outright — `/\s+/` then eats the
-// blank, and two values differing only by a slash would hash the same. Wrong
-// direction: this function must not merge values that really did differ.
+// here would delete the escaped character outright — the whitespace strip then
+// eats the blank, and two values differing only by a slash would hash the same.
+// Wrong direction: this function must not merge values that really did differ.
 // ONE left-to-right pass, so `\\n` stays a backslash then `n`; collapsing `\\`
 // in an earlier pass would merge it with a real newline.
 //
 // Stored fingerprints are NOT migrated. Only a capture containing a backslash
 // hashes differently than before; every other rule's alphabet excludes one, so
 // those rows keep the value they were written with. (Today that is just
-// private-key and connection-string, but rules are data on their own cadence —
-// the invariant is the guarantee, not that census.) Re-deriving the rest would
-// mean re-scanning stored bodies, which redact-on-capture masks by default;
-// not re-deriving costs one re-alert per secret still in flight.
+// private-key and connection-string — and private-key cannot rotate: its
+// captures are anchored by `-----` at both ends, so the quote-strip never
+// fires and decode order is invisible to it. Rules are data on their own
+// cadence — the invariant is the guarantee, not that census.) Re-deriving the
+// rest would mean re-scanning stored bodies, which redact-on-capture masks by
+// default; not re-deriving costs one re-alert per secret still in flight.
 //
 // Undecidable residue, in both directions, for a secret holding a REAL backslash:
 // `hun\ter2secret` sent raw decodes to a tab that /\s+/ then eats, but sent
@@ -327,15 +352,16 @@ const ESCAPE_CHARS: Record<string, string> = { b: "\b", f: "\f", n: "\n", r: "\r
 // One more instance of that residue, reachable only since the scanner started
 // finding secrets nested inside tool-call arguments: at depth 2 the capture
 // carries `\\n`, which this ONE pass decodes to a literal backslash + `n` that
-// /\s+/ does not eat, so a PEM sent inside a tool call fingerprints apart from
-// the same PEM sent in an ordinary body. Deliberately not fixed by decoding to a
-// fixpoint — that is the merge direction this function must not fail in, per the
-// paragraph above. It costs one extra alert on the same two rules named above,
-// private-key and connection-string, since only a capture that can contain a
-// backslash is affected; every fixed-alphabet secret (AKIA…, ghp_…, sk-ant-…)
-// still fingerprints identically at every depth. Both halves are pinned by tests.
-export function fingerprint(normalizedSecret: string, hmacKey: Uint8Array): string {
-  const decoded = normalizedSecret.replace(JSON_ESCAPE, (esc) => {
+// the whitespace strip does not eat, so a PEM sent inside a tool call
+// fingerprints apart from the same PEM sent in an ordinary body. Deliberately
+// not fixed by decoding to a fixpoint — that is the merge direction this
+// function must not fail in, per the paragraph above. It costs one extra alert
+// on the same two rules named above, private-key and connection-string, since
+// only a capture that can contain a backslash is affected; every fixed-alphabet
+// secret (AKIA…, ghp_…, sk-ant-…) still fingerprints identically at every depth.
+// Both halves are pinned by tests.
+export function fingerprint(secretRaw: string, hmacKey: Uint8Array): string {
+  const decoded = secretRaw.replace(JSON_ESCAPE, (esc) => {
     if (esc.length !== 6) return ESCAPE_CHARS[esc[1]!] ?? esc[1]!; // \X, not \uXXXX
     const cp = parseInt(esc.slice(2), 16);
     // Surrogates stay as written. Decoded, every lone one UTF-8-encodes to the
@@ -345,7 +371,7 @@ export function fingerprint(normalizedSecret: string, hmacKey: Uint8Array): stri
     // secret sent both escaped and raw, and secrets in scope are ASCII.
     return cp >= 0xd800 && cp <= 0xdfff ? esc : String.fromCharCode(cp);
   });
-  return createHmac("sha256", hmacKey).update(decoded.replace(/\s+/g, "")).digest("hex");
+  return createHmac("sha256", hmacKey).update(normalize(decoded).replace(/\s+/g, "")).digest("hex");
 }
 
 export function shannonEntropy(s: string): number {

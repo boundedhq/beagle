@@ -213,6 +213,157 @@ describe("Daemon end-to-end", () => {
     streamServer.close();
   });
 
+  // Drives a streamed reply through the proxy and returns the stored row. The
+  // frames go out as one chunk; what matters here is the framing the capture
+  // path keeps, not how many TCP writes carried it. `extraHeaders` must end
+  // with its own CRLF when given.
+  async function streamedCall(runId: string, marker: string, frames: string, extraHeaders = "") {
+    let replied = false;
+    const server = createServer((sock) => {
+      sock.on("data", () => {
+        if (replied) return; // the request may arrive chunked — reply exactly once
+        replied = true;
+        sock.write(`HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n${extraHeaders}transfer-encoding: chunked\r\n\r\n`);
+        sock.write(frames.length.toString(16) + "\r\n" + frames + "\r\n0\r\n\r\n");
+      });
+      sock.on("error", () => {});
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const port = (server.address() as { port: number }).port;
+    await controlRequest(daemon.socketPath, {
+      cmd: "register-run",
+      args: { id: runId, agent: "claude-code", provider: "anthropic", upstream: `http://127.0.0.1:${port}`, authLocation: "x-api-key" },
+    });
+    // finally, so a capture that never lands fails on its own assertion rather
+    // than leaking a listening socket and an open store handle behind it.
+    let store: Store | undefined;
+    try {
+      await sendThroughProxy(daemon.proxyPort, runId, requestBody(marker));
+      let hit: { callId: string } | undefined;
+      for (let i = 0; i < 40 && !hit; i++) {
+        await Bun.sleep(50); // stays under bun's 5s default so a miss reports, not hangs
+        store?.close();
+        store = Store.openReadOnly(stateDir);
+        hit = store.searchLiteral(marker)[0];
+      }
+      return store!.getCall(hit!.callId)!;
+    } finally {
+      store?.close();
+      server.close();
+    }
+  }
+
+  // One text_delta frame carrying `text` verbatim.
+  const deltaFrame = (text: string) =>
+    'event: content_block_delta\ndata: ' +
+    JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } }) +
+    "\n\n";
+
+  test("a streamed secret under the value-scrub floor is redacted from the stored raw stream", async () => {
+    // Nothing scans the raw stream on its own — it borrows the response scan's
+    // verdict — and it used to borrow only the VALUES. redactValuesInText floors
+    // at 8 chars while connection-string captures the password alone (four chars
+    // here), so the span was spliced out of the response body while the stream
+    // stored beside it kept the password in cleartext. Same bytes, so that
+    // scan's spans reach it. The secret sits in the SECOND frame: the splice
+    // only lands right if the stream really is the bytes the scan indexed.
+    const call = await streamedCall(
+      "run-short-secret",
+      "stream a short secret",
+      deltaFrame("connecting now, ") + deltaFrame("use postgres://svc:pw12@db.internal/app please"),
+    );
+    const raw = new TextDecoder().decode(call.sseRaw!);
+    expect(raw).not.toContain("pw12");
+    expect(raw).toContain("[REDACTED:connection-string:");
+    // Spliced, not dropped — and still a well-formed stream. The viewer
+    // re-parses this column (viewer/detail.ts), so a splice landing at the
+    // wrong offset would corrupt the detail view rather than fail a test.
+    const payloads = raw.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5));
+    expect(payloads.length).toBe(2);
+    const texts = payloads.map((p) => (JSON.parse(p) as { delta: { text: string } }).delta.text);
+    expect(texts[0]).toBe("connecting now, "); // the untouched frame is byte-exact
+    expect(texts[1]).toContain("[REDACTED:connection-string:");
+    // ...and the body beside it agrees: same bytes in, same redaction out.
+    expect(new TextDecoder().decode(call.responseBody!)).not.toContain("pw12");
+  });
+
+  test("a content-encoded stream is withheld rather than stored on a header's word", async () => {
+    // decodeBody falls back to the RAW bytes whenever it cannot decompress, so
+    // for a stream whose encoding it could not apply, bodyBytes and sseRaw match
+    // byte for byte and the same-bytes check passes — it cannot tell ciphertext
+    // from plaintext. The header check is what actually withholds here; without
+    // it a genuinely compressed stream carrying a secret no pass can read would
+    // be stored. Fixture: an encoding header over a body that is not encoded.
+    const call = await streamedCall(
+      "run-encoded-stream",
+      "stream an encoded secret",
+      deltaFrame("use postgres://svc:pw12@db.internal/app please"),
+      "content-encoding: gzip\r\n",
+    );
+    expect(call.sseRaw).toBeNull(); // withheld outright
+    // The body is still captured and scrubbed — dropping the stream costs the
+    // fidelity view, not the record.
+    expect(new TextDecoder().decode(call.responseBody!)).not.toContain("pw12");
+  });
+
+  // Same four-char password, the other derived surface. The summary is the
+  // always-visible feed line, so it is the worst place for the value-scrub's
+  // 8-char floor to hold: the body and the stream beside it were both spliced
+  // by span while the line the user actually reads kept the password.
+  test("a short streamed secret never reaches the stored summary", async () => {
+    const call = await streamedCall(
+      "run-short-summary",
+      "probe short marker",
+      deltaFrame("use postgres://svc:pw12@db.internal/app now"),
+    );
+    expect(call.summary).not.toContain("pw12");
+    expect(call.summary).toContain("[REDACTED:connection-string:");
+    expect(call.summary).toContain("probe short marker"); // the line itself survived
+  });
+
+  test("a short streamed secret stays out of the summary with redact-on-capture off", async () => {
+    // The feed line is the ONE surface that scrubs regardless of the setting,
+    // so it cannot be left depending on `redaction.values` to do it.
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: false } });
+    const call = await streamedCall(
+      "run-short-summary-raw",
+      "probe raw marker",
+      deltaFrame("use postgres://svc:pw12@db.internal/app now"),
+    );
+    expect(call.summary).not.toContain("pw12");
+    expect(call.summary).toContain("[REDACTED:connection-string:");
+    expect(call.summary).toContain("probe raw marker"); // the line itself survived
+    // ...while the stored bytes keep their raw fidelity, which is what the
+    // setting is for. Pinned so the scrub doesn't quietly grow into them.
+    expect(new TextDecoder().decode(call.responseBody!)).toContain("pw12");
+    // And the row still reads "not redacted": the summary's unconditional
+    // scrub deliberately does NOT set that flag, which tracks whether the
+    // stored CONTENT was rewritten. A divergence worth pinning, not a bug.
+    expect(call.redacted).toBe(false);
+  });
+
+  test("a secret split across two SSE frames stays split in the stored stream", async () => {
+    // The shape a streaming provider actually produces — deltas cut mid-token.
+    // No rule matches either half, so the scanned bytes (which ARE the stream:
+    // the capture path decodes content-encoding and reassembles nothing) hold
+    // nothing to splice, the same boundary the request-side content-block case
+    // below documents for the request body. This fix does not change that; it
+    // is pinned here because it is what the raw stream gets asked about.
+    //
+    // NOT a claim that the key is unreachable: the join manufactures it in the
+    // readable text, and while the derived scan keeps it out of the summary,
+    // viewer/detail.ts re-parses this column at view time and reassembles it
+    // there. Asserted below only for the surfaces that ARE covered.
+    const call = await streamedCall(
+      "run-split-frames",
+      "stream a split secret",
+      deltaFrame("key AKIAZQ3DRSTUV") + deltaFrame("WXY2345 done"),
+    );
+    expect(call.sseRaw).not.toBeNull(); // kept: nothing here was unverified
+    expect(call.summary).not.toContain("AKIAZQ3DRSTUVWXY2345"); // the derived scan caught it
+    expect(call.redacted).toBe(true);
+  });
+
   test("captures a full call: session, parse, summary, search text", async () => {
     const resp = await sendThroughProxy(daemon.proxyPort, "run-e2e", requestBody("read main.ts"));
     expect(resp).toContain("done!");
@@ -291,6 +442,127 @@ describe("Daemon end-to-end", () => {
     const events = listLeakEvents(store);
     expect(events.length).toBe(1);
     expect(events[0]!.destination).toBe("anthropic");
+    store.close();
+  });
+
+  test("a secret split across two content blocks alerts and stays out of the search index", async () => {
+    // The wire path's own copy of the Mode B hole: flattenContent joins a
+    // message's content blocks with NOTHING between them, so this key exists in
+    // the readable projection — the summary and the search index — while the
+    // scanned bytes hold only the two halves either side of `"},{"type":…`.
+    // Nothing matched, so nothing alerted and `beagle search` answered with the
+    // key. The derived text is scanned on its own now.
+    await sendThroughProxy(
+      daemon.proxyPort, "run-e2e",
+      JSON.stringify({
+        model: "claude-sonnet-5",
+        messages: [{
+          role: "user",
+          content: [
+            { type: "text", text: "block one ends AKIAZQ3DRSTUV" },
+            { type: "text", text: "WXY2345 begins block two" },
+          ],
+        }],
+      }),
+    );
+    await Bun.sleep(150);
+    expect(alerts.length).toBe(1);
+    expect(alerts[0]!.secretType).toBe("aws-access-key-id");
+    const store = Store.openReadOnly(stateDir);
+    expect(listLeakEvents(store).length).toBe(1);
+    // The stored body keeps its bytes — no rule ever matched them, and neither
+    // half is a secret on its own.
+    const call = store.getCall(store.searchLiteral("block one ends")[0]!.callId)!;
+    expect(call.redacted).toBe(true); // the derived surfaces WERE rewritten
+    expect(call.summary).not.toContain("AKIAZQ3DRSTUVWXY2345");
+    expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
+    // …and the VIEWER, which is the surface a human actually reads. A wire row
+    // normally carries no stored transcript and the viewer re-parses the body —
+    // which would re-join these two blocks and render the assembled key, with
+    // the summary and index masked right beside it. The row persists its
+    // redacted projection precisely so that re-derive can't happen.
+    const { buildDetail, leakSpansFor } = await import("../src/viewer/detail");
+    const detail = buildDetail(call, leakSpansFor(store, call.id));
+    expect(JSON.stringify(detail.messages)).not.toContain("AKIAZQ3DRSTUVWXY2345");
+    expect(JSON.stringify(detail.messages)).toContain("[REDACTED:aws-access-key-id:");
+    // The placeholder lives only in the transcript (the body never held the
+    // assembled key), so R7's highlight has to find it there or the one masked
+    // surface renders unmarked.
+    expect(detail.leaks.map((l) => l.secretType)).toContain("aws-access-key-id");
+    store.close();
+  });
+
+  test("an ordinary wire call still renders from its body, with no stored transcript", async () => {
+    // The guard on the row above: persisting a projection is the EXCEPTION, for
+    // rows whose body would re-derive wrongly. Every other call keeps the old
+    // behaviour — nothing extra stored, the viewer re-parses byte-exact bytes —
+    // so the fix can't quietly double every row's storage.
+    await sendThroughProxy(daemon.proxyPort, "run-e2e", requestBody("just an ordinary ask"));
+    await Bun.sleep(150);
+    const store = Store.openReadOnly(stateDir);
+    const call = store.getCall(store.searchLiteral("just an ordinary ask")[0]!.callId)!;
+    expect(call.displayMessages).toBeNull();
+    const { buildDetail } = await import("../src/viewer/detail");
+    const detail = buildDetail(call, []);
+    expect(detail.messages[0]!.content).toBe("just an ordinary ask");
+    expect(detail.system).toBe("You are Claude Code."); // still lifted from the body
+    store.close();
+  });
+
+  test("a pasted QUOTED .env line alerts, end to end", async () => {
+    // The scanner reads the wire body, where requestBody has turned the pasted
+    // quotes into \" — so the secret's separator is an escape, not a bare
+    // quote. This is the whole user-visible point of that rule's escape
+    // handling: before it, the same paste unquoted alerted and quoted did not,
+    // because the demoted finding never cleared AlertEngine's structured gate.
+    await sendThroughProxy(
+      daemon.proxyPort, "run-e2e",
+      requestBody('here is my env:\nAWS_SECRET_ACCESS_KEY="wJalrXUtnFEMI/K7MDENG/bPxRfiCYZZZZZKEY42"\nplease use it'),
+    );
+    await Bun.sleep(150);
+    expect(alerts.length).toBe(1);
+    expect(alerts[0]!.secretType).toBe("aws-secret-access-key");
+    expect(alerts[0]!.subtitle).toBe("AWS secret key");
+  });
+
+  test("a persisted transcript scrubs a tool result's detail, not just its content", async () => {
+    // The derived pass scans and rewrites `content` only: outboundParts is
+    // built from m.content, and the persist replaces m.content. But a
+    // Responses-API tool RESULT also carries `detail` — the originating call's
+    // command/pattern/query, lifted by responsesItem — which is display text
+    // stored and rendered exactly like content. Nothing scans it and nothing
+    // scrubs it, so a secret in a tool's arguments rides into display_messages
+    // raw, on a row that alerted and whose body redacted.
+    await sendThroughProxy(
+      daemon.proxyPort, "run-e2e",
+      JSON.stringify({
+        model: "gpt-5",
+        input: [
+          {
+            type: "function_call", call_id: "c1", name: "Bash",
+            arguments: JSON.stringify({ command: "deploy --key AKIAZQ3DRSTUVWXY2345" }),
+          },
+          { type: "function_call_output", call_id: "c1", output: "deployed ok" },
+        ],
+      }),
+      "/v1/responses",
+    );
+    await Bun.sleep(200);
+    const store = Store.openReadOnly(stateDir);
+    const call = store.getCall(store.searchLiteral("deployed ok")[0]!.callId)!;
+    // Precondition: this row DID persist a projection (otherwise the assertion
+    // below would pass for the wrong reason — nothing stored to leak).
+    expect(call.displayMessages).not.toBeNull();
+    expect(JSON.stringify(call.displayMessages)).not.toContain("AKIAZQ3DRSTUVWXY2345");
+    const { buildDetail, leakSpansFor } = await import("../src/viewer/detail");
+    const view = buildDetail(call, leakSpansFor(store, call.id));
+    expect(JSON.stringify(view.messages)).not.toContain("AKIAZQ3DRSTUVWXY2345");
+    // Load-bearing: scrubbing is the fix, DROPPING the field is not. Without
+    // this the assertions above pass just as well for a projection that threw
+    // `detail` away, losing the result header's "what was this call" label.
+    const result = view.messages.find((m) => m.kind === "result")!;
+    expect(result.detail).toContain("[REDACTED:aws-access-key-id:");
+    expect(result.detail).toContain("deploy --key");
     store.close();
   });
 
@@ -402,6 +674,147 @@ describe("Daemon end-to-end", () => {
     const sessions = new Set(store.searchLiteral("AKIAZQ3DRSTUVWXY2345").map((h) => h.sessionId));
     expect(sessions.size).toBe(1);
     store.close();
+  });
+
+  test("a secret MANUFACTURED by SSE delta reassembly is scrubbed from the summary", async () => {
+    // The response-side twin of the split-content-block case, and the reason
+    // the derived scan can't be gated on the body scan having found something.
+    // The provider streams the key across two text_delta frames, so it is split
+    // in the raw stream AND split in the response body — the only place it is
+    // contiguous is parseResponse's reassembly, which is exactly what the
+    // summary renders. Both scans come back clean, so there is no matched value
+    // for a scrub to key off: only scanning the reassembled text reaches it.
+    //
+    // Inbound, so it must NOT alert — the key came FROM the provider, the same
+    // asymmetry redactDerived holds by scanning the response half separately.
+    //
+    // Asserted on every surface the value reached, INCLUDING the detail view.
+    // That one is the reason `display_derived` exists: buildDetail re-derives
+    // at read time, and a manufactured secret leaves the stored body untouched
+    // (there was nothing in the bytes to rewrite), so the re-parse handed the
+    // key back on every page load even once the summary and index were clean.
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    const key = "AKIAZQ3DRSTUVWXY2345";
+    const delta = (text: string) =>
+      `event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"${text}"}}\n\n`;
+    // Split mid-key so neither frame carries anything a rule can match.
+    const frames = delta(`key is ${key.slice(0, 11)}`) + delta(`${key.slice(11)} ok`);
+    const streamServer = createServer((sock) => {
+      sock.on("data", () => {
+        sock.write("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n");
+        sock.write(frames.length.toString(16) + "\r\n" + frames + "\r\n0\r\n\r\n");
+      });
+      sock.on("error", () => {});
+    });
+    await new Promise<void>((r) => streamServer.listen(0, "127.0.0.1", () => r()));
+    let store: Store | undefined;
+    // finally, not a trailing close(): an assertion below throws past any
+    // cleanup after it, and a leaked listener outlives the test.
+    try {
+      const sport = (streamServer.address() as { port: number }).port;
+      await controlRequest(daemon.socketPath, {
+        cmd: "register-run",
+        args: { id: "run-split-sse", agent: "claude-code", provider: "anthropic", upstream: `http://127.0.0.1:${sport}`, authLocation: "x-api-key" },
+      });
+      await sendThroughProxy(daemon.proxyPort, "run-split-sse", requestBody("hello there"));
+      let hit: { callId: string } | undefined;
+      store = Store.openReadOnly(stateDir);
+      for (let i = 0; i < 40 && !hit; i++) {
+        await Bun.sleep(50);
+        store.close();
+        store = Store.openReadOnly(stateDir);
+        hit = store.searchLiteral("hello there")[0];
+      }
+      // Named, so a capture that never lands reads as that rather than as a
+      // TypeError on `undefined.callId` two lines later.
+      if (!hit) throw new Error("timed out waiting for the streamed call to be captured");
+      const call = store.getCall(hit.callId)!;
+      // Neither scanned surface ever held it contiguously, which is what makes
+      // this unreachable by any scrub keyed off the body's matched values.
+      expect(new TextDecoder().decode(call.sseRaw!)).not.toContain(key);
+      expect(new TextDecoder().decode(call.responseBody!)).not.toContain(key);
+      expect(call.summary).not.toContain(key);
+      expect(call.summary).toContain("[REDACTED:aws-access-key-id:");
+      expect(call.redacted).toBe(true); // the derived pass rewrote content, so the row says so
+      expect(listLeakEvents(store).length).toBe(0); // inbound: redacted, never alerted
+      expect(alerts.length).toBe(0);
+      // …and the DETAIL view, which is where this leaked longest: it re-runs
+      // parseResponse on the stored body, and the body was never rewritten
+      // (the scan found nothing in it to rewrite), so the reassembly handed
+      // the key back on every page load. The stored projection is what stops
+      // that — assert through buildDetail, not through the row.
+      const { buildDetail } = await import("../src/viewer/detail");
+      const detail = buildDetail(call, []);
+      expect(detail.responseText).not.toContain(key);
+      expect(detail.responseText).toContain("[REDACTED:aws-access-key-id:");
+    } finally {
+      store?.close();
+      streamServer.close();
+    }
+  });
+
+  test("the derived join does NOT fuse two innocuous messages into a leak", async () => {
+    // The cost of scanning parts joined: the separator is whitespace, and the
+    // quiet rules' delimiter classes accept whitespace — generic-api-key is
+    // `(?:…|token|…)["':=\s]{1,5}(value)`. So a message ending "…an API token"
+    // followed by one starting with a base64-ish word matches ACROSS the join,
+    // and nothing like it was ever sent: the two are adjacent only here.
+    //
+    // It cost twice. A bogus leak event, and — worse — the genuinely-sent text
+    // replaced by a placeholder in the search index, so `beagle search` denies
+    // a string that DID leave the machine. That is a false negative on the one
+    // question search answers definitively, manufactured by a false positive.
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    const benign = "aG9sZDEyMzQ1Njc4OTB4eXo3Nzc";
+    const body = JSON.stringify({
+      model: "claude-sonnet-5",
+      messages: [
+        { role: "user", content: "FPSENTINEL yes - that endpoint needs an API token" },
+        { role: "assistant", content: `${benign} please try again` },
+      ],
+    });
+    await sendThroughProxy(daemon.proxyPort, "run-e2e", body);
+    await Bun.sleep(250);
+    const store = Store.openReadOnly(stateDir);
+    expect(listLeakEvents(store).length).toBe(0); // no leak was manufactured
+    expect(alerts.length).toBe(0);
+    // The text was genuinely sent, so search must still find it.
+    expect(store.searchLiteral(benign).length).toBe(1);
+    const call = store.getCall(store.searchLiteral("FPSENTINEL")[0]!.callId)!;
+    expect(call.redacted).toBe(false);
+    store.close();
+  });
+
+  test("summary stays bounded when a tool detail is huge and isn't a path", async () => {
+    // toolAction deliberately stops clamping so the secret scrub sees whole
+    // values, which makes bounding the READER's job. Two summarizeActions
+    // branches take `detail.split("/").pop()` — and that returns the WHOLE
+    // string when there is no "/" in it. A Grep `pattern` or a `query` is
+    // exactly that, so the stored summary grew to the size of the tool input.
+    // summary is the always-visible feed line, stored per row and broadcast to
+    // every open dashboard.
+    const pattern = "z".repeat(5000); // no "/" — the tail-taking branch
+    const reply = JSON.stringify({
+      model: "claude-sonnet-5",
+      content: [{ type: "tool_use", id: "t1", name: "Grep", input: { pattern } }],
+      usage: { input_tokens: 5, output_tokens: 2 },
+    });
+    const up = await fakeUpstream(reply);
+    try {
+      await controlRequest(daemon.socketPath, {
+        cmd: "register-run",
+        args: { id: "run-bigdetail", agent: "claude-code", provider: "anthropic", upstream: `http://127.0.0.1:${up.port}`, authLocation: "x-api-key" },
+      });
+      await sendThroughProxy(daemon.proxyPort, "run-bigdetail", requestBody("find it"));
+      await Bun.sleep(250);
+      const store = Store.openReadOnly(stateDir);
+      const call = store.getCall(store.searchLiteral("find it")[0]!.callId)!;
+      expect(call.summary).not.toContain(pattern);
+      expect(call.summary?.length ?? 0).toBeLessThan(200);
+      store.close();
+    } finally {
+      up.server.close();
+    }
   });
 
   test("auth header is scrubbed in the persisted call", async () => {
@@ -538,10 +951,14 @@ describe("Daemon end-to-end", () => {
   // The summary derives from the same raw messages the body redaction already
   // scrubbed — it must not carry the secret into the always-visible feed,
   // `beagle show`, or the viewer.
-  async function silentRun(runId: string): Promise<Awaited<ReturnType<typeof fakeUpstream>>> {
-    // A reply with no text: buildSummary falls back to the last user message —
-    // the line that carries the secret.
-    const silent = await fakeUpstream(JSON.stringify({ model: "claude-sonnet-5", content: [], usage: {} }));
+  // `content` defaults to a reply with no text, so buildSummary falls back to
+  // the last user message — the line that carries the secret. Pass blocks to
+  // put the secret on the RESPONSE side instead.
+  async function silentRun(
+    runId: string,
+    content: unknown[] = [],
+  ): Promise<Awaited<ReturnType<typeof fakeUpstream>>> {
+    const silent = await fakeUpstream(JSON.stringify({ model: "claude-sonnet-5", content, usage: {} }));
     await controlRequest(daemon.socketPath, {
       cmd: "register-run",
       args: { id: runId, agent: "claude-code", provider: "anthropic", upstream: `http://127.0.0.1:${silent.port}`, authLocation: "x-api-key" },
@@ -558,6 +975,50 @@ describe("Daemon end-to-end", () => {
     const ex = listCalls(store, 10).find((e) => e.hasLeak)!;
     expect(ex.summary).not.toContain("AKIAZQ3DRSTUVWXY2345");
     expect(ex.summary).toContain("[REDACTED:aws-access-key-id:");
+    store.close();
+    silent.server.close();
+  });
+
+  test("a short secret in a tool action's detail never reaches the stored summary", async () => {
+    // The action branch is the ONLY reader of the inbound half's i + 1 offset
+    // (inbound is [reply, ...one per action]), and it is the summary's other
+    // response-side surface — a shell command carrying a password is the shape
+    // this rule exists for. Two actions, because one cannot distinguish a
+    // correct offset from one that slid the empty reply into slot 0 and every
+    // detail down by one: `second-cmd` is what pins it. Read at i instead of
+    // i + 1 and the summary misreports what the agent ran.
+    const silent = await silentRun("run-action-secret", [
+      { type: "tool_use", name: "Bash", input: { command: "psql postgres://svc:pw12@db.internal/app" } },
+      { type: "tool_use", name: "Bash", input: { command: "echo second-cmd" } },
+    ]);
+    await sendThroughProxy(daemon.proxyPort, "run-action-secret", requestBody("probe action marker"));
+    await Bun.sleep(200);
+    const store = Store.openReadOnly(stateDir);
+    const call = store.getCall(store.searchLiteral("probe action marker")[0]!.callId)!;
+    expect(call.summary).not.toContain("pw12");
+    // summarizeActions caps each detail at 40 chars AFTER the splice, so only
+    // the placeholder's head survives this branch — enough to prove a splice.
+    expect(call.summary).toContain("[REDACTED:connectio");
+    expect(call.summary).toContain("second-cmd"); // the second action's OWN detail
+    store.close();
+    silent.server.close();
+  });
+
+  test("a short secret in a request message never reaches the stored summary", async () => {
+    // The outbound half of the same hole. The reply is empty, so the summary
+    // quotes the user line the password sits in — and at 100 chars the whole
+    // placeholder survives here, unlike the 40-char action branch above.
+    const silent = await silentRun("run-req-short");
+    await sendThroughProxy(
+      daemon.proxyPort, "run-req-short",
+      requestBody("connect with postgres://svc:pw12@db.internal/app"),
+    );
+    await Bun.sleep(200);
+    const store = Store.openReadOnly(stateDir);
+    const call = store.getCall(store.searchLiteral("connect with")[0]!.callId)!;
+    expect(call.summary).not.toContain("pw12");
+    expect(call.summary).toContain("[REDACTED:connection-string:");
+    expect(call.summary).toContain("connect with"); // the line itself survived
     store.close();
     silent.server.close();
   });

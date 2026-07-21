@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/core/store/store";
-import { applyCaptureRedaction, redactBody, redactValues, redactValuesInText, redactionPlaceholder } from "../src/transform/redact";
+import { applyCaptureRedaction, clampRedacted, derivedScanText, derivedSplitAt, redactBody, redactDerivedParts, redactRawStream, redactValues, redactValuesInText, redactionPlaceholder, secretKeys } from "../src/transform/redact";
 import { DEFAULT_CONFIG } from "../src/core/config/config";
 import { quarantineCorruptDb } from "../src/core/store/quarantine";
 import { compileRules, scan, type Finding } from "../src/core/scanner/engine";
@@ -169,6 +169,189 @@ describe("redact-on-capture (R11)", () => {
       const out = redactValuesInText(`sent ${decoded} onward`, [{ value: escaped, type: "x" }]);
       expect(out).toBe(`sent ${redactionPlaceholder("x", escaped)} onward`);
     }
+  });
+
+  // redactDerivedParts is what the value scrub above structurally cannot be:
+  // it splices the offsets of a scan run over the DERIVED text itself, so it
+  // reaches secrets that exist only in the rendering.
+  test("redactDerivedParts splices a finding out of the one part that holds it", () => {
+    const secret = "AKIAZQ3DRSTUVWXY2345";
+    const parts = ["hello", `key ${secret} here`, "bye"];
+    // Ask for the joined text rather than restating the separator: it is a
+    // NUL barrier now, so no rule can match across the join.
+    const joined = derivedScanText(parts);
+    const at = joined.indexOf(secret);
+    const out = redactDerivedParts(parts, [finding(at, at + secret.length, "aws-access-key-id")]);
+    expect(out.parts[0]).toBe("hello"); // untouched
+    expect(out.parts[2]).toBe("bye");
+    expect(out.parts[1]).toBe(`key ${redactionPlaceholder("aws-access-key-id", secret)} here`);
+    // The value comes back in the DERIVED form, for scrubbing text built from
+    // these parts that isn't one of them (the summary's quoted ask).
+    expect(out.values).toEqual([{ value: secret, type: "aws-access-key-id" }]);
+  });
+
+  test("redactDerivedParts splices a finding that SPANS two parts out of both", () => {
+    // A PEM whose BEGIN and END sit in different messages: the transcript
+    // renders them adjacently, so it is readable, so it must be masked — and
+    // neither part may be left holding its half.
+    const parts = [
+      "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAspanning",
+      "tail\n-----END RSA PRIVATE KEY-----",
+    ];
+    // Ask for the joined text rather than restating the separator: it is a
+    // NUL barrier now, so no rule can match across the join.
+    const joined = derivedScanText(parts);
+    const out = redactDerivedParts(parts, [finding(0, joined.length, "private-key")]);
+    expect(out.parts[0]).not.toContain("MIIEowIBAAKCAQEAspanning");
+    expect(out.parts[0]).not.toContain("BEGIN RSA PRIVATE KEY");
+    expect(out.parts[1]).not.toContain("END RSA PRIVATE KEY");
+    // Each part is fully replaced here, so both read as the same placeholder —
+    // one secret, two masks, which is the over-redacting direction.
+    const ph = redactionPlaceholder("private-key", joined);
+    expect(out.parts).toEqual([ph, ph]);
+  });
+
+  test("redactDerivedParts skips an overlapping second finding rather than double-splicing", () => {
+    // Two quiet-tier rules can flag the same characters; splicing twice would
+    // corrupt the text around them. Same guard redactBody holds — and the
+    // skipped finding's value is still reported, so callers can scrub it.
+    const parts = [`x ${"a".repeat(40)} y`];
+    const out = redactDerivedParts(parts, [finding(2, 42, "generic"), finding(2, 30, "aws-secret-shape")]);
+    expect(out.parts[0]).toBe(`x ${redactionPlaceholder("generic", "a".repeat(40))} y`);
+    expect(out.values.length).toBe(2);
+  });
+
+  test("redactDerivedParts handles many findings scattered over many parts", () => {
+    // The part walk carries a cursor that only moves downward, relying on the
+    // findings being applied in descending order. A cursor that advanced too
+    // far would silently skip a part — leaving a secret in the transcript with
+    // every other assertion still green — so sweep a whole grid: one secret in
+    // every part, plus untouched filler either side of each to catch an
+    // off-by-one splice.
+    const parts: string[] = [];
+    const secrets: string[] = [];
+    for (let i = 0; i < 40; i++) {
+      const s = `SECRET${String(i).padStart(2, "0")}${"v".repeat(12)}`;
+      secrets.push(s);
+      parts.push(`head${i}-${s}-tail${i}`);
+    }
+    const joined = derivedScanText(parts);
+    const findings = secrets.map((s) => {
+      const at = joined.indexOf(s);
+      return finding(at, at + s.length, "generic");
+    });
+    // Shuffled deterministically: redactDerivedParts sorts internally, and a
+    // caller is not required to hand them over in order.
+    const shuffled = findings.filter((_, i) => i % 2 === 0).concat(findings.filter((_, i) => i % 2 === 1));
+    const out = redactDerivedParts(parts, shuffled);
+    for (let i = 0; i < parts.length; i++) {
+      expect(out.parts[i]).toBe(`head${i}-${redactionPlaceholder("generic", secrets[i]!)}-tail${i}`);
+    }
+    expect(out.values.length).toBe(secrets.length);
+  });
+
+  test("derivedSplitAt agrees with derivedScanText about where the halves meet", () => {
+    // The outbound/inbound split is what keeps an inbound secret from being
+    // reported as a leak, and it is computed WITHOUT joining the outbound half
+    // (too expensive on a long conversation). If the two ever disagreed about
+    // the separator, findings would be attributed to the wrong direction and
+    // nothing else would notice — so pin their agreement directly.
+    for (const head of [[], [""], ["ab"], ["ab", "cde"], ["", "x", ""]]) {
+      const tail = ["INBOUND"];
+      const joined = derivedScanText([...head, ...tail]);
+      const at = derivedSplitAt(head);
+      expect(joined.slice(at)).toBe(derivedScanText(tail));
+      // …and it lands one past the last head part, on the separator, so a
+      // finding starting exactly there counts as head — the fail-safe side.
+      if (head.length > 0) expect(joined[at - 1]).toBe("\n");
+    }
+  });
+
+  test("clampRedacted cuts past a straddling placeholder, never through it", () => {
+    const ph = redactionPlaceholder("aws-access-key-id", "AKIAZQ3DRSTUVWXY2345");
+    // The cap lands 4 characters into the placeholder: a plain slice would
+    // leave "[RED", which reads as a corrupted transcript, not a redaction.
+    const text = `${"f".repeat(10)}${ph} trailing`;
+    const out = clampRedacted(text, 14);
+    expect(out).toBe(`${"f".repeat(10)}${ph}`);
+    // Nothing to protect: a cut in ordinary text is exact.
+    expect(clampRedacted("f".repeat(50), 14)).toBe("f".repeat(14));
+    expect(clampRedacted("short", 14)).toBe("short");
+  });
+
+  test("clampRedacted is not defeated by a literal [REDACTED: in captured content", () => {
+    // The cap bounds what a tool RESULT persists, and a tool result is content
+    // the agent's environment chose — including, say, a log line another
+    // scrubber wrote. Running to the next `]` after any `[REDACTED:` let that
+    // content opt itself out of the cap entirely: a 500 KB result stored whole
+    // where the cap says 4000. Only a well-formed placeholder earns the
+    // overshoot.
+    const hostile = "x".repeat(3990) + "auth=[REDACTED: by ci-scrubber " + "y".repeat(500_000) + "]";
+    expect(clampRedacted(hostile, 4000).length).toBe(4000);
+    // A truncated-looking opener with no bracket at all is also just cut.
+    expect(clampRedacted("z".repeat(3995) + "[REDACTED:" + "z".repeat(9000), 4000).length).toBe(4000);
+    // …while a real placeholder still survives whole.
+    const real = "z".repeat(3995) + redactionPlaceholder("aws-access-key-id", "AKIAZQ3DRSTUVWXY2345");
+    const out = clampRedacted(real, 4000);
+    expect(out.endsWith("]")).toBe(true);
+    expect(out.length).toBeLessThan(4040);
+  });
+
+  test("secretKeys matches an escaped body value against its decoded rendering", () => {
+    // The dedup the alert path needs: one PEM seen in the bytes and again in
+    // the transcript is one leak, but the scanner's fingerprint can't say so —
+    // it strips whitespace, and the escaped form's `\n` is a backslash and an
+    // `n`, which survives.
+    const escaped = "-----BEGIN RSA PRIVATE KEY-----\\nMIIEowIBAAKCAQEAkeyed\\n-----END RSA PRIVATE KEY-----";
+    const decoded = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAkeyed\n-----END RSA PRIVATE KEY-----";
+    const shared = secretKeys(escaped).filter((k) => secretKeys(decoded).includes(k));
+    expect(shared.length).toBeGreaterThan(0);
+    // Two genuinely different secrets must not collide.
+    expect(secretKeys("AKIAZQ3DRSTUVWXY2345").some((k) => secretKeys("AKIAZQ3DRSTUVWXY9999").includes(k)))
+      .toBe(false);
+  });
+
+  test("redactRawStream span-redacts a value the scrub floor skips", () => {
+    // The gap this closes: redactValuesInText ignores values under 8 chars, and
+    // connection-string captures the password alone. The raw stream was
+    // value-scrubbed and nothing else, so a short password stayed cleartext
+    // there while the body beside it was spliced clean.
+    const stream = 'data: {"text":"postgres://svc:pw12@db.internal/app"}\n\n';
+    const start = stream.indexOf("pw12");
+    const spans = [finding(start, start + 4, "connection-string")];
+    // No values passed: the span pass alone must do it. Handing it the value too
+    // would still pass if the floor were lowered, hiding which pass did the work.
+    const out = redactRawStream(enc(stream), enc(stream), spans, []);
+    expect(dec(out!)).not.toContain("pw12");
+    expect(dec(out!)).toContain("[REDACTED:connection-string:");
+    // and the surrounding stream is intact — the splice is the span, not the frame
+    expect(dec(out!)).toContain('data: {"text":"postgres://svc:');
+  });
+
+  test("redactRawStream still scrubs echoed values that no span covers", () => {
+    const secret = "AKIAZQ3DRSTUVWXY2345";
+    const stream = `data: {"text":"echoing ${secret}"}\n\n`;
+    // No findings of its own (the echo was detected request-side) — the value
+    // pass must still reach it.
+    const out = redactRawStream(enc(stream), enc(stream), [], [{ value: secret, type: "aws-access-key-id" }]);
+    expect(dec(out!)).not.toContain(secret);
+    expect(dec(out!)).toContain("[REDACTED:aws-access-key-id:");
+  });
+
+  test("redactRawStream withholds the stream when it is NOT the scanned bytes", () => {
+    // The spans index the scanned body. If the capture path ever stops handing
+    // the stream those same bytes, splicing at those offsets would corrupt the
+    // stream instead of failing — so it is dropped, not guessed at (§4).
+    const stream = 'data: {"text":"key AKIAZQ3DRSTUVWXY2345"}\n\n';
+    const scanned = "reassembled: key AKIAZQ3DRSTUVWXY2345";
+    const start = scanned.indexOf("AKIA");
+    expect(redactRawStream(enc(stream), enc(scanned), [finding(start, start + 20)], [])).toBeNull();
+    // Same LENGTH, different bytes: the check is content, not size. The span
+    // would land inside the stream here, so a length-only guard would splice
+    // the wrong 20 characters and hand back a corrupted stream that looks fine.
+    const a = 'data: {"k":"AKIAZQ3DRSTUVWXY2345"}';
+    const b = 'data: {"k":"AKIAZQ3DRSTUVWXY9999"}';
+    expect(redactRawStream(enc(a), enc(b), [finding(12, 32)], [])).toBeNull();
   });
 
   test("applyCaptureRedaction holds all content out on an incomplete scan", () => {

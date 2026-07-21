@@ -173,12 +173,128 @@ describe("case sensitivity (precision)", () => {
   });
 });
 
+describe("pasted secrets, JSON-encoded as they arrive on the wire", () => {
+  // The scanner sees the request body, not the chat message, so a pasted .env
+  // line reaches it JSON-encoded and the quotes around a quoted assignment
+  // arrive as \". A raw body matched that same paste on the bare quote, so a
+  // rule reading only the raw form alerts or stays silent depending purely on
+  // transport. Tier is what carries the consequence: AlertEngine.process fires
+  // the loud alert only on tier === "structured". Unmatched, the paste is not
+  // silent but demoted — the anchor-free aws-secret-shape rule still logs it at
+  // tier "possible", which is recorded and never shown to the user.
+  const SECRET = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYZZZZZKEY42";
+  const DIGEST = "3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5e"; // 40 hex: clears the 3.0 entropy gate
+  const wireBody = (line: string) =>
+    JSON.stringify({ messages: [{ role: "user", content: `here is my env:\n${line}\nplease use it` }] });
+
+  // Separator shapes a paste can put between the key name and the secret. Each
+  // is written raw here and JSON-encoded by wireBody, exactly as a chat client
+  // would encode it. The first two are controls: JSON.stringify escapes neither
+  // = nor ', so they reach the wire byte-identical to their raw form and match
+  // even without the fix. They are here to prove the fix costs nothing, not to
+  // exercise it — every shape below them fails if the fix is reverted.
+  const SHAPES: Array<[string, string]> = [
+    ["unquoted (control)", `AWS_SECRET_ACCESS_KEY=${SECRET}`],
+    ["single-quoted (control)", `AWS_SECRET_ACCESS_KEY='${SECRET}'`],
+    ["double-quoted", `AWS_SECRET_ACCESS_KEY="${SECRET}"`],
+    ["spaced and quoted", `aws_secret_access_key = "${SECRET}"`],
+    ["shell export", `export AWS_SECRET_ACCESS_KEY="${SECRET}"`],
+    ["json field", `{"aws_secret_access_key": "${SECRET}"}`],
+    ["pretty-printed json", `{\n  "aws_secret_access_key": "${SECRET}"\n}`],
+  ];
+
+  for (const [shape, line] of SHAPES) {
+    test(`${shape} alerts at the structured tier, encoded or not`, () => {
+      const body = wireBody(line);
+      const hit = scanText(body).find((x) => x.secretType === "aws-secret-access-key");
+      expect(hit).toBeDefined();
+      expect(hit?.tier).toBe("structured");
+      expect(hit?.severity).toBe("high");
+      // Span covers the secret alone: redact-on-capture splices these offsets
+      // out of the stored body, so a span that ate the \" would corrupt the JSON.
+      expect(body.slice(hit!.start, hit!.end)).toBe(SECRET);
+      // The bug this pins: the same content alerted unquoted but not quoted,
+      // purely because JSON encoding moved a backslash between key and value.
+      // A raw (unencoded) body must reach the same verdict.
+      const rawHit = scanText(line).find((x) => x.secretType === "aws-secret-access-key");
+      expect(rawHit?.tier).toBe("structured");
+    });
+  }
+
+  test("every shape fingerprints identically (one secret, not seven)", () => {
+    const fps = new Set(
+      SHAPES.map(([, line]) =>
+        scanText(wireBody(line)).find((x) => x.secretType === "aws-secret-access-key")!.fingerprint),
+    );
+    expect(fps.size).toBe(1);
+  });
+
+  // Only backslash-QUOTE is a separator, and only as a unit. Each case below
+  // is a raw body that a looser rule was measured to fire on, at high severity,
+  // with no secret present — these pin the shapes that were rejected while
+  // arriving at the fix, so a future widening has to re-argue them:
+  //   a bare \ in the class      -> "windows path", "home dir listing"
+  //   \\? before any separator   -> the backslash-then-separator cases
+  // A raw body carries the single backslash the user typed; wireBody doubles
+  // it, so asserting both covers each form. Escaped whitespace (\\[ntr]) needs
+  // no case here: maskJsonEscapes already blanks those to spaces before any
+  // rule runs, which is also why this rule only has to learn \".
+  const PATHS: Array<[string, string]> = [
+    ["windows path", `C:\\aws\\${DIGEST}\\cache`],
+    ["home dir listing", `ls ~/.aws\\${DIGEST}`],
+    ["path to a key-shaped segment", `the path is C:\\aws\\${SECRET}`],
+    ["backslash then space (dir paste)", `dir C:\\aws\\ ${DIGEST}`],
+    ["backslash then newline (dir paste)", `C:\\aws\\\n${DIGEST}`],
+    ["backslash then equals", `C:\\aws\\=${DIGEST}`],
+    ["backslash then colon", `C:\\aws\\:${DIGEST}`],
+    ["backslash then tab", `C:\\aws\\\t${DIGEST}`],
+  ];
+  // The tail is a negative lookahead, not \b, which needs a word char: a real
+  // 40-char key ending in + or / was missed outright (~3% of the keyspace).
+  for (const tail of ["+", "/"]) {
+    test(`a key ending in '${tail}' still alerts (\\b would not match it)`, () => {
+      const key = `${SECRET.slice(0, 39)}${tail}`;
+      const hit = scanText(wireBody(`AWS_SECRET_ACCESS_KEY="${key}"`))
+        .find((x) => x.secretType === "aws-secret-access-key");
+      expect(hit?.tier).toBe("structured");
+    });
+  }
+
+  test("a padded base64 blob near an aws keyword stays silent", () => {
+    // '=' is not a value character: 40 base64 chars encode exactly 30 bytes, so
+    // a real key never carries padding. Admitting it would make data-URI image
+    // blobs fire the moment the tail stopped requiring a word char.
+    const f = scanText(wireBody("aws logo: iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAA="));
+    expect(f.some((x) => x.secretType === "aws-secret-access-key")).toBe(false);
+  });
+
+  test("a longer run is not half-matched (partial redaction would leak the tail)", () => {
+    // \b let a 50-char value match on its first 40 when char 41 was + / or =.
+    // redact-on-capture splices exactly the finding's span, so that stored a
+    // live token with its last 10 characters intact. Whole run or nothing.
+    const long = `${SECRET}ABCDEFGHIJ`;
+    const hits = scanText(wireBody(`aws_secret_access_key = "${long}"`))
+      .filter((x) => x.secretType === "aws-secret-access-key");
+    expect(hits).toEqual([]);
+  });
+
+  for (const [shape, text] of PATHS) {
+    test(`a backslash that does not escape a quote stays silent: ${shape}`, () => {
+      // Raw body (single backslash) and wire body (doubled) must both stay quiet.
+      expect(scanText(text).some((x) => x.secretType === "aws-secret-access-key")).toBe(false);
+      expect(scanText(wireBody(text)).some((x) => x.secretType === "aws-secret-access-key")).toBe(false);
+    });
+  }
+});
+
 describe("fingerprint stability across wrapping and wire encoding", () => {
   const BODY = "MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn";
   const pem = (body: string) =>
     `-----BEGIN RSA PRIVATE KEY-----\n${body}\n-----END RSA PRIVATE KEY-----`;
   const fpOf = (text: string) =>
     scanText(text).find((x) => x.secretType === "private-key")!.fingerprint;
+  const fpConn = (text: string) =>
+    scanText(text).find((x) => x.secretType === "connection-string")!.fingerprint;
 
   test("re-wrapped PEM block fingerprints identically", () => {
     expect(fpOf(pem(BODY))).toBe(fpOf(pem(`${BODY.slice(0, 16)}\n${BODY.slice(16)}`)));
@@ -208,6 +324,50 @@ describe("fingerprint stability across wrapping and wire encoding", () => {
 
   test("distinct PEM bodies stay distinct", () => {
     expect(fpOf(JSON.stringify({ c: pem(BODY) }))).not.toBe(fpOf(pem(BODY.replace("0Z3", "0Z4"))));
+  });
+
+  test("a password ending in a quote fingerprints identically JSON-encoded and raw", () => {
+    // JSON-encoded, the password's closing quote ships as the two characters
+    // \ + ". Stripping the bare quote before decoding ate the " out of the
+    // escape and hashed the dangling `hunterpw\`, while the raw arrival hashed
+    // `hunterpw` — one secret, two fingerprints, and R6 dedup re-alerted.
+    const url = 'mongodb://app:hunterpw"@db.internal/prod';
+    expect(fpConn(JSON.stringify({ url }))).toBe(fpConn(`URL=${url}`));
+    // Both arrivals converge on the undecorated password itself.
+    expect(fpConn(`URL=${url}`)).toBe(fingerprint("hunterpw", HMAC_KEY));
+  });
+
+  test("a password starting with a quote agrees across encodings too", () => {
+    // The mirror image: `\"hunterpw` has no BARE leading quote, so the strip
+    // used to skip it and the decoded `"hunterpw` hashed with its quote on.
+    const url = 'mongodb://app:"hunterpw@db.internal/prod';
+    expect(fpConn(JSON.stringify({ url }))).toBe(fpConn(`URL=${url}`));
+  });
+
+  test("a \\u0022-escaping encoder agrees as well", () => {
+    // Same closing quote, third spelling. An escape-aware quote-strip taught
+    // the two-character `\"` would still split this one — the reason the fix
+    // is decode order, not a smarter strip.
+    const url = 'mongodb://app:hunterpw"@db.internal/prod';
+    const body = JSON.stringify({ url }).replace(/\\"/g, "\\u0022");
+    expect(fpConn(body)).toBe(fpConn(`URL=${url}`));
+  });
+
+  test("distinct quote-bearing passwords stay distinct", () => {
+    expect(fpConn(JSON.stringify({ url: 'mongodb://app:alpha9z"@db.internal/prod' }))).not.toBe(
+      fpConn(JSON.stringify({ url: 'mongodb://app:alpha9x"@db.internal/prod' })),
+    );
+  });
+
+  test("escape-free fingerprints are pinned — no silent rotation", () => {
+    // The ux_leak_fp index keys on these values with no migration path, and
+    // every rule except connection-string and private-key has an alphabet
+    // excluding backslash and quote, so its stored rows must NEVER rotate.
+    // This golden value has survived both fingerprint reworks; a diff here
+    // means orphaning every stored row, not a harmless refactor.
+    expect(fingerprint("AKIAZQ3DRSTUVWXY2345", HMAC_KEY)).toBe(
+      "226a219ccad33f919765e314dd7ec13d3135b37dc8ce19ac99c68bf97e575381",
+    );
   });
 
   test("an escaped backslash does not decode into the escape after it", () => {
@@ -408,8 +568,24 @@ describe("JSON-escape-prefixed secrets (leading-boundary regression)", () => {
       const s = `x${"\\".repeat(n)}ny`;
       expect(maskJsonEscapes(s).length).toBe(s.length);
     }
-    // A run of 40 followed by an escape char blanks to exactly 41 spaces.
-    expect(maskJsonEscapes(`x${"\\".repeat(40)}ny`)).toBe(`x${" ".repeat(41)}y`);
+    // Only the trailing 2^k backslashes belong to the escape. A run of 40 uses
+    // 32 of them, so 8 literal backslashes survive and 33 chars blank.
+    expect(maskJsonEscapes(`x${"\\".repeat(40)}ny`)).toBe(`x${"\\".repeat(8)}${" ".repeat(33)}y`);
+  });
+
+  // The split is what keeps a literal backslash from being erased. An odd run
+  // longer than one is never a pure nested escape: a newline at depth d takes
+  // 2^(d-1) backslashes, so 1, 2, 4, 8 are escapes and 3 is a typed backslash
+  // followed by a depth-1 one. Blanking all of 3 erased the backslash that
+  // stops `C:\aws\` + newline + digest reading as an aws-keyed secret.
+  test("a run splits into kept literals and a blanked 2^k escape", () => {
+    expect(maskJsonEscapes(String.raw`a\nb`)).toBe("a  b"); // depth 1
+    expect(maskJsonEscapes(String.raw`a\\nb`)).toBe("a   b"); // depth 2
+    expect(maskJsonEscapes(String.raw`a\\\\nb`)).toBe("a     b"); // depth 3
+    // 3 backslashes: the escape takes 2, so one literal backslash survives.
+    expect(maskJsonEscapes(String.raw`a\\\nb`)).toBe("a\\   b");
+    // 5 backslashes: the escape takes 4, so again one survives.
+    expect(maskJsonEscapes(String.raw`a\\\\\nb`)).toBe("a\\     b");
   });
 
   test("offsets stay exact across multi-byte and astral characters", () => {
