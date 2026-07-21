@@ -4,16 +4,33 @@
 // the daemon stitches onto the turn row (store.attachOtelResponse). Lives in
 // adapters (fs + timers). Pairing/keying is in ../parsers/codex-rollout (pure).
 // See docs/codex-rollout-response-capture-design.md.
-import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { closeSync, lstatSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { ulid } from "../core/store/ulid";
-import { answersFromText, type RolloutAnswer } from "../parsers/codex-rollout";
+import { RolloutPairing, type RolloutAnswer } from "../parsers/codex-rollout";
 import type { OtelCall } from "../parsers/otlp-map";
 
 const POLL_MS = 1500; // ~the OTel batch cadence, so the answer stitches a beat after its turn's batch
 const RETRY_WINDOW_MS = 6000; // re-emit a recent answer until its turn row exists (race recovery)
-const RETIRE_MS = 30000; // close a tailer after this long with no new lines and no OTel activity
+// Close a tailer after this long with no new lines and no OTel activity.
+// Generous on purpose: a long tool-free generation emits no content events
+// (codex.sse_event maps to zero calls, so nothing reaches noteActivity) and
+// writes no rollout lines until the answer completes — at 30s that retired the
+// tailer mid-generation, and the answer surfaced only on the next content
+// event, or never if the user quit first.
+const RETIRE_MS = 120000;
+// The locate walk is the expensive part of a tailer (the whole date-partitioned
+// tree when nothing matches), so retries are bounded: a few fast attempts cover
+// the file appearing a beat after the first OTel event, then the cadence backs
+// off, then it stops for good. Unbounded, a conversation whose rollout never
+// appears (service daemon with a different CODEX_HOME, history logging off)
+// kept OTel activity flowing and re-walked the tree every poll for the life of
+// the session.
+const LOCATE_FAST_ATTEMPTS = 4; // first attempts run on the poll cadence
+const LOCATE_BACKOFF_MAX_MS = 30000; // cap between backed-off attempts
+const LOCATE_MAX_ATTEMPTS = 12; // then stop locating (≈3 min of coverage)
 
 /** ~/.codex/sessions, honoring CODEX_HOME. The daemon inherits the launching
  *  shell's env (commands.ts spreads process.env into the daemon spawn), so a
@@ -23,21 +40,27 @@ export function codexSessionsRoot(): string {
   return join(process.env.CODEX_HOME || join(homedir(), ".codex"), "sessions");
 }
 
-// Locate a conversation's rollout by filename suffix. Runs on the tailer's poll
-// cadence only until the file is found (then it reads that path directly). The
-// sessions tree is date-partitioned (YYYY/MM/DD) and unbounded over time.
+// Locate a conversation's rollout by filename suffix. The sessions tree is
+// date-partitioned (YYYY/MM/DD, zero-padded, so lexicographic order IS date
+// order) and unbounded over time — visit names newest-first and stop once a
+// directory's subtree has matched: the live file for a conversation is always
+// in the most recent day that has one (`codex resume` starts a fresh rollout
+// dated now, it never appends to an old day's file). Only a no-match walk
+// still visits the whole tree, and poll() caps how many of those run.
 function locateRollout(root: string, convId: string): string | null {
   const suffix = `-${convId}.jsonl`;
   let bestPath: string | null = null;
   let bestMtime = -Infinity;
+  let done = false;
   const walk = (dir: string): void => {
     let names: string[];
     try {
-      names = readdirSync(dir);
+      names = readdirSync(dir).sort();
     } catch {
       return; // unreadable dir — skip
     }
-    for (const name of names) {
+    for (let i = names.length - 1; i >= 0 && !done; i--) {
+      const name = names[i]!;
       const full = join(dir, name);
       let st: ReturnType<typeof lstatSync>;
       try {
@@ -53,6 +76,9 @@ function locateRollout(root: string, convId: string): string | null {
         bestMtime = st.mtimeMs;
       }
     }
+    // Everything in this directory has been seen; if any of it matched, older
+    // siblings up the whole stack can only be staler files — stop the walk.
+    if (bestPath) done = true;
   };
   walk(root);
   return bestPath;
@@ -102,14 +128,25 @@ export interface TailerOptions {
 export class CodexRolloutTailer {
   private timer: ReturnType<typeof setInterval> | null = null;
   private filePath: string | null;
-  private readonly firstSeen = new Map<number, number>(); // answer index → first-seen ms (retry-window clock only)
-  // answer index → the file's mtime at discovery: the stand-in production time
-  // for a timestamp-less line (see buildResponseCall). Kept apart from
-  // firstSeen, which must stay the POLL time — reusing mtime there would age
-  // a recreated tailer's answers straight past the retry window and kill the
-  // back-fill emit.
-  private readonly tsFallback = new Map<number, number>();
-  private answers: RolloutAnswer[] = []; // cache; re-parsed only when the file grows
+  /** `index:promptKey:answerHash` → first-seen ms. Content-addressed, not
+   *  index-only: after a truncate/rewrite the same slot can hold a DIFFERENT
+   *  answer, which must read as new (index-only keys left it forever
+   *  "already seen" — never emitted), while re-parsing identical content
+   *  (rewrite, re-locate) must not re-emit it outside its retry window. */
+  private readonly firstSeen = new Map<string, number>();
+  /** Same content key → the file's mtime at discovery: the stand-in production
+   *  time for a timestamp-less line (see buildResponseCall). Kept apart from
+   *  firstSeen, which must stay the POLL time — reusing mtime there would age
+   *  a recreated tailer's answers straight past the retry window and kill the
+   *  back-fill emit. Survives resets with firstSeen: re-read identical content
+   *  keeps its original discovery stamp. */
+  private readonly tsFallback = new Map<string, number>();
+  private answers: Array<{ ans: RolloutAnswer; key: string }> = []; // grows with the file; rebuilt on reset
+  private pairing = new RolloutPairing();
+  private readOffset = 0; // file bytes consumed (into parsed lines or carry)
+  private carry: Buffer = Buffer.alloc(0); // partial trailing line, as BYTES — a UTF-8 char can split across reads
+  private locateAttempts = 0;
+  private nextLocateAt = 0; // clock gate for backed-off locate retries
   private lastSize = -1;
   private lastChange: number;
   private lastActivity: number;
@@ -139,36 +176,39 @@ export class CodexRolloutTailer {
   }
 
   poll(): void {
-    if (!this.filePath) {
-      // Locate once found, then poll that path directly. Until then, retry the
-      // locate each poll (bounded — the tailer retires if the file never shows).
-      this.filePath = locateRollout(this.opts.sessionsRoot ?? codexSessionsRoot(), this.opts.convId);
-      if (!this.filePath) {
-        this.checkRetire();
-        return;
-      }
+    if (!this.filePath && !this.locate()) {
+      this.checkRetire();
+      return;
     }
     let st: ReturnType<typeof statSync>;
     try {
-      st = statSync(this.filePath);
+      st = statSync(this.filePath!);
     } catch {
-      this.checkRetire(); // file gone/unreadable — still age toward retirement
+      // File gone or unreadable — deleted, or `codex resume` superseded it with
+      // a fresh rollout for the same conversation. Drop the binding and
+      // re-locate (with a fresh locate budget) instead of aging toward
+      // retirement while the conversation may still be live under a new file.
+      this.filePath = null;
+      this.resetReadState();
+      this.locateAttempts = 0;
+      this.nextLocateAt = 0;
+      this.checkRetire();
       return;
     }
     const size = st.size;
     const now = this.now();
-    // The rollout is append-only, so re-read+parse only when it grew. The tailer
-    // polls for the whole session; re-parsing a static multi-MB log every tick
-    // would be pure waste. Retries below still run from the cached `answers`.
+    // The rollout is append-only, so read only when — and only WHAT — it grew:
+    // the tailer polls for the whole session, and re-reading a multi-MB log
+    // every tick was O(N²) sync work on the daemon's one thread. Retries below
+    // still run from the cached `answers`.
     if (size !== this.lastSize) {
-      try {
-        this.answers = answersFromText(readFileSync(this.filePath, "utf8"));
-      } catch {
-        this.checkRetire();
+      this.lastChange = now; // any size change is liveness — codex is writing
+      if (size < this.lastSize) this.resetReadState(); // truncated/rewritten — reparse from byte 0
+      if (!this.readNewBytes(size)) {
+        this.checkRetire(now); // read raced a change/failed — retried next poll
         return;
       }
       this.lastSize = size;
-      if (this.answers.length > this.firstSeen.size) this.lastChange = now;
     }
 
     // Emit each answer once when first seen, and re-emit it within the retry
@@ -180,19 +220,104 @@ export class CodexRolloutTailer {
     // stale-attach bound rather than claiming that turn's row.
     const window = this.opts.retryWindowMs ?? RETRY_WINDOW_MS;
     const due: OtelCall[] = [];
-    this.answers.forEach((ans, i) => {
-      let seen = this.firstSeen.get(i);
+    for (const { ans, key } of this.answers) {
+      let seen = this.firstSeen.get(key);
       if (seen === undefined) {
         seen = now;
-        this.firstSeen.set(i, seen);
+        this.firstSeen.set(key, seen);
         // Floored: ulid()'s base32 digits come from `t % 32`, garbage on a
         // fractional ms (mtimeMs is a float).
-        this.tsFallback.set(i, Math.floor(st.mtimeMs));
+        this.tsFallback.set(key, Math.floor(st.mtimeMs));
       }
-      if (now - seen <= window) due.push(buildResponseCall(this.opts.convId, ans, this.tsFallback.get(i) ?? seen));
-    });
+      if (now - seen <= window) due.push(buildResponseCall(this.opts.convId, ans, this.tsFallback.get(key) ?? seen));
+    }
     if (due.length) this.opts.emit(due);
     this.checkRetire(now);
+  }
+
+  /** Bounded locate: true if the file is now bound. See the LOCATE_* rationale. */
+  private locate(): boolean {
+    const now = this.now();
+    if (this.locateAttempts >= LOCATE_MAX_ATTEMPTS || now < this.nextLocateAt) return false;
+    this.locateAttempts++;
+    if (this.locateAttempts >= LOCATE_FAST_ATTEMPTS) {
+      const backoff = (this.opts.pollMs ?? POLL_MS) * 2 ** (this.locateAttempts - LOCATE_FAST_ATTEMPTS + 1);
+      this.nextLocateAt = now + Math.min(backoff, LOCATE_BACKOFF_MAX_MS);
+    }
+    this.filePath = locateRollout(this.opts.sessionsRoot ?? codexSessionsRoot(), this.opts.convId);
+    return this.filePath !== null;
+  }
+
+  /** Forget everything read from the current binding (a new file, or the old
+   *  one truncated/rewritten): the parse restarts from byte 0. firstSeen
+   *  SURVIVES — its keys are content-addressed, so re-parsed identical answers
+   *  stay settled while new content at a reused slot still emits. */
+  private resetReadState(): void {
+    this.pairing = new RolloutPairing();
+    this.answers = [];
+    this.readOffset = 0;
+    this.carry = Buffer.alloc(0);
+    this.lastSize = -1;
+  }
+
+  /** Read [readOffset, size) and fold its complete lines into `answers`.
+   *  False if the read failed — state is untouched, the poll retries. */
+  private readNewBytes(size: number): boolean {
+    if (size <= this.readOffset) return true;
+    let buf: Buffer;
+    try {
+      const fd = openSync(this.filePath!, "r");
+      try {
+        buf = Buffer.alloc(size - this.readOffset);
+        let got = 0;
+        while (got < buf.length) {
+          const n = readSync(fd, buf, got, buf.length - got, this.readOffset + got);
+          if (n <= 0) break; // EOF early: the file changed under us — keep what we got
+          got += n;
+        }
+        if (got < buf.length) buf = buf.subarray(0, got);
+      } finally {
+        closeSync(fd);
+      }
+    } catch {
+      return false;
+    }
+    this.readOffset += buf.length;
+    const chunk = this.carry.length ? Buffer.concat([this.carry, buf]) : buf;
+    // Split at the last newline: complete lines parse now, the partial tail is
+    // carried to the next read. Split as BYTES, not text — decoding the halves
+    // of a UTF-8 character separately would corrupt it (\n can never be a byte
+    // of a multi-byte character, so the split itself is always char-safe).
+    const nl = chunk.lastIndexOf(0x0a);
+    this.carry = Buffer.from(chunk.subarray(nl + 1)); // copy — don't pin the big chunk
+    if (nl >= 0) this.ingest(chunk.subarray(0, nl + 1).toString("utf8"));
+    this.tryFlushCarry();
+    return true;
+  }
+
+  /** Rollout lines are newline-terminated (verified against real files), but
+   *  if a finished line ever lands without one, don't sit on its answer until
+   *  the next write: consume the carry now iff it already decodes losslessly
+   *  and parses as a JSON object line. A mid-write partial fails one of those
+   *  checks and stays carried. */
+  private tryFlushCarry(): void {
+    if (!this.carry.length) return;
+    const text = this.carry.toString("utf8");
+    if (!text.startsWith("{") || text.includes("\uFFFD")) return; // not a whole line / split UTF-8 char
+    try {
+      JSON.parse(text);
+    } catch {
+      return;
+    }
+    this.carry = Buffer.alloc(0);
+    this.ingest(text);
+  }
+
+  private ingest(text: string): void {
+    for (const ans of this.pairing.push(text)) {
+      const hash = createHash("sha256").update(ans.answer).digest("hex").slice(0, 16);
+      this.answers.push({ ans, key: `${this.answers.length}:${ans.promptKey}:${hash}` });
+    }
   }
 
   private checkRetire(now = this.now()): void {

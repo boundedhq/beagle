@@ -74,20 +74,31 @@ function parseRollout(text: string): RolloutItem[] {
 // Walk the rollout in order; pair each assistant answer with the nearest
 // preceding real user prompt (validated 2/2 in the spike). An answer with no
 // preceding prompt, or with no text (a tool-only turn), yields nothing.
-export function answersFromText(text: string): RolloutAnswer[] {
-  let currentKey: string | null = null;
-  const out: RolloutAnswer[] = [];
-  for (const item of parseRollout(text)) {
-    const prompt = realPromptText(item);
-    if (prompt !== null) {
-      currentKey = codexPromptKey(prompt);
-      continue;
+//
+// Stateful so the tailer can feed the file incrementally (only the new bytes
+// each poll): the nearest-preceding-prompt state must survive across chunks —
+// a prompt in one read keys an answer that arrives in a later one. push()
+// takes whole lines only; the caller carries any partial trailing line.
+export class RolloutPairing {
+  private currentKey: string | null = null;
+  push(text: string): RolloutAnswer[] {
+    const out: RolloutAnswer[] = [];
+    for (const item of parseRollout(text)) {
+      const prompt = realPromptText(item);
+      if (prompt !== null) {
+        this.currentKey = codexPromptKey(prompt);
+        continue;
+      }
+      const answer = assistantText(item);
+      if (answer && this.currentKey) {
+        const ms = item.timestamp ? Date.parse(item.timestamp) : NaN;
+        out.push({ promptKey: this.currentKey, answer, tsMs: Number.isFinite(ms) ? ms : undefined });
+      }
     }
-    const answer = assistantText(item);
-    if (answer && currentKey) {
-      const ms = item.timestamp ? Date.parse(item.timestamp) : NaN;
-      out.push({ promptKey: currentKey, answer, tsMs: Number.isFinite(ms) ? ms : undefined });
-    }
+    return out;
   }
-  return out;
+}
+
+export function answersFromText(text: string): RolloutAnswer[] {
+  return new RolloutPairing().push(text);
 }

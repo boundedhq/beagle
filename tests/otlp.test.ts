@@ -582,6 +582,33 @@ describe("Codex OTLP → Call mapping (Codex Mode B, codex.* schema)", () => {
     expect(two.length).toBe(2);
   });
 
+  test("convId-less tool_result chunks group within a scope, never across scopes", () => {
+    // Two exporters behind one collector can land in one batch as separate
+    // scopeLogs groups. With no conversation.id on either, a shared call_id
+    // used to key both into `::call-1` and concatenate one conversation's
+    // output into the other's row.
+    const scoped = (output: string) => ({
+      scopeLogs: [{ scope: { name: "codex_otel.log_only" }, logRecords: [
+        codexEvent("codex.tool_result", { call_id: "call-1", tool_name: "exec", output }),
+      ] }],
+    });
+    const calls = mapCodexOtlpToCalls({ resourceLogs: [scoped("from conv A"), scoped("from conv B")] });
+    expect(calls.length).toBe(2); // one row per conversation, not one merged row
+    const scans = calls.map((c) => decode(c.request.bodyBytes));
+    expect(scans.some((s) => s.includes("from conv A") && !s.includes("from conv B"))).toBe(true);
+    expect(scans.some((s) => s.includes("from conv B") && !s.includes("from conv A"))).toBe(true);
+    // Within ONE scope, convId-less chunks still reassemble (the split-secret
+    // guarantee does not regress for a single exporter that omits the id).
+    const oneScope = mapCodexOtlpToCalls(
+      codexLogs([
+        codexEvent("codex.tool_result", { call_id: "call-1", tool_name: "exec", output: "AKIAZQ3DRS" }),
+        codexEvent("codex.tool_result", { call_id: "call-1", tool_name: "exec", output: "TUVWXY2345" }),
+      ]),
+    );
+    expect(oneScope.length).toBe(1);
+    expect(decode(oneScope[0]!.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
+  });
+
   test("sse_event token counts attach to the conversation's prompt Call", () => {
     const calls = mapCodexOtlpToCalls(
       codexLogs([

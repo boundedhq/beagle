@@ -138,6 +138,10 @@ interface OtlpRecord {
   timeUnixNano?: string | number;
   observedTimeUnixNano?: string | number;
   startTimeUnixNano?: string | number;
+  /** Flatten-group ordinal (one per scopeLogs/scopeSpans array), stamped by
+   *  collectRecords — records in different groups come from different
+   *  exporters, so cross-record grouping must never span groups. */
+  gi?: number;
 }
 
 // Only these event types carry content we keep; everything else Claude Code
@@ -165,17 +169,26 @@ const arr = <T>(x: unknown): T[] => (Array.isArray(x) ? (x as T[]) : []);
 
 function collectRecords(payload: unknown): OtlpRecord[] {
   const out: OtlpRecord[] = [];
+  let gi = 0;
+  const push = (rec: OtlpRecord, group: number): void => {
+    // Guarded: a primitive in a logRecords array must stay a skipped record,
+    // not a TypeError that discards the whole batch.
+    if (rec && typeof rec === "object") rec.gi = group;
+    out.push(rec);
+  };
   const p = payload as { resourceLogs?: unknown; resourceSpans?: unknown };
   for (const rl of arr<Record<string, unknown>>(p?.resourceLogs)) {
     for (const sl of arr<Record<string, unknown>>(rl?.scopeLogs)) {
-      for (const rec of arr<OtlpRecord>(sl?.logRecords)) out.push(rec);
+      const g = gi++;
+      for (const rec of arr<OtlpRecord>(sl?.logRecords)) push(rec, g);
     }
   }
   // Spans kept as a forward-compat fallback: if a future client emits GenAI
   // spans instead of events, they flow through the same accumulator.
   for (const rs of arr<Record<string, unknown>>(p?.resourceSpans)) {
     for (const ss of arr<Record<string, unknown>>(rs?.scopeSpans)) {
-      for (const span of arr<OtlpRecord>(ss?.spans)) out.push(span);
+      const g = gi++;
+      for (const span of arr<OtlpRecord>(ss?.spans)) push(span, g);
     }
   }
   return out;
@@ -445,7 +458,12 @@ function mapCodexRecords(records: OtlpRecord[]): OtelCall[] {
         const output = str(a.get("output")) ?? "";
         if (!args && !output) continue;
         const callId = str(a.get("call_id"));
-        const key = callId ? `${convId ?? ""}::${callId}` : `orphan-${i}`;
+        // When the record carries no conversation.id, scope the grouping to the
+        // record's flatten group instead of a shared "" namespace: under "",
+        // two convId-less conversations in one batch (e.g. two exporters behind
+        // one collector) that reused a call_id concatenated their outputs into
+        // one row. Chunks of one call always share a scope, so reassembly holds.
+        const key = callId ? `${convId ?? `#g${rec.gi ?? i}`}::${callId}` : `orphan-${i}`;
         let g = tools.get(key);
         if (!g) {
           g = { order: i, ts, convId, model, tool, args: [], output: "" };
