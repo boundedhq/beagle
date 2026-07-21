@@ -798,6 +798,19 @@ export class Daemon {
       // Already proven by the bytes, or a repeat within the flattened text.
       if (!value || secretForms(value).some((form) => seen.has(form))) continue;
       seen.add(value);
+      // The cap applies to what flattening CREATED, not to everything it
+      // revealed. A structured match whose VALUE still trips the same detector
+      // on its own owes nothing to the adjacency — `AKIA` + 16 uppercase alnum
+      // is a credential wherever it appears, and no benign message boundary
+      // manufactures one. Demoting those would silence a byte-proven key. So
+      // probe the value alone: it keeps its tier only if it proves itself, and
+      // a match that needed the surrounding keyword (aws-secret-access-key
+      // reaching across a boundary for a 40-char hash) is demoted as before.
+      // Probed only for structured findings — the quiet ones are capped to the
+      // tier they already have, so the extra scan would buy nothing.
+      const tier = f.tier === "structured" && (await this.provesItself(value, f.detector))
+        ? "structured"
+        : "possible";
       // Re-anchor onto the stored body where it genuinely holds the value: in
       // the keyword-adjacency case only the CONTEXT crossed a message boundary,
       // so the value itself is one contiguous run present in the bytes, and the
@@ -806,13 +819,23 @@ export class Daemon {
       // honest offset — mark it derived and record no span.
       const at = body.indexOf(value);
       findings.push(
-        at >= 0
-          ? { ...f, tier: "possible", start: at, end: at + value.length }
-          : { ...f, tier: "possible", derived: true },
+        at >= 0 ? { ...f, tier, start: at, end: at + value.length } : { ...f, tier, derived: true },
       );
       values.push({ value, type: f.secretType });
     }
     return { state: result.state, findings, values };
+  }
+
+  /** Whether a matched value is a credential ON ITS OWN — the same detector
+   *  still fires, at the structured tier, with every byte of context removed.
+   *  This is what separates a secret flattening REVEALED from one it invented:
+   *  a self-proving shape (AKIA…, ghp_…, a PEM block) cannot be manufactured by
+   *  joining benign messages, while a `keyword <separator> value` match can be,
+   *  and only the latter needs demoting. Scanned through the same worker, so a
+   *  pathological value is still bounded by the scan deadline. */
+  private async provesItself(value: string, detector: string): Promise<boolean> {
+    const probe = await this.scanHost.scan(new TextEncoder().encode(value), {});
+    return probe.findings.some((p) => p.detector === detector && p.tier === "structured");
   }
 
   private emitAlert(a: AlertEvent): void {

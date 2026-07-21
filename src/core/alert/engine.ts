@@ -40,7 +40,7 @@ export class AlertEngine {
     // enriches the human-facing copy, built downstream.
     for (const f of findings) {
       const seenBefore = this.store.fingerprintKnown(f.fingerprint);
-      const { fresh, eventId } = this.store.upsertLeakEvent({
+      const { fresh, upgraded, eventId } = this.store.upsertLeakEvent({
         fingerprint: f.fingerprint,
         sessionId: call.sessionId,
         detector: f.detector,
@@ -55,7 +55,12 @@ export class AlertEngine {
         spanStart: f.derived ? undefined : f.start,
         spanEnd: f.derived ? undefined : f.end,
       });
-      if (fresh && f.tier === "structured") {
+      // Fresh, or newly PROVEN: a quiet sighting files the event first (a
+      // shape rule, or a finding only a flattened rendering revealed), and the
+      // structured proof can arrive a turn later. Without the upgrade arm that
+      // proof is silently swallowed — the row exists, so it is never fresh
+      // again — and the loudest thing Beagle knows goes unreported.
+      if ((fresh || upgraded) && f.tier === "structured") {
         this.sink({
           eventId,
           callId: call.id,

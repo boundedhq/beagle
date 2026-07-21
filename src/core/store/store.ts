@@ -294,22 +294,42 @@ export class Store {
     );
   }
 
-  upsertLeakEvent(input: LeakEventInput): { fresh: boolean; eventId: string } {
+  upsertLeakEvent(input: LeakEventInput): { fresh: boolean; upgraded: boolean; eventId: string } {
     return this.inTx(() => this.upsertLeakEventInner(input));
   }
 
-  private upsertLeakEventInner(input: LeakEventInput): { fresh: boolean; eventId: string } {
-    const existing = this.db.get<{ id: string }>(
-      `SELECT id FROM leak_events WHERE fingerprint=? AND destination=? AND session_id=?`,
+  private upsertLeakEventInner(input: LeakEventInput): { fresh: boolean; upgraded: boolean; eventId: string } {
+    const existing = this.db.get<{ id: string; confidence_tier: string }>(
+      `SELECT id, confidence_tier FROM leak_events WHERE fingerprint=? AND destination=? AND session_id=?`,
       [input.fingerprint, input.destination, input.sessionId],
     );
     let eventId: string;
     let fresh: boolean;
+    // A quiet event must never PERMANENTLY claim a fingerprint: dedup keys on
+    // (fingerprint, destination, session) and a conflict was previously a
+    // pure occurrence bump, so the first sighting decided the tier forever.
+    // Once a later sighting PROVES the same secret at the structured tier —
+    // the same bytes, now matched by a loud rule — the event is promoted and
+    // reported as promoted, so the alert the proof earns still fires (R5/R6:
+    // loud is what the bytes prove, and proof can arrive on the second turn).
+    let upgraded = false;
     if (existing) {
       eventId = existing.id;
       fresh = false;
-      this.db.run(`UPDATE leak_events SET occurrences = occurrences + 1, last_ts=? WHERE id=?`,
-        [input.ts, eventId]);
+      upgraded = existing.confidence_tier !== "structured" && input.confidenceTier === "structured";
+      if (upgraded) {
+        // The loud detector names the secret better than the quiet one that
+        // got there first (aws-secret-shape → aws-secret-access-key), so the
+        // identification is promoted with the tier.
+        this.db.run(
+          `UPDATE leak_events SET occurrences = occurrences + 1, last_ts=?, confidence_tier=?,
+             detector=?, secret_type=?, severity=? WHERE id=?`,
+          [input.ts, input.confidenceTier, input.detector, input.secretType, input.severity, eventId],
+        );
+      } else {
+        this.db.run(`UPDATE leak_events SET occurrences = occurrences + 1, last_ts=? WHERE id=?`,
+          [input.ts, eventId]);
+      }
     } else {
       eventId = ulid(input.ts);
       fresh = true;
@@ -325,7 +345,7 @@ export class Store {
       `INSERT OR IGNORE INTO leak_occurrences (event_id, exchange_id, span_start, span_end) VALUES (?,?,?,?)`,
       [eventId, input.callId, input.spanStart ?? null, input.spanEnd ?? null],
     );
-    return { fresh, eventId };
+    return { fresh, upgraded, eventId };
   }
 
   /** Read-only DB handle for non-core query faces (viewer feed, CLI).

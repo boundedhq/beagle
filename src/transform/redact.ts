@@ -82,9 +82,26 @@ function jsonUnescaped(value: string): string | null {
 // form the direction that scrubs body-from-derived silently no-ops, the exact
 // failure jsonUnescaped fixes in the opposite direction.
 function jsonEscaped(value: string): string | null {
+  // Cheap reject first, mirroring jsonUnescaped's `includes("\\")`: only a
+  // quote, a backslash, a control char or a lone surrogate can change under
+  // stringify, and the overwhelming majority of matched values (an API key, a
+  // token) hold none of them. Without it the stringify runs for every value on
+  // every derived-text scrub, and buildSummary scrubs once per message AND
+  // once per action — the same per-call cost the lazy hashing below avoids.
+  if (!/["\\\u0000-\u001f\ud800-\udfff]/.test(value)) return null;
   const out = JSON.stringify(value).slice(1, -1); // drop the wrapping quotes
   return out === value ? null : out; // nothing needed escaping
 }
+
+// The object boundary between two messages of a serialized list — the run
+// flattenPromptText drops. A rule whose match can cross ANY bytes (private-key
+// spans `[\s\S]{0,4096}?`) matches straight through it, so the raw bytes and
+// the flattened rendering yield the SAME key as two different strings, hashing
+// to two fingerprints and filing two events for one secret. Reversing the drop
+// is what lets one secret read as one secret. Structural and bounded: `[^{}]*?`
+// cannot span another object, and a value contains this run only if it really
+// did span structure.
+const STRUCTURE_RUN = /"\s*\}\s*,\s*\{[^{}]*?"(?:content|text)"\s*:\s*"/g;
 
 /** Every encoding a matched value can appear in: as read from raw serialized
  *  bytes (a newline is the two-char escape `\n`) and as read from the parsed
@@ -99,9 +116,27 @@ function jsonEscaped(value: string): string | null {
  *  predicate would be quadratic in a number an adversarial body controls — on
  *  the daemon thread, outside the scan worker's deadline. */
 export function secretForms(value: string): string[] {
-  const forms = [value];
-  for (const f of [jsonUnescaped(value), jsonEscaped(value)]) if (f !== null) forms.push(f);
-  return forms;
+  const forms = new Set<string>();
+  // Structure first, then escaping — the two COMPOSE: a PEM that spanned two
+  // messages carries both the object-boundary run and `\n` escapes, and only
+  // dropping the run and then decoding reproduces what the rendering shows.
+  // Messages join with "\n" and content blocks with "", so both readings are
+  // offered rather than guessing which kind of boundary was crossed.
+  //
+  // The message join is substituted as the ESCAPED `\n`, not a real newline,
+  // precisely so the decode can still run: the base has to stay a well-formed
+  // JSON string body, and a raw newline inside one makes JSON.parse reject it —
+  // which would silently drop the decoded form and leave the two readings of
+  // one PEM looking like two secrets, the whole point of this.
+  STRUCTURE_RUN.lastIndex = 0; // a /g regex carries state across test() calls
+  const bases = STRUCTURE_RUN.test(value)
+    ? [value, value.replace(STRUCTURE_RUN, "\\n"), value.replace(STRUCTURE_RUN, "")]
+    : [value];
+  for (const base of bases) {
+    forms.add(base);
+    for (const f of [jsonUnescaped(base), jsonEscaped(base)]) if (f !== null) forms.add(f);
+  }
+  return [...forms];
 }
 
 // Scrub known secret values by literal match wherever they appear — used on
@@ -217,5 +252,13 @@ export function applyCaptureRedaction(o: {
   // highlights them.
   const requestBody = redactValues(req.bytes, values) ?? req.bytes;
   responseBody = redactValues(responseBody, values);
-  return { redacted: true, heldOut: false, requestBody, responseBody, values };
+  // Reported from what actually CHANGED, not from "there was something to try".
+  // An extraValues-only pass can legitimately rewrite nothing — a value the
+  // flattening manufactured was never in these bytes to begin with — and
+  // claiming otherwise would be a false badge on the row ("secrets masked in
+  // storage") and, worse, would send the viewer down its placeholder-scanning
+  // branch on a body that holds no placeholders. Both helpers return the input
+  // reference untouched when they find nothing, so identity is the test.
+  const redacted = requestBody !== o.requestBytes || responseBody !== o.responseBody;
+  return { redacted, heldOut: false, requestBody, responseBody, values };
 }

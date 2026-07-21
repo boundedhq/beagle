@@ -365,6 +365,45 @@ describe("Leak events", () => {
     store.close();
   });
 
+  test("a quiet event is PROMOTED when the same secret is later proven structured", () => {
+    // Dedup keys on (fingerprint, destination, session), so without this the
+    // first sighting decides the tier permanently: a quiet shape rule — or a
+    // finding only a flattened rendering revealed — files the row, and the
+    // structured proof that arrives a turn later is never `fresh` again and
+    // alerts nobody. `upgraded` is what lets the alert engine fire on proof.
+    const store = Store.open(dir);
+    const call = fakeCall();
+    store.insertCall(call);
+    const base = {
+      fingerprint: "fp-up", sessionId: "sess-1", destination: "anthropic/m",
+      callId: call.id, ts: Date.now(),
+    };
+    const quiet = store.upsertLeakEvent({
+      ...base, detector: "aws-secret-shape", secretType: "aws-secret-shape",
+      severity: "medium", confidenceTier: "possible",
+    });
+    expect(quiet).toMatchObject({ fresh: true, upgraded: false });
+    const proven = store.upsertLeakEvent({
+      ...base, detector: "aws-secret-access-key", secretType: "aws-secret-access-key",
+      severity: "high", confidenceTier: "structured",
+    });
+    expect(proven).toMatchObject({ fresh: false, upgraded: true });
+    const events = listLeakEvents(store);
+    expect(events.length).toBe(1); // promoted in place, never duplicated
+    expect(events[0]?.confidenceTier).toBe("structured");
+    // The loud detector names the secret better than the shape rule that filed
+    // it first, so the identification is promoted with the tier.
+    expect(events[0]?.secretType).toBe("aws-secret-access-key");
+    // Promotion is one-way: a later quiet sighting must not demote the proof.
+    const after = store.upsertLeakEvent({
+      ...base, detector: "aws-secret-shape", secretType: "aws-secret-shape",
+      severity: "medium", confidenceTier: "possible",
+    });
+    expect(after.upgraded).toBe(false);
+    expect(listLeakEvents(store)[0]?.confidenceTier).toBe("structured");
+    store.close();
+  });
+
   test("same fingerprint, new destination is a fresh event", () => {
     const store = Store.open(dir);
     const call = fakeCall();

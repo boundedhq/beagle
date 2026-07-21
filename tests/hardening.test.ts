@@ -174,6 +174,37 @@ describe("redact-on-capture (R11)", () => {
     expect(out.values).toHaveLength(1); // handed back for the derived surfaces
   });
 
+  test("redacted is false when nothing in the bytes actually changed", () => {
+    // A value flattening MANUFACTURED (fused from two content blocks) was never
+    // in these bytes, so the pass rewrites nothing. Claiming `redacted` anyway
+    // put a false "secrets masked in storage" line on the row and sent the
+    // viewer down its placeholder-scanning branch on a body with no
+    // placeholders. The flag means "the stored content was rewritten".
+    const body = '[{"role":"user","content":[{"text":"token: 8fK2mQ9xR"},{"text":"4tL7nW3vB6zY1cH5"}]}]';
+    const out = applyCaptureRedaction({
+      incomplete: false, requestBytes: enc(body), requestFindings: [], responseBody: null,
+      extraValues: [{ value: "8fK2mQ9xR4tL7nW3vB6zY1cH5", type: "generic-api-key" }],
+    });
+    expect(out.redacted).toBe(false);
+    expect(dec(out.requestBody)).toBe(body); // untouched, and it says so
+    expect(out.values).toHaveLength(1); // still handed back for the derived surfaces
+  });
+
+  test("secretForms equates the two readings of a secret that SPANNED structure", () => {
+    // private-key matches across any bytes, so the raw form carries the literal
+    // object boundary between two messages while the flattened rendering has it
+    // removed and its escapes decoded. Both transforms have to compose, and the
+    // join has to be substituted in ESCAPED form — a real newline inside the
+    // base makes JSON.parse reject it, silently dropping the decoded form.
+    const raw =
+      '-----BEGIN RSA PRIVATE KEY-----\\nMIIEowIBAAKCAQEAsplitAcross"},{"role":"user","content":"MessagesXYZ\\n-----END RSA PRIVATE KEY-----';
+    const flattened =
+      "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAsplitAcross\nMessagesXYZ\n-----END RSA PRIVATE KEY-----";
+    expect(secretForms(raw)).toContain(flattened);
+    // A value with no structural run is unaffected — no spurious extra forms.
+    expect(secretForms("AKIAZQ3DRSTUVWXY2345")).toEqual(["AKIAZQ3DRSTUVWXY2345"]);
+  });
+
   test("extraValues survive alongside a response-side finding", () => {
     // Regression: the response branch rebuilds the value list, and rebuilding it
     // from the request findings alone would drop the derived values silently —

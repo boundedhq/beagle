@@ -262,6 +262,69 @@ describe("Mode B end-to-end through the daemon", () => {
     store.close();
   });
 
+  test("a quiet flatten-only finding does not silence the later proof of the same secret", async () => {
+    // The trap the tier cap sets. Leak events dedup on (fingerprint,
+    // destination, session) and a conflict was a pure occurrence bump, so the
+    // FIRST sighting decided the tier forever. A flatten-only finding files the
+    // fingerprint quietly, and the same key sent plainly a turn later — now
+    // byte-proven, structured — found its row already there, never fresh again,
+    // and alerted NOBODY. Strictly worse than before the derived scan existed:
+    // that turn used to be the first sighting and did alert.
+    const value = "0123456789abcdef0123456789abcdef01234567";
+    const joined = JSON.stringify([
+      { role: "user", content: "how do I configure aws" },
+      { role: "user", content: value },
+    ]);
+    await post(otlpBody(token, joined, "otel-conv-upgrade", null));
+    await settled(daemon.socketPath);
+    expect(alerts).toEqual([]); // quiet, as the cap intends
+    // Same secret, same session, now proven by the bytes themselves.
+    await post(otlpBody(token, `aws_secret_access_key = ${value}`, "otel-conv-upgrade", null));
+    await settled(daemon.socketPath, 2);
+    expect(alerts.length).toBe(1); // the proof still gets its alert
+    const store = Store.openReadOnly(stateDir);
+    const events = listLeakEvents(store);
+    expect(events.length).toBe(1); // one secret, one row — promoted, not duplicated
+    expect(events[0]!.confidenceTier).toBe("structured");
+    store.close();
+  });
+
+  test("a self-proving secret fused across content blocks stays LOUD", async () => {
+    // The cap is for what flattening CREATED, not for everything it revealed.
+    // `AKIA` + 16 uppercase alnum is a credential wherever it appears — no
+    // keyword, no separator, nothing a benign message boundary can manufacture
+    // — so demoting it would silence a real key on the word of a heuristic that
+    // was only ever evidenced against aws-secret-access-key.
+    const prompt = JSON.stringify([
+      { role: "user", content: [{ text: "here you go AKIAZQ3DR" }, { text: "STUVWXY2345" }] },
+    ]);
+    await post(otlpBody(token, prompt, "otel-conv-selfproving", null));
+    await settled(daemon.socketPath);
+    expect(alerts.length).toBe(1);
+    expect(alerts[0]!.secretType).toBe("aws-access-key-id");
+    const store = Store.openReadOnly(stateDir);
+    expect(listLeakEvents(store)[0]!.confidenceTier).toBe("structured");
+    store.close();
+  });
+
+  test("one PEM spanning two messages is ONE leak, not one per reading", async () => {
+    // private-key matches across ANY bytes (`[\s\S]{0,4096}?`), so it fires on
+    // the raw serialized form — value carrying the literal `"},{"role":…` — AND
+    // on the flattened rendering, where that run is gone. Two strings, two
+    // fingerprints, one key. Escape-only comparison cannot equate them; the
+    // structural form is what collapses the two readings back into one secret.
+    const prompt = JSON.stringify([
+      { role: "user", content: "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAsplitAcross" },
+      { role: "user", content: "MessagesXYZ\n-----END RSA PRIVATE KEY-----" },
+    ]);
+    await post(otlpBody(token, prompt, "otel-conv-pem-split", null));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    expect(listLeakEvents(store).length).toBe(1);
+    expect(alerts.length).toBe(1); // and ONE notification, not one per reading
+    store.close();
+  });
+
   test("a benign message boundary cannot manufacture an OS alert", async () => {
     // The cost side of scanning derived text, and the reason flatten-only
     // findings are capped at the quiet tier. Flattening puts a bare "aws" next
