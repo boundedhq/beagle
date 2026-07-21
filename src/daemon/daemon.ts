@@ -1206,6 +1206,9 @@ export class Daemon {
             existing ? `"${firstLine(existing, 40)}" → ${firstLine(summary, 80)}` : summary,
           redacted,
           responseBody: redaction ? redaction.responseBody : (call.response.bodyBytes ?? null),
+          // Rollout answers grow while their turn runs — grow-only upsert,
+          // routed to the right same-key row by the turn ordinal.
+          extend: fromRollout ? { ordinal: call.promptOrdinal ?? 0 } : undefined,
         })
       ) {
         continue;

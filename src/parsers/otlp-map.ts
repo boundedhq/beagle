@@ -48,6 +48,10 @@ export interface OtelCall extends Call {
    *  treats it as attach-or-DROP (never a standalone row) and keeps the answer
    *  out of the outbound search index. See codex-rollout-tailer.ts / design §6.1. */
   origin?: "codex-rollout";
+  /** Which same-key turn a rollout answer belongs to (0-based); promptId for
+   *  Codex is hash(prompt), so repeated identical prompts need this to reach
+   *  their own rows. Rides with origin='codex-rollout' only. */
+  promptOrdinal?: number;
 }
 
 function attrMap(attrs: Array<{ key: string; value: AttrValue }> | undefined): Map<string, AttrValue> {

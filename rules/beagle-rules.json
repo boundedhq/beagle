@@ -251,8 +251,8 @@
     },
     {
       "id": "generic-api-key",
-      "description": "Generic secret assignment (entropy-gated; quiet tier only; vendor test-mode keys excluded)",
-      "regex": "(?:api[_-]?key|apikey|key|secret|token|password|passwd|pwd)[\"':=\\s]{1,5}(?!(?:sk|rk|pk)_test_)([A-Za-z0-9+/_\\-.=]{16,64})",
+      "description": "Generic secret assignment (entropy-gated; quiet tier only; vendor test-mode keys excluded). A value that is ENTIRELY a lowercase dotted identifier path ([a-z0-9_-] segments joined by dots, ending at a non-value char) is suppressed: documentation that DESCRIBES config keys is a key: \"name\" farm whose dotted names routinely clear the entropy gate (a fetched Codex config-reference page fired this rule nine times on names like memories.disable_on_external_context), while real key material essentially always carries case mixing or symbols outside [a-z0-9_-.]. The guard sits in a (?-i:…) group because the rule is i-flagged: case-folded, 'lowercase dotted path' would swallow every dotted token — a JWT's three base64url segments are exactly dot-joined [A-Za-z0-9_-] runs. The tail lookahead keeps the guard whole-value: a dotted lowercase PREFIX with secret material after it (prod.api.zQ3k…) still matches, because any parse of the identifier shape ends at a value-class char and the inner lookahead fails. Versions (1.2.3-alpha.4) and bare hostnames fall out of the same shape, deliberately: names, not secrets.",
+      "regex": "(?:api[_-]?key|apikey|key|secret|token|password|passwd|pwd)[\"':=\\s]{1,5}(?!(?:sk|rk|pk)_test_)(?!(?-i:(?:[a-z0-9_-]+\\.)+[a-z0-9_-]+)(?![A-Za-z0-9+/_\\-.=]))([A-Za-z0-9+/_\\-.=]{16,64})",
       "flags": "gi",
       "keywords": ["key", "secret", "token", "password", "passwd", "pwd"],
       "secretGroup": 1,

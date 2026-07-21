@@ -263,6 +263,12 @@ export class Store {
     composeSummary?: (existing: string | null) => string | null;
     redacted?: boolean;
     responseBody: Uint8Array | null;
+    /** Codex rollout answers GROW while their turn runs (preamble → … → final
+     *  reply), so their attach is a grow-only upsert: a longer body for the
+     *  same turn replaces the shorter one, an equal/shorter re-emit drops as
+     *  done. `ordinal` picks the Nth same-key row — hash(prompt) is the only
+     *  join key, so repeated identical prompts share it. */
+    extend?: { ordinal: number };
   }): boolean {
     return this.inTx(() => {
       // The turn's EARLIEST response-less row — the one carrying the question,
@@ -278,15 +284,36 @@ export class Store {
       // prompt re-typed), and taking it would both mis-attribute this answer
       // and orphan that turn's real one — refusal fails safe (no stitch, never
       // a wrong one; see ATTACH_MAX_SKEW_MS).
-      const target = this.db.get<{ id: string; tokens_in: number | null; tokens_out: number | null; summary: string | null }>(
-        `SELECT id, tokens_in, tokens_out, summary FROM exchanges
-         WHERE session_id=? AND prompt_key=? AND source='otel'
-           AND (bytes_resp IS NULL OR bytes_resp=0) AND ts_request <= ?
-         ORDER BY ts_request ASC, id ASC LIMIT 1`,
-        [input.sessionId, input.promptKey, input.tsResponse + ATTACH_MAX_SKEW_MS],
-      );
+      //
+      // Extend mode (rollout answers) swaps the bytes_resp guard for the
+      // grow-only rule below — same-turn growth IS the second response — and
+      // addresses the row by turn ordinal instead of "earliest unanswered":
+      // the grown answer's own row is already answered, and with repeated
+      // identical prompts "earliest" would land every growth on turn one. The
+      // staleness bound stays: a historical answer must still never claim a
+      // NEWER re-ask's row, ordinal alignment or not.
+      type Target = { id: string; tokens_in: number | null; tokens_out: number | null; summary: string | null; resp_len: number | null };
+      const target = input.extend
+        ? this.db.get<Target>(
+            `SELECT e.id, e.tokens_in, e.tokens_out, e.summary, length(p.response_body) AS resp_len
+             FROM exchanges e LEFT JOIN payloads p ON p.exchange_id = e.id
+             WHERE e.session_id=? AND e.prompt_key=? AND e.source='otel' AND e.ts_request <= ?
+             ORDER BY e.ts_request ASC, e.id ASC LIMIT 1 OFFSET ?`,
+            [input.sessionId, input.promptKey, input.tsResponse + ATTACH_MAX_SKEW_MS, input.extend.ordinal],
+          )
+        : this.db.get<Target>(
+            `SELECT id, tokens_in, tokens_out, summary, NULL AS resp_len FROM exchanges
+             WHERE session_id=? AND prompt_key=? AND source='otel'
+               AND (bytes_resp IS NULL OR bytes_resp=0) AND ts_request <= ?
+             ORDER BY ts_request ASC, id ASC LIMIT 1`,
+            [input.sessionId, input.promptKey, input.tsResponse + ATTACH_MAX_SKEW_MS],
+          );
       if (!target) return false;
-      const summary = input.composeSummary ? input.composeSummary(target.summary) : null;
+      const have = target.resp_len ?? 0;
+      if (input.extend && (input.responseBody?.byteLength ?? 0) <= have) return true; // re-emit or stale shorter view — keep what we have
+      // Compose only when the row first gains a response; re-composing on
+      // growth would nest the already-combined "q" → a line inside itself.
+      const summary = input.composeSummary && have === 0 ? input.composeSummary(target.summary) : null;
       this.db.run(
         `UPDATE exchanges SET ts_response=?, model=COALESCE(?, model),
            tokens_in=?, tokens_out=?, bytes_resp=?, summary=COALESCE(?, summary),

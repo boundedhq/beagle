@@ -122,6 +122,7 @@ function buildResponseCall(convId: string, ans: RolloutAnswer, fallbackTs: numbe
     meta: { tsRequest: ts, tsResponse: ts },
     convId,
     promptId: ans.promptKey,
+    promptOrdinal: ans.ordinal,
   };
 }
 
@@ -233,11 +234,15 @@ export class CodexRolloutTailer {
 
     // Emit each answer once when first seen, and re-emit it within the retry
     // window so a raced answer (its turn row not yet written) lands once the
-    // row appears. attach is idempotent — a re-emit for an already-answered
-    // turn simply drops in the daemon (design §5.1/§6.1a), and one racing a
-    // NEWER identical-prompt turn row (same text re-typed, or any historical
-    // answer a recreated tailer re-reads) is refused by the store's
-    // stale-attach bound rather than claiming that turn's row.
+    // row appears. A turn's answer GROWS as codex narrates (preamble → … →
+    // final reply); the pairing re-yields the merged whole, which hashes to a
+    // FRESH content key here — so growth emits again with its own retry
+    // window, and the store's grow-only extend replaces the shorter view.
+    // Attach stays idempotent — a verbatim re-emit compares equal-length and
+    // drops in the store (design §5.1/§6.1a), and one racing a NEWER
+    // identical-prompt turn row (same text re-typed, or any historical answer
+    // a recreated tailer re-reads) is refused by the store's stale-attach
+    // bound and the turn ordinal rather than claiming that turn's row.
     const window = this.opts.retryWindowMs ?? RETRY_WINDOW_MS;
     const due: OtelCall[] = [];
     for (const { ans, key } of this.answers) {

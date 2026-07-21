@@ -397,6 +397,88 @@ describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
     ).toBe(false);
     store.close();
   });
+
+  // Rollout answers GROW while a codex turn runs (preamble → … → final reply),
+  // so their attach is a grow-only upsert instead of attach-once: a longer
+  // answer for the same turn replaces the shorter one, anything else drops.
+  describe("extend mode (codex rollout answers)", () => {
+    const attachExtend = (store: Store, body: string, opts: { ordinal?: number; ts?: number } = {}) =>
+      store.attachOtelResponse({
+        sessionId: "sess-1", promptKey: "prompt-1", tsResponse: opts.ts ?? Date.now(),
+        composeSummary: (existing) => (existing ? `"${existing}" → ${body}` : body),
+        responseBody: new TextEncoder().encode(body),
+        extend: { ordinal: opts.ordinal ?? 0 },
+      });
+
+    test("a longer answer for the same turn replaces the shorter one", () => {
+      const store = Store.open(dir);
+      const turn = promptRow();
+      store.insertCall(turn);
+      expect(attachExtend(store, "I’m checking the docs.")).toBe(true);
+      expect(attachExtend(store, "I’m checking the docs.\n\nThe real answer, at last.")).toBe(true);
+      const got = store.getCall(turn.id)!;
+      expect(new TextDecoder().decode(got.responseBody!)).toBe("I’m checking the docs.\n\nThe real answer, at last.");
+      expect(got.bytesResp).toBeGreaterThan("I’m checking the docs.".length);
+      store.close();
+    });
+
+    test("an equal or shorter re-emit is dropped as done (true), body untouched", () => {
+      const store = Store.open(dir);
+      const turn = promptRow();
+      store.insertCall(turn);
+      attachExtend(store, "the whole answer");
+      // Same length again (the tailer's retry window re-emits verbatim)…
+      expect(attachExtend(store, "the whole answer")).toBe(true);
+      // …and a shorter view must never roll the row back.
+      expect(attachExtend(store, "shorter")).toBe(true);
+      expect(new TextDecoder().decode(store.getCall(turn.id)!.responseBody!)).toBe("the whole answer");
+      store.close();
+    });
+
+    test("the summary composes ONCE, when the row first gains a response", () => {
+      const store = Store.open(dir);
+      const turn = promptRow();
+      store.insertCall(turn);
+      attachExtend(store, "preamble");
+      expect(store.getCall(turn.id)!.summary).toBe('"how does memory work?" → preamble');
+      attachExtend(store, "preamble\n\nthe real answer");
+      // The grown body replaced; the summary did NOT re-compose (which would
+      // nest the already-composed line inside itself).
+      const got = store.getCall(turn.id)!;
+      expect(new TextDecoder().decode(got.responseBody!)).toBe("preamble\n\nthe real answer");
+      expect(got.summary).toBe('"how does memory work?" → preamble');
+      store.close();
+    });
+
+    test("ordinal N targets the Nth row sharing the prompt key (repeated prompts)", () => {
+      const store = Store.open(dir);
+      const t0 = Date.now();
+      const first = promptRow({ id: ulid(t0), tsRequest: t0 });
+      const second = promptRow({ id: ulid(t0 + 5000), tsRequest: t0 + 5000 });
+      store.insertCall(first);
+      store.insertCall(second);
+      expect(attachExtend(store, "part two", { ordinal: 1, ts: t0 + 6000 })).toBe(true);
+      expect(attachExtend(store, "part one", { ordinal: 0, ts: t0 + 1000 })).toBe(true);
+      expect(new TextDecoder().decode(store.getCall(first.id)!.responseBody!)).toBe("part one");
+      expect(new TextDecoder().decode(store.getCall(second.id)!.responseBody!)).toBe("part two");
+      // An ordinal past the last row has no target: drop-and-retry, never a wrong row.
+      expect(attachExtend(store, "part three", { ordinal: 2, ts: t0 + 9000 })).toBe(false);
+      store.close();
+    });
+
+    test("the staleness bound still applies under extend: an old answer can't reach a newer re-ask's row", () => {
+      // Turn one's grown answer re-emitted late (recreated tailer) with its
+      // ordinal somehow aligned at 0 must not see rows created AFTER it —
+      // extend keeps the same ts_request bound the plain path has.
+      const store = Store.open(dir);
+      const t0 = Date.now();
+      const newer = promptRow({ id: ulid(t0 + 60_000), tsRequest: t0 + 60_000 });
+      store.insertCall(newer);
+      expect(attachExtend(store, "a historical answer", { ordinal: 0, ts: t0 })).toBe(false);
+      expect(store.getCall(newer.id)!.responseBody).toBe(null);
+      store.close();
+    });
+  });
 });
 
 describe("Leak events", () => {
