@@ -32,6 +32,78 @@ const STOPWORDS = ["example", "sample", "placeholder", "dummy", "xxxxxx", "chang
 
 const MAX_FINDINGS_PER_RULE = 500;
 
+// Bodies are scanned as raw wire bytes — nothing on the scan path decodes them
+// — so every secret arrives wrapped in however many layers of JSON string
+// escaping the client applied, and the rules see the ESCAPES, not the decoded
+// text. Two shapes were missed outright:
+//
+//   depth 1  {"content":"# creds\nAKIA…"}          wire: `\` `n` AKIA…
+//   depth 2  {"arguments":"{\"content\":\"…\\nAKIA…"}  wire: `\` `\` `n` AKIA…
+//
+// In both, the char immediately before the secret is `n` — a word char — so a
+// rule anchored `\b(AKIA…)` finds no boundary and reports nothing at all.
+// Depth 2 is not exotic: OpenAI-style tool calls put their arguments in a JSON
+// string nested inside the request JSON, so "the agent writes a .env file" —
+// the mainstream form of the leak this tool exists to catch — lands there.
+// Depth grows with relaying (a sub-agent forwarding a tool call adds a layer),
+// so nothing here assumes a maximum.
+//
+// Fixed by masking rather than by loosening the rules: an escape run is blanked
+// to spaces before matching, so the separator the rules already expect is
+// really there. Three properties make this safe:
+//   - Length is preserved, so match offsets still index the raw bytes that
+//     redaction splices and the store slices.
+//   - Masking only ever writes spaces, so it can add a boundary but never
+//     fabricate one inside a secret — no rule's charset contains a backslash,
+//     so no secret can span an escape run.
+//   - Every rule regex is left untouched. Anchoring rules with a leading
+//     lookaround instead costs ~100x scan time (V8 can no longer fast-scan for
+//     the literal prefix) and blows the R5 budget.
+//
+// The run is consumed ATOMICALLY — all consecutive backslashes, then one
+// escape char — which is what makes depth fall out for free. Pairing them off
+// left-to-right instead (the single-encoding reading, where `\\` is one
+// escaped backslash and the `n` after it is literal) is precisely what misses
+// depth 2. So the masked view deliberately takes the MAXIMALLY-DECODED reading
+// of every run.
+//
+// That reading cannot be the only one, because nothing on the wire tells an
+// escape apart from a literal backslash in a body that is not JSON:
+// `C:\creds\redis://u:pw@h/0` loses the `r` of `redis` and the high-severity
+// connection-string rule misses it, and `C:\\npm_A7hK…` loses the `n` of the
+// token. It also blanks the `t` of a literal `\token`, destroying the keyword
+// the prescan needs. That is why scan() runs the rules over BOTH the masked
+// and the unmasked view and unions the results — the two readings bracket an
+// ambiguity the bytes genuinely do not resolve.
+//
+// Only the escapes JSON actually defines are recognized. A backslash before
+// anything else is literal text — a Windows path, a regex, a LaTeX macro — and
+// blanking it would EAT the secret's own first character, turning a detection
+// into a miss.
+//
+// `\"` and `\/` are blanked even though their tail is already a non-word char,
+// because a keyword-adjacency rule matches a keyword, a short run of separator
+// chars, then the value: at depth 2, `"key":"…"` is on the wire as
+// `\"key\":\"…` and backslash is in no rule's separator class, so those rules
+// missed too. Blanking leaves `  key  :  …`, which they do match. Both chars
+// are non-word, so this only ever adds separators.
+const ESCAPE_RUN = /\\+(?:u[0-9a-fA-F]{4}|[bfnrt"/])?/g;
+
+// Hot path: an escape-dense 8 MiB body runs the replacer millions of times, so
+// blanking indexes a prebuilt string rather than allocating per match. Runs are
+// short in practice (2 for `\n`, 3 for `\\n`, 7 for `\\uXXXX`); the fallback
+// covers a pathological body padded with backslashes.
+const SPACES = "                ";
+
+export function maskJsonEscapes(text: string): string {
+  if (!text.includes("\\")) return text; // fast path: nothing to mask
+  return text.replace(ESCAPE_RUN, (run) => {
+    // A run with no escape char after it is literal text at every depth.
+    if (run.endsWith("\\")) return run;
+    return run.length <= SPACES.length ? SPACES.slice(0, run.length) : " ".repeat(run.length);
+  });
+}
+
 export function compileRules(specs: RuleSpec[], hmacKey: Uint8Array): CompiledRules {
   return {
     rules: specs.map((spec) => ({ spec, re: new RegExp(spec.regex, spec.flags ?? "g") })),
@@ -40,7 +112,29 @@ export function compileRules(specs: RuleSpec[], hmacKey: Uint8Array): CompiledRu
 }
 
 export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): Finding[] {
-  const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  const raw = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  const masked = maskJsonEscapes(raw);
+  // Both readings of the bytes, unioned — see ESCAPE_RUN for why neither alone
+  // is sound. Offsets agree because masking is length-preserving, so a finding
+  // from either view indexes the same raw bytes and dedupes by span. The second
+  // pass only runs when the views actually differ, i.e. when the body contains
+  // a real escape; a miss costs far more than the extra pass.
+  const findings = matchAll(raw, masked, ctx, compiled);
+  if (masked !== raw) {
+    // Keyed dedup, not a scan of `findings` per candidate: both views can hit
+    // the per-rule cap, and pairwise comparison would square that into a
+    // pathological body's cheapest way to burn the scan deadline.
+    const seen = new Set(findings.map((f) => `${f.start}:${f.end}:${f.detector}`));
+    for (const f of matchAll(raw, raw, ctx, compiled)) {
+      if (!seen.has(`${f.start}:${f.end}:${f.detector}`)) findings.push(f);
+    }
+  }
+  return suppressOverlaps(findings);
+}
+
+// Run every rule over `text` (one view of the body), reporting spans that index
+// `raw`. Split out of scan() only so both views share one implementation.
+function matchAll(raw: string, text: string, ctx: ScanCtx, compiled: CompiledRules): Finding[] {
   const lower = text.toLowerCase();
   const authNorm = ctx.authValue ? normalize(ctx.authValue) : undefined;
   const findings: Finding[] = [];
@@ -63,7 +157,18 @@ export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): 
     let m: RegExpExecArray | null;
     while (ruleFindings < MAX_FINDINGS_PER_RULE && (m = re.exec(text)) !== null) {
       if (m[0].length === 0) { re.lastIndex++; continue; } // zero-width guard
-      const secretRaw = m[spec.secretGroup] ?? m[0];
+      // Span the capture group, not the whole match: consumed leading
+      // delimiters and keyword prefixes must not leak into the span, or
+      // redact-on-capture splices them out too (e.g. eating a quote corrupts
+      // the stored JSON) and echo-scrubbing fails to match the bare secret.
+      // indexOf is exact when the group text appears once in the match; on a
+      // duplicate it still spans an identical occurrence of the same value.
+      const matched = m[spec.secretGroup] ?? m[0];
+      const start = m.index + m[0].indexOf(matched);
+      // Masking is length-preserving, so the span maps straight back onto the
+      // unmasked bytes — every gate below judges the value that really shipped,
+      // and the finding reports the bytes redaction will splice.
+      const secretRaw = raw.slice(start, start + matched.length);
       const secret = normalize(secretRaw);
       if (secret.length === 0) continue;
       const secretLower = secret.toLowerCase();
@@ -84,13 +189,6 @@ export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): 
         if (decoded.length < 8 || STOPWORDS.some((w) => decoded.toLowerCase().includes(w)) || !compiled.rules.some(({ spec: s, re: r }) =>
           s.tier === "structured" && !s.validators?.length && ((r.lastIndex = 0), r.test(decoded)))) continue;
       }
-      // Span the capture group, not the whole match: consumed leading
-      // delimiters and keyword prefixes must not leak into the span, or
-      // redact-on-capture splices them out too (e.g. eating a quote corrupts
-      // the stored JSON) and echo-scrubbing fails to match the bare secret.
-      // indexOf is exact when the group text appears once in the match; on a
-      // duplicate it still spans an identical occurrence of the same value.
-      const start = m.index + m[0].indexOf(secretRaw);
       ruleFindings++;
       findings.push({
         detector: spec.id,
@@ -106,9 +204,15 @@ export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): 
     }
   }
 
-  // Overlap suppression: a structured hit owns its span; possible-tier
-  // findings on the same bytes are noise (the generic rule re-matching an
-  // AWS key must not double-report).
+  return findings;
+}
+
+// Overlap suppression: a structured hit owns its span; possible-tier findings
+// on the same bytes are noise (the generic rule re-matching an AWS key must
+// not double-report). Runs on the UNION of both views, so a structured hit
+// found only in the raw view still silences a quiet-tier hit from the masked
+// one.
+function suppressOverlaps(findings: Finding[]): Finding[] {
   const structuredSpans = findings.filter((f) => f.tier === "structured");
   const result = findings.filter(
     (f) =>

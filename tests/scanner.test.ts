@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { compileRules, scan, shannonEntropy, luhnValid } from "../src/core/scanner/engine";
+import { compileRules, scan, shannonEntropy, luhnValid, maskJsonEscapes } from "../src/core/scanner/engine";
 import { loadRuleFile } from "../src/core/scanner/rules";
 import { readFileSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -160,6 +160,134 @@ describe("rule file integrity", () => {
     const pin = readFileSync("rules/beagle-rules.sha256", "utf8").trim();
     expect(() => loadRuleFile(raw, pin)).not.toThrow();
     expect(() => loadRuleFile(raw + " ", pin)).toThrow(/integrity|hash/i);
+  });
+});
+
+// Bodies are scanned as raw wire bytes, so every secret arrives wrapped in
+// however many layers of JSON string escaping the client applied. Each case
+// below states the WIRE bytes, because that — not the decoded value — is what
+// the rules actually see. `String.raw` keeps this honest: what you read is
+// byte-for-byte what is scanned.
+const AWS_KEY = "AKIAZQ3DRSTUVWXY2345";
+
+describe("JSON-escaped bodies (R5)", () => {
+  // Depth 1: an ordinary JSON body. A secret pasted at the start of a line is
+  // preceded on the wire by the two chars `\` `n` — whose `n` is a word char,
+  // so a `\b`-anchored rule finds no boundary.
+  test("single-encoded: secret first on a line", () => {
+    const body = String.raw`{"messages":[{"content":"# prod creds\n${AWS_KEY}\n"}]}`;
+    expect(body).toContain(String.raw`creds\n` + AWS_KEY);
+    expect(scanText(body).map((f) => f.secretType)).toContain("aws-access-key-id");
+  });
+
+  // Depth 2 — the shape this suite exists for. OpenAI puts tool-call arguments
+  // in a JSON *string* nested inside the request JSON, so a newline in a file
+  // the agent writes arrives as THREE chars: `\` `\` `n`. "Agent writes a .env
+  // file" is the mainstream form of exactly the leak beagle is for.
+  test("double-encoded: openai tool_calls[].function.arguments", () => {
+    const args = String.raw`{\"path\":\".env\",\"content\":\"# prod creds\\n${AWS_KEY}\\n\"}`;
+    const body = String.raw`{"model":"gpt-4o","messages":[{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"write_file","arguments":"${args}"}}]}]}`;
+    expect(body).toContain(String.raw`creds\\n` + AWS_KEY); // three chars, not one newline
+    const f = scanText(body);
+    expect(f.map((x) => x.secretType)).toContain("aws-access-key-id");
+    // The span must index the RAW bytes, or redact-on-capture splices the
+    // wrong range and the stored body keeps the secret.
+    const hit = f.find((x) => x.secretType === "aws-access-key-id")!;
+    expect(body.slice(hit.start, hit.end)).toBe(AWS_KEY);
+  });
+
+  // Anthropic's tool_use carries `input` as a nested JSON OBJECT, not a
+  // string, so this shape is only single-encoded. Pinned so that stays true:
+  // if a client ever pre-serializes `input`, this test keeps passing via the
+  // depth-2 path rather than silently regressing to a miss.
+  test("anthropic tool_use.input (nested object, single-encoded)", () => {
+    const body = String.raw`{"content":[{"type":"tool_use","id":"toolu_1","name":"write_file","input":{"path":".env","content":"# prod creds\n${AWS_KEY}\n"}}]}`;
+    expect(scanText(body).map((f) => f.secretType)).toContain("aws-access-key-id");
+  });
+
+  // Anthropic's streaming form DOES double-encode: input_json_delta carries
+  // partial JSON as a string, same nesting as OpenAI's `arguments`.
+  test("double-encoded: anthropic input_json_delta.partial_json", () => {
+    const partial = String.raw`{\"path\":\".env\",\"content\":\"# prod creds\\n${AWS_KEY}\\n\"}`;
+    const body = String.raw`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"${partial}"}}`;
+    expect(scanText(body).map((f) => f.secretType)).toContain("aws-access-key-id");
+  });
+
+  // Nesting is not capped at two: a sub-agent relaying a tool call adds another
+  // layer, taking the escape run to four backslashes.
+  test("triple-encoded", () => {
+    const body = String.raw`{"arguments":"{\"inner\":\"{\\\"content\\\":\\\"x\\\\\\\\n${AWS_KEY}\\\\\\\\n\\\"}\"}"}`;
+    expect(scanText(body).map((f) => f.secretType)).toContain("aws-access-key-id");
+  });
+
+  // Keyword-adjacency rules match a keyword, then a short run of separator
+  // chars, then the value. Double encoding turns `":"` into `\":\"` and the
+  // backslashes are not separator chars, so these rules missed too.
+  test("double-encoded: keyword-adjacency rules match across escaped quotes", () => {
+    const args = String.raw`{\"api_key\":\"Zx9Yw8Vu7Tt6Ss5Rr4Qq3Pp2Oo1Nn0Mm\"}`;
+    const body = String.raw`{"tool_calls":[{"function":{"name":"configure","arguments":"${args}"}}]}`;
+    const f = scanText(body);
+    expect(f.map((x) => x.secretType)).toContain("generic-api-key");
+    const hit = f.find((x) => x.secretType === "generic-api-key")!;
+    // Capture must stop at the escaped quote, not swallow it — the stored JSON
+    // is corrupted if a redaction splices out the delimiter too.
+    expect(body.slice(hit.start, hit.end)).toBe("Zx9Yw8Vu7Tt6Ss5Rr4Qq3Pp2Oo1Nn0Mm");
+  });
+
+  // Soundness in the other direction. Nothing on the wire distinguishes a JSON
+  // escape from a literal backslash in a non-JSON body, so treating every
+  // escape-looking run as an escape MUST NOT be the only reading: these are
+  // bodies where the backslash is literal text and the letter after it is part
+  // of the secret. They are caught by scanning the unmasked bytes too.
+  test("literal backslash: windows path glued to a token", () => {
+    const body = String.raw`{"path":"C:\\npm_A7hK9mP2qR5tW8xZ1cV4bN6jL3gF0dSe2aYb"}`;
+    // The masked view reads `\\n` as a depth-2 escape and blanks the token's
+    // own first letter; only the unmasked view can catch this one.
+    expect(maskJsonEscapes(body)).toContain("   pm_");
+    expect(scanText(body).map((f) => f.secretType)).toContain("npm-token");
+  });
+
+  test("literal backslash: windows path before a connection string", () => {
+    const body = String.raw`C:\creds\redis://admin:hunter2secret@db.internal:6379/0`;
+    expect(scanText(body).map((f) => f.secretType)).toContain("connection-string");
+  });
+
+  // A backslash before a non-escape char is literal text in every reading, so
+  // it must never be blanked — blanking would eat the secret's first char.
+  test("literal backslash before a non-escape char is left intact", () => {
+    // Built by concatenation, not interpolation: in String.raw a `\` before
+    // `${` escapes the placeholder instead of interpolating it.
+    const body = String.raw`{"path":"C:\creds` + "\\" + AWS_KEY + `"}`;
+    expect(body).toContain("creds\\" + AWS_KEY);
+    expect(maskJsonEscapes(body)).toBe(body); // neither backslash starts an escape
+    expect(scanText(body).map((f) => f.secretType)).toContain("aws-access-key-id");
+  });
+
+  test("masking is length-preserving at every depth", () => {
+    for (const s of [
+      String.raw`a\nb`,
+      String.raw`a\\nb`,
+      String.raw`a\\\\nb`,
+      String.raw`aAb`,
+      String.raw`a\\u0041b`,
+      String.raw`a\"b`,
+      String.raw`C:\creds`,
+      "no backslashes here",
+    ]) {
+      expect(maskJsonEscapes(s).length).toBe(s.length);
+    }
+  });
+
+  // Masking may only ever turn a character into a space. If it could turn a
+  // space into a word char it could fabricate a boundary inside a secret and
+  // invent findings; this pins the direction.
+  test("masking only ever blanks — it never introduces non-space characters", () => {
+    const s = String.raw`{"a":"x\n\\n\\\\nA\"y\/z"}`;
+    const masked = maskJsonEscapes(s);
+    for (let i = 0; i < s.length; i++) {
+      const m = masked[i]!;
+      expect(m === s[i] || m === " ").toBe(true);
+    }
   });
 });
 

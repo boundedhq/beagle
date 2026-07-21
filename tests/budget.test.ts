@@ -48,6 +48,30 @@ describe("scan-time budget (R5: p99 ≤ ~10ms on 1 MB)", () => {
     // generous ceiling for CI variance; the design target is ~10ms
     expect(median(times)).toBeLessThan(50);
   });
+
+  // The body above contains no JSON escapes, so it takes the single-pass fast
+  // path and would not notice the second view at all. Tool-call traffic is the
+  // shape that forces BOTH passes, and it is the common case in practice, so
+  // the budget needs a sample of it. Measured ~2.3x the plain body locally
+  // (~24ms vs ~10ms): one masking pass plus a second run of every rule.
+  //
+  // What this gate catches is a blow-up — masking going superlinear, or a third
+  // view being added — not a modest regression; the ceiling is far too loose
+  // for that, exactly as with the plain-body gate above. Nothing here proves
+  // the R5 p99 target.
+  test("median 1 MB escape-dense body scan stays well under the deadline", () => {
+    let body = "";
+    const chunk = String.raw`{"tool_calls":[{"function":{"name":"write_file","arguments":"{\"path\":\"src/app.ts\",\"content\":\"import x from 'y';\\nexport const go = () => 1;\\n\"}"}}]},` + "\n";
+    while (body.length < 1 << 20) body += chunk;
+    const bytes = new TextEncoder().encode(body);
+    const times: number[] = [];
+    for (let i = 0; i < 30; i++) {
+      const t = performance.now();
+      scan(bytes, {}, rules);
+      times.push(performance.now() - t);
+    }
+    expect(median(times)).toBeLessThan(100);
+  });
 });
 
 describe("proxy added-latency budget (R9: p50 ≤ ~5ms over direct)", () => {

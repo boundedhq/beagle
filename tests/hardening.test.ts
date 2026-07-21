@@ -6,10 +6,16 @@ import { Store } from "../src/core/store/store";
 import { applyCaptureRedaction, redactBody, redactValues, redactValuesInText, redactionPlaceholder } from "../src/transform/redact";
 import { DEFAULT_CONFIG } from "../src/core/config/config";
 import { quarantineCorruptDb } from "../src/core/store/quarantine";
-import type { Finding } from "../src/core/scanner/engine";
+import { compileRules, scan, type Finding } from "../src/core/scanner/engine";
+import { loadRuleFile } from "../src/core/scanner/rules";
+import { readFileSync } from "node:fs";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 const dec = (b: Uint8Array) => new TextDecoder().decode(b);
+const rules = compileRules(
+  loadRuleFile(readFileSync("rules/beagle-rules.json", "utf8")),
+  new Uint8Array(32).fill(9),
+);
 
 describe("secure defaults", () => {
   test("redact-on-capture is ON by default — a detection tool must not keep secrets in cleartext", () => {
@@ -38,6 +44,29 @@ describe("redact-on-capture (R11)", () => {
     expect(text).toContain("[REDACTED:aws-access-key-id:");
     expect(text).toContain("done"); // surrounding bytes intact
     expect(out.values[0]?.value).toBe("AKIAZQ3DRSTUVWXY2345");
+  });
+
+  // End-to-end for the double-encoded shape: the scanner reads the masked view
+  // but reports offsets into the raw bytes, and this is where that has to hold
+  // — a span that indexed the wrong range would splice mid-escape, corrupting
+  // the stored JSON while leaving the secret in it.
+  test("a secret inside an OpenAI tool call is spliced out and the body stays parseable", () => {
+    const key = "AKIAZQ3DRSTUVWXY2345";
+    const args = String.raw`{\"path\":\".env\",\"content\":\"# prod creds\\n${key}\\n\"}`;
+    const body = String.raw`{"tool_calls":[{"function":{"name":"write_file","arguments":"${args}"}}]}`;
+    const findings = scan(enc(body), {}, rules).filter((f) => f.secretType === "aws-access-key-id");
+    expect(findings.length).toBe(1);
+
+    const out = dec(redactBody(enc(body), findings).bytes);
+    expect(out).not.toContain(key);
+    expect(out).toContain("[REDACTED:aws-access-key-id:");
+    // Both nesting levels must still parse: the outer request, and the
+    // tool-call arguments string it carries.
+    const outer = JSON.parse(out) as { tool_calls: Array<{ function: { arguments: string } }> };
+    const inner = JSON.parse(outer.tool_calls[0]!.function.arguments) as { path: string; content: string };
+    expect(inner.path).toBe(".env");
+    expect(inner.content).toContain("[REDACTED:aws-access-key-id:");
+    expect(inner.content).toContain("# prod creds\n"); // a real newline, decoded
   });
 
   test("overlapping findings on the same span don't corrupt the body", () => {
