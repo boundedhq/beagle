@@ -149,6 +149,8 @@ describe("fingerprint stability across wrapping and wire encoding", () => {
     `-----BEGIN RSA PRIVATE KEY-----\n${body}\n-----END RSA PRIVATE KEY-----`;
   const fpOf = (text: string) =>
     scanText(text).find((x) => x.secretType === "private-key")!.fingerprint;
+  const fpConn = (text: string) =>
+    scanText(text).find((x) => x.secretType === "connection-string")!.fingerprint;
 
   test("re-wrapped PEM block fingerprints identically", () => {
     expect(fpOf(pem(BODY))).toBe(fpOf(pem(`${BODY.slice(0, 16)}\n${BODY.slice(16)}`)));
@@ -180,9 +182,6 @@ describe("fingerprint stability across wrapping and wire encoding", () => {
     expect(fpOf(JSON.stringify({ c: pem(BODY) }))).not.toBe(fpOf(pem(BODY.replace("0Z3", "0Z4"))));
   });
 
-  const fpConn = (text: string) =>
-    scanText(text).find((x) => x.secretType === "connection-string")!.fingerprint;
-
   test("a password ending in a quote fingerprints identically JSON-encoded and raw", () => {
     // JSON-encoded, the password's closing quote ships as the two characters
     // \ + ". Stripping the bare quote before decoding ate the " out of the
@@ -213,6 +212,17 @@ describe("fingerprint stability across wrapping and wire encoding", () => {
   test("distinct quote-bearing passwords stay distinct", () => {
     expect(fpConn(JSON.stringify({ url: 'mongodb://app:alpha9z"@db.internal/prod' }))).not.toBe(
       fpConn(JSON.stringify({ url: 'mongodb://app:alpha9x"@db.internal/prod' })),
+    );
+  });
+
+  test("escape-free fingerprints are pinned — no silent rotation", () => {
+    // The ux_leak_fp index keys on these values with no migration path, and
+    // every rule except connection-string and private-key has an alphabet
+    // excluding backslash and quote, so its stored rows must NEVER rotate.
+    // This golden value has survived both fingerprint reworks; a diff here
+    // means orphaning every stored row, not a harmless refactor.
+    expect(fingerprint("AKIAZQ3DRSTUVWXY2345", HMAC_KEY)).toBe(
+      "226a219ccad33f919765e314dd7ec13d3135b37dc8ce19ac99c68bf97e575381",
     );
   });
 
