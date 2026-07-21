@@ -318,7 +318,15 @@ describe("JSON-escape-prefixed secrets (leading-boundary regression)", () => {
   test("the union does not double-report a secret both views agree on", () => {
     // Every finding is reported once, or the store and the alert engine would
     // see phantom duplicates on any body carrying an escape.
-    const body = JSON.stringify({ role: "user", content: `key:\nAKIAZQ3DRSTUVWXY2345\n` });
+    //
+    // The escape and the secret must be in DIFFERENT places. If the escape
+    // immediately precedes the key, the raw view doesn't match it at all (that
+    // is the bug this suite is about), only one view contributes, and the dedup
+    // is never exercised — the test would pass with the dedup deleted. Here the
+    // escape forces the second pass while both views match the key, so removing
+    // the dedup really does report 2.
+    const body = String.raw`{"content":"first line\nhere is the key AKIAZQ3DRSTUVWXY2345 done"}`;
+    expect(maskJsonEscapes(body)).not.toBe(body); // the second pass actually runs
     expect(scanText(body).filter((f) => f.secretType === "aws-access-key-id").length).toBe(1);
   });
 
@@ -326,13 +334,19 @@ describe("JSON-escape-prefixed secrets (leading-boundary regression)", () => {
     // The FP side of the trade. Masking adds boundaries, which widens what the
     // quiet entropy rules can see — every clean/out-of-scope corpus case must
     // still produce nothing once it follows an escape.
+    //
+    // Run at BOTH nesting depths. Depth 2 is not redundant: blanking `\"` is
+    // what newly exposes these rules to the interior of a tool-call argument
+    // string, and there the quotes around every decoy become separators too.
     const corpus: { cases: Array<{ text: string; outcome: string }> } = JSON.parse(
       readFileSync("tests/fixtures/leakproof-corpus.json", "utf8"),
     );
     const decoys = corpus.cases.filter((c) => c.outcome !== "caught");
     expect(decoys.length).toBeGreaterThan(0); // guard against a vacuous pass
     for (const c of decoys) {
-      expect(scanText(JSON.stringify({ role: "user", content: `see below:\n${c.text}` }))).toEqual([]);
+      const depth1 = JSON.stringify({ role: "user", content: `see below:\n${c.text}` });
+      expect(scanText(depth1)).toEqual([]);
+      expect(scanText(`{"arguments":${JSON.stringify(depth1)}}`)).toEqual([]);
     }
   });
 
@@ -391,59 +405,129 @@ describe("JSON-escape-prefixed secrets (leading-boundary regression)", () => {
 // the rules see; `String.raw` keeps that honest.
 describe("secrets nested in tool-call arguments (R5)", () => {
   const AWS_KEY = "AKIAZQ3DRSTUVWXY2345";
+  const FILE = `# prod creds\n${AWS_KEY}\n`; // real newlines: what the agent writes
 
-  // Depth 2 — the shape this suite exists for. OpenAI puts tool-call arguments
-  // in a JSON *string* nested inside the request JSON, so a newline in a file
-  // the agent writes arrives as THREE chars: `\` `\` `n`. "Agent writes a .env
-  // file" is the mainstream form of exactly the leak beagle is for.
-  test("double-encoded: openai tool_calls[].function.arguments", () => {
-    const args = String.raw`{\"path\":\".env\",\"content\":\"# prod creds\\n${AWS_KEY}\\n\"}`;
-    const body = String.raw`{"model":"gpt-4o","messages":[{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"write_file","arguments":"${args}"}}]}]}`;
-    expect(body).toContain(String.raw`creds\\n` + AWS_KEY); // three chars, not one newline
-    const f = scanText(body);
-    expect(f.map((x) => x.secretType)).toContain("aws-access-key-id");
-    // The span must index the RAW bytes, or redact-on-capture splices the
-    // wrong range and the stored body keeps the secret.
-    const hit = f.find((x) => x.secretType === "aws-access-key-id")!;
-    expect(body.slice(hit.start, hit.end)).toBe(AWS_KEY);
+  // Each extra layer serializes the body so far into a STRING field, exactly as
+  // a tool call carries its arguments. Derived with JSON.stringify rather than
+  // hand-written escapes — counting backslashes by hand got the depth wrong
+  // here once already, and the whole point is which depth is under test.
+  const nest = (payload: string, depth: number) => {
+    let body = `{"content":${JSON.stringify(payload)}}`; // depth 1
+    for (let i = 1; i < depth; i++) body = `{"arguments":${JSON.stringify(body)}}`;
+    return body;
+  };
+
+  // Pin the wire shape the rest of the block relies on: the backslash run before
+  // the secret doubles with each layer. If this drifts, every test below is
+  // testing something other than what it says.
+  test("nesting depth shows up as the backslash run before the secret", () => {
+    for (const [depth, run] of [[1, 1], [2, 2], [3, 4]] as const) {
+      const body = nest(FILE, depth);
+      const before = body.slice(0, body.indexOf(AWS_KEY));
+      expect(before.endsWith("\\".repeat(run) + "n")).toBe(true);
+      expect(before.endsWith("\\".repeat(run + 1) + "n")).toBe(false); // exactly that many
+    }
   });
 
-  // Anthropic's tool_use carries `input` as a nested JSON OBJECT, not a
-  // string, so this shape is only single-encoded. Pinned so that stays true:
-  // if a client ever pre-serializes `input`, this test keeps passing via the
-  // depth-2 path rather than silently regressing to a miss.
-  test("anthropic tool_use.input (nested object, single-encoded)", () => {
+  // Depth 2 is the shape this block exists for: OpenAI-style tool calls put
+  // their arguments in a JSON *string* inside the request JSON, so a newline in
+  // a file the agent writes arrives as THREE chars, `\` `\` `n`. Anthropic's
+  // streaming input_json_delta nests identically. The scanner is envelope-blind,
+  // so both run the same assertions — they are here to document that these two
+  // real vendor shapes reduce to one case, not because they exercise two paths.
+  const ENVELOPES: Array<[string, string]> = [
+    ["openai tool_calls[].function.arguments",
+      `{"model":"gpt-4o","messages":[{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"write_file","arguments":${JSON.stringify(nest(FILE, 1))}}}]}]}`],
+    ["anthropic input_json_delta.partial_json",
+      `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":${JSON.stringify(nest(FILE, 1))}}}`],
+  ];
+  for (const [name, body] of ENVELOPES) {
+    test(`double-encoded: ${name}`, () => {
+      expect(body).toContain(String.raw`creds\\n` + AWS_KEY); // three chars, not one newline
+      const f = scanText(body);
+      expect(f.map((x) => x.secretType)).toContain("aws-access-key-id");
+      // The span must index the RAW bytes, or redact-on-capture splices the
+      // wrong range and the stored body keeps the secret.
+      const hit = f.find((x) => x.secretType === "aws-access-key-id")!;
+      expect(body.slice(hit.start, hit.end)).toBe(AWS_KEY);
+    });
+  }
+
+  // Anthropic's tool_use carries `input` as a nested JSON OBJECT, not a string,
+  // so it is only single-encoded and was already caught before this change.
+  // Kept as documentation of the vendor difference — it is why the two providers
+  // needed different fixtures — NOT as a regression test for this fix.
+  test("anthropic tool_use.input is a nested object, so only single-encoded", () => {
     const body = String.raw`{"content":[{"type":"tool_use","id":"toolu_1","name":"write_file","input":{"path":".env","content":"# prod creds\n${AWS_KEY}\n"}}]}`;
+    expect(body).toContain(String.raw`creds\n` + AWS_KEY); // one backslash, not two
     expect(scanText(body).map((f) => f.secretType)).toContain("aws-access-key-id");
   });
 
-  // Anthropic's streaming form DOES double-encode: input_json_delta carries
-  // partial JSON as a string, same nesting as OpenAI's `arguments`.
-  test("double-encoded: anthropic input_json_delta.partial_json", () => {
-    const partial = String.raw`{\"path\":\".env\",\"content\":\"# prod creds\\n${AWS_KEY}\\n\"}`;
-    const body = String.raw`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"${partial}"}}`;
-    expect(scanText(body).map((f) => f.secretType)).toContain("aws-access-key-id");
-  });
-
-  // Nesting is not capped at two: a sub-agent relaying a tool call adds another
-  // layer, taking the escape run to four backslashes.
+  // Nesting is not capped at two: a sub-agent relaying a tool call adds a layer.
   test("triple-encoded", () => {
-    const body = String.raw`{"arguments":"{\"inner\":\"{\\\"content\\\":\\\"x\\\\\\\\n${AWS_KEY}\\\\\\\\n\\\"}\"}"}`;
+    const body = nest(FILE, 3);
+    expect(body).toContain("\\".repeat(4) + "n" + AWS_KEY);
     expect(scanText(body).map((f) => f.secretType)).toContain("aws-access-key-id");
   });
 
-  // Keyword-adjacency rules match a keyword, then a short run of separator
-  // chars, then the value. Double encoding turns `":"` into `\":\"` and the
-  // backslashes are not separator chars, so these rules missed too.
+  // Keyword-adjacency rules match a keyword, a short run of separator chars,
+  // then the value. Double encoding turns `":"` into `\":\"`, and backslash is
+  // in no rule's separator class, so these rules missed too.
   test("double-encoded: keyword-adjacency rules match across escaped quotes", () => {
-    const args = String.raw`{\"api_key\":\"Zx9Yw8Vu7Tt6Ss5Rr4Qq3Pp2Oo1Nn0Mm\"}`;
-    const body = String.raw`{"tool_calls":[{"function":{"name":"configure","arguments":"${args}"}}]}`;
+    const secret = "Zx9Yw8Vu7Tt6Ss5Rr4Qq3Pp2Oo1Nn0Mm";
+    const body = `{"tool_calls":[{"function":{"name":"configure","arguments":${JSON.stringify(`{"api_key":"${secret}"}`)}}}]}`;
     const f = scanText(body);
     expect(f.map((x) => x.secretType)).toContain("generic-api-key");
     const hit = f.find((x) => x.secretType === "generic-api-key")!;
     // Capture must stop at the escaped quote, not swallow it — the stored JSON
     // is corrupted if a redaction splices out the delimiter too.
-    expect(body.slice(hit.start, hit.end)).toBe("Zx9Yw8Vu7Tt6Ss5Rr4Qq3Pp2Oo1Nn0Mm");
+    expect(body.slice(hit.start, hit.end)).toBe(secret);
+  });
+
+  // The limit of the above, pinned so it is a known boundary rather than a
+  // surprise. Masking is depth-agnostic, but these rules allow at most 5
+  // separator chars, and every layer DOUBLES the backslashes in `":"`: 3 chars
+  // at depth 1, 5 at depth 2, 9 at depth 3 (2^d + 1). So they reach depth 2 and
+  // stop. `\b`-anchored rules need only one separator and keep working at any
+  // depth — see the triple-encoded test above. Widening the quantifier would be
+  // a rules-data change, not an engine one.
+  test("keyword-adjacency rules reach depth 2, and no further", () => {
+    const secret = "Zx9Yw8Vu7Tt6Ss5Rr4Qq3Pp2Oo1Nn0Mm";
+    const at = (depth: number) => {
+      let body = `{"api_key":"${secret}"}`; // depth 1
+      for (let i = 1; i < depth; i++) body = `{"arguments":${JSON.stringify(body)}}`;
+      return body;
+    };
+    // The separator really is the thing that grows.
+    expect([1, 2, 3].map((d) => {
+      const b = at(d);
+      return b.slice(b.indexOf("api_key") + 7, b.indexOf(secret)).length;
+    })).toEqual([3, 5, 9]);
+    expect([1, 2, 3].map((d) =>
+      scanText(at(d)).some((f) => f.secretType === "generic-api-key"),
+    )).toEqual([true, true, false]);
+  });
+
+  // The dedup guarantee R6 leans on: one secret is one fingerprint however deeply
+  // the client encoded it, or every tool call re-alerts on a key already seen.
+  test("a fixed-alphabet secret fingerprints identically at every depth", () => {
+    const fp = (body: string) =>
+      scanText(body).find((f) => f.secretType === "aws-access-key-id")!.fingerprint;
+    const plain = fp(`key ${AWS_KEY} done`);
+    for (const depth of [1, 2, 3]) expect(fp(nest(FILE, depth))).toBe(plain);
+  });
+
+  // ...and the documented cost of that, so it stays documented. A capture that
+  // can itself contain a backslash (private-key, connection-string) still splits:
+  // fingerprint() decodes ONE level, deliberately, because decoding to a fixpoint
+  // risks merging secrets that really did differ. A re-alert, never a miss.
+  test("a capture that can hold a backslash still splits across depth", () => {
+    const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0Z3VS5JJcds3xfn\n-----END RSA PRIVATE KEY-----";
+    const fp = (body: string) =>
+      scanText(body).find((f) => f.secretType === "private-key")?.fingerprint;
+    expect(fp(pem)).toBe(fp(nest(pem, 1))); // depth 1 matches plaintext
+    expect(fp(nest(pem, 2))).toBeDefined(); // still detected...
+    expect(fp(nest(pem, 2))).not.toBe(fp(pem)); // ...but under a second fingerprint
   });
 });
 

@@ -52,16 +52,22 @@ describe("scan-time budget (R5: p99 ≤ ~10ms on 1 MB)", () => {
   // The body above contains no JSON escapes, so it takes the single-pass fast
   // path and would not notice the second view at all. Tool-call traffic is the
   // shape that forces BOTH passes, and it is the common case in practice, so
-  // the budget needs a sample of it. Measured ~2.3x the plain body locally
-  // (~24ms vs ~10ms): one masking pass plus a second run of every rule.
+  // the budget needs a sample of it.
   //
-  // What this gate catches is a blow-up — masking going superlinear, or a third
-  // view being added — not a modest regression; the ceiling is far too loose
-  // for that, exactly as with the plain-body gate above. Nothing here proves
-  // the R5 p99 target.
+  // The chunk carries secret-ish KEYWORDS on purpose. The prescan is the lever
+  // that keeps scan time flat, so a keyword-free body measures almost nothing:
+  // only 3 of 30 rules survive it, and the second pass re-runs just those. With
+  // keywords it is 5 of 30 — still not "every rule", which no realistic body
+  // reaches — and ~3.9x the plain-body gate above rather than ~3.1x.
+  //
+  // What this catches is a blow-up: masking going superlinear, or a third view
+  // being added. It is far too loose to catch a modest regression, exactly as
+  // with the plain-body gate above, and nothing here proves the R5 p99 target.
+  // The ceiling keeps roughly the same headroom over the local median that the
+  // gate above does, so a slow shared runner doesn't turn it into a flake.
   test("median 1 MB escape-dense body scan stays well under the deadline", () => {
     let body = "";
-    const chunk = String.raw`{"tool_calls":[{"function":{"name":"write_file","arguments":"{\"path\":\"src/app.ts\",\"content\":\"import x from 'y';\\nexport const go = () => 1;\\n\"}"}}]},` + "\n";
+    const chunk = String.raw`{"tool_calls":[{"function":{"name":"write_file","arguments":"{\"path\":\".env\",\"content\":\"AWS_SECRET_ACCESS_KEY=changeme\\napi_key: none\\npassword: none\\n\"}"}}]},` + "\n";
     while (body.length < 1 << 20) body += chunk;
     const bytes = new TextEncoder().encode(body);
     const times: number[] = [];
@@ -70,7 +76,7 @@ describe("scan-time budget (R5: p99 ≤ ~10ms on 1 MB)", () => {
       scan(bytes, {}, rules);
       times.push(performance.now() - t);
     }
-    expect(median(times)).toBeLessThan(100);
+    expect(median(times)).toBeLessThan(150);
   });
 });
 

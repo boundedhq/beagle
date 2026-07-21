@@ -46,7 +46,13 @@ const MAX_FINDINGS_PER_RULE = 500;
 // string nested inside the request JSON, so "the agent writes a .env file" —
 // the mainstream form of the leak this tool exists to catch — lands there.
 // Depth grows with relaying (a sub-agent forwarding a tool call adds a layer),
-// so nothing here assumes a maximum.
+// so the MASKING below assumes no maximum. Detection does not follow it all the
+// way: a `\b`-anchored rule needs one separator and is depth-independent, but a
+// keyword-adjacency rule (generic-api-key, aws-secret-access-key) matches at
+// most 5 separator chars between keyword and value, and every layer of encoding
+// DOUBLES the backslashes in `":"` — 3 chars at depth 1, 5 at depth 2, 9 at
+// depth 3. So those rules reach depth 2 and stop. Pinned by a test; widening the
+// quantifier is a rules-data change, not an engine one.
 //
 // Fixed by masking rather than by loosening the rules: an escape run is blanked
 // to spaces before matching, so the separator the rules already expect is
@@ -97,7 +103,7 @@ const ESCAPE_RUN = /\\+(?:u[0-9a-fA-F]{4}|[bfnrt"/])?/g;
 // blanking indexes a prebuilt string rather than allocating per match. Runs are
 // short in practice (2 for `\n`, 3 for `\\n`, 7 for `\\uXXXX`); the fallback
 // covers a pathological body padded with backslashes.
-const SPACES = "                ";
+const SPACES = " ".repeat(16); // length is load-bearing below — don't count spaces in a diff
 
 export function maskJsonEscapes(text: string): string {
   if (!text.includes("\\")) return text; // fast path: nothing to mask
@@ -121,16 +127,19 @@ export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): 
   // Both readings of the bytes, unioned — see ESCAPE_RUN for why neither alone
   // is sound. Offsets agree because masking is length-preserving, so a finding
   // from either view indexes the same raw bytes and dedupes by span. The second
-  // pass only runs when the views actually differ, i.e. when the body contains
-  // a real escape; a miss costs far more than the extra pass.
+  // pass only runs when the views actually differ, i.e. when the body contains a
+  // backslash followed by an escape character — whether that is a real escape or
+  // literal text is exactly what cannot be known here, which is the point. A
+  // miss costs far more than the extra pass.
   const findings = matchAll(raw, masked, ctx, compiled);
   if (masked !== raw) {
     // Keyed dedup, not a scan of `findings` per candidate: both views can hit
     // the per-rule cap, and pairwise comparison would square that into a
     // pathological body's cheapest way to burn the scan deadline.
-    const seen = new Set(findings.map((f) => `${f.start}:${f.end}:${f.detector}`));
+    const key = (f: Finding) => `${f.start}:${f.end}:${f.detector}`;
+    const seen = new Set(findings.map(key));
     for (const f of matchAll(raw, raw, ctx, compiled)) {
-      if (!seen.has(`${f.start}:${f.end}:${f.detector}`)) findings.push(f);
+      if (!seen.has(key(f))) findings.push(f);
     }
   }
   return suppressOverlaps(findings);
@@ -248,11 +257,13 @@ const ESCAPE_CHARS: Record<string, string> = { b: "\b", f: "\f", n: "\n", r: "\r
 // carried in a JSON body, or R6 dedup re-alerts on the one key — matchAll() hands
 // us the RAW slice on purpose (every gate judges what really shipped), so there
 // the newlines are still the two characters \ + n and /\s+/ alone keeps both.
-// Decoding, not maskJsonEscapes(): the mask leaves `\/` `\"` `\\` in place, right
-// for its boundary job, wrong here, where a slash-escaping encoder would still
-// split a base64 body's fingerprint. ONE left-to-right pass, so `\\n` stays a
-// backslash then `n`; collapsing `\\` in an earlier pass would merge it with a
-// real newline.
+// Decoding, not maskJsonEscapes(): the mask BLANKS `\/` and `\"` (it used to
+// leave them, which is what an earlier version of this note said), so reusing it
+// here would delete the escaped character outright — `/\s+/` then eats the
+// blank, and two values differing only by a slash would hash the same. Wrong
+// direction: this function must not merge values that really did differ.
+// ONE left-to-right pass, so `\\n` stays a backslash then `n`; collapsing `\\`
+// in an earlier pass would merge it with a real newline.
 //
 // Stored fingerprints are NOT migrated. Only a capture containing a backslash
 // hashes differently than before; every other rule's alphabet excludes one, so
@@ -275,9 +286,10 @@ const ESCAPE_CHARS: Record<string, string> = { b: "\b", f: "\f", n: "\n", r: "\r
 // /\s+/ does not eat, so a PEM sent inside a tool call fingerprints apart from
 // the same PEM sent in an ordinary body. Deliberately not fixed by decoding to a
 // fixpoint — that is the merge direction this function must not fail in, per the
-// paragraph above. It costs one extra alert on one rule; only captures that can
-// contain a backslash are affected, so every fixed-alphabet secret (AKIA…, ghp_…,
-// sk-ant-…) still fingerprints identically at every depth.
+// paragraph above. It costs one extra alert on the same two rules named above,
+// private-key and connection-string, since only a capture that can contain a
+// backslash is affected; every fixed-alphabet secret (AKIA…, ghp_…, sk-ant-…)
+// still fingerprints identically at every depth. Both halves are pinned by tests.
 export function fingerprint(normalizedSecret: string, hmacKey: Uint8Array): string {
   const decoded = normalizedSecret.replace(JSON_ESCAPE, (esc) => {
     if (esc.length !== 6) return ESCAPE_CHARS[esc[1]!] ?? esc[1]!; // \X, not \uXXXX
