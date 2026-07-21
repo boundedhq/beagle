@@ -731,6 +731,60 @@ describe("JSON-escape-prefixed secrets (leading-boundary regression)", () => {
       expect(scanText(body).some((f) => f.secretType === "aws-access-key-id")).toBe(true);
     }
   });
+
+  test("a body cut mid-escape still detects the secrets before the cut", () => {
+    // The proxy keeps at most captureBufferCap bytes and drops the rest, so a
+    // stored body can end INSIDE an escape — `…\` with its `n` dropped, or
+    // `…\u0` with the hex dropped — and that stub is bytewise the bare odd run
+    // the parity tell reads as raw text. Poisoning on it un-masked the stub's
+    // whole token, and a minified body is one token: the cut that already cost
+    // the body's tail also silently cost every escape-nested secret BEFORE it,
+    // unalerted, on a row whose scanState still read "ok".
+    const K = "AKIAZQ3DRSTUVWXY2345";
+    const intact = `{"content":"key:${BS}n${K}"}`;
+    const found = (b: string) => scanText(b).some((f) => f.secretType === "aws-access-key-id");
+    expect(found(intact)).toBe(true); // control
+    // Every stub a cut can write: mid-run at the odd lengths (even runs never
+    // poisoned), and mid-\uXXXX at every partial-hex length.
+    for (const stub of [BS, BS + BS + BS, `${BS}u`, `${BS}ud`, `${BS}ud8`, `${BS}ud83`]) {
+      const cut = intact + stub;
+      expect(found(cut)).toBe(true);
+      // The span still indexes the raw bytes, so redaction on a truncated
+      // body splices the key and nothing else.
+      const hit = scanText(cut).find((f) => f.secretType === "aws-access-key-id")!;
+      expect(cut.slice(hit.start, hit.end)).toBe(K);
+    }
+    // A realistic minified body cut at EVERY position past the secret — chunk
+    // boundaries land anywhere, so no cut point may lose it. Three did.
+    const long = `{"content":"key:${BS}n${K}${BS}nrest","path":"C:${BS}${BS}proj${BS}${BS}x"}`;
+    for (let cut = long.indexOf(K) + K.length; cut <= long.length; cut++) {
+      expect(found(long.slice(0, cut))).toBe(true);
+    }
+  });
+
+  test("the truncation exemption does not reopen the Windows-path FP", () => {
+    // Only the input-terminal run is forgiven. A path carries its tell
+    // mid-token — `C:\aws\n…` poisons at `\a` — so the path stays silent even
+    // when the path itself is what the cap cut.
+    const digest = "3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5x";
+    const cutPath = `C:${BS}aws${BS}n${digest}${BS}`; // C:\aws\n<digest>\blob.bin, cut
+    expect(maskJsonEscapes(cutPath)).toBe(cutPath); // still untouched
+    expect(scanText(cutPath)).toEqual([]);
+  });
+
+  test("the input-edge exemption favors the truncated-JSON reading", () => {
+    // `aws\n<digest>` with no other backslash carries no parity tell in either
+    // direction; it masks, and the rule fires — that call predates this change.
+    // A trailing lone backslash used to flip the same body to silent. Now only
+    // a MID-body dangling backslash does: there the raw reading holds, while at
+    // the input edge the stub reads as a cut, because a real truncated body
+    // losing its secret costs more than this alert.
+    const digest = "3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5x";
+    const fires = (b: string) => scanText(b).some((f) => f.secretType === "aws-secret-access-key");
+    expect(fires(`aws${BS}n${digest}`)).toBe(true); // pre-existing call, control
+    expect(fires(`aws${BS}n${digest}${BS}`)).toBe(true); // stub at the input edge
+    expect(fires(`aws${BS}n${digest}${BS} more`)).toBe(false); // mid-body keeps its poison
+  });
 });
 
 // Depth 2+ shapes: a secret nested inside a tool-call arguments STRING. Each
