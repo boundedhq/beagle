@@ -66,9 +66,31 @@ function jsonUnescaped(value: string): string | null {
   }
 }
 
+// The same difference read the other way, and needed for the same reason once a
+// value can arrive from a DERIVED surface: applyCaptureRedaction's extraValues
+// are matched in the transcript's decoded text and scrubbed from the raw BODY,
+// where a `"` inside them is `\"` and a newline is `\n`. Only jsonUnescaped
+// existed because every value used to come from the bytes and travel outward.
+//
+// The pre-test keeps this off the hot path — buildSummary scrubs once per
+// message, so an unconditional stringify would run O(values x messages) times
+// per call to throw all of it away on the alphanumeric keys that are the norm.
+// JSON.stringify's escaping is ONE serializer's choice, so this reaches the
+// escapes every serializer agrees on and not the optional ones (a body writing
+// `\/` for a slash, or `\u0041` for an ASCII letter, renders that value in a
+// third form this misses) — which is why the derived text is SCANNED rather
+// than only re-encoded.
+function jsonEscaped(value: string): string | null {
+  if (!/["\\\u0000-\u001f]/.test(value)) return null; // nothing JSON must escape
+  const out = JSON.stringify(value).slice(1, -1); // strip the quotes it adds
+  return out === value ? null : out;
+}
+
 // Scrub known secret values by literal match wherever they appear — used on
 // derived text (summary, search text) built from parsed messages rather than
-// the stored bytes, so a body-side redaction can't be undone by a re-derive.
+// the stored bytes, so a body-side redaction can't be undone by a re-derive,
+// and (as applyCaptureRedaction's extraValues) in the other direction, on bytes
+// holding the ESCAPED form of a value the derived scan matched decoded.
 // The 8-char floor avoids mangling unrelated text on common substrings; a
 // shorter value is still span-redacted from the body it was found in but
 // SURVIVES here. A rule matching that short is not hypothetical —
@@ -92,14 +114,14 @@ export function redactValuesInText(
   values: Array<{ value: string; type: string }>,
 ): string {
   for (const { value, type } of values) {
-    // Both forms hash the RAW value, so one secret reads as one placeholder
+    // Every form hashes the RAW value, so one secret reads as one placeholder
     // whichever form was found — the viewer highlights body and transcript
     // alike. Hashed lazily, on the first form that actually hits: buildSummary
     // scrubs once per message plus once per action, so hashing every value up
     // front would run sha256 O(values x messages) times per captured call to
     // throw nearly all of it away.
     let placeholder: string | null = null;
-    for (const form of [value, jsonUnescaped(value)]) {
+    for (const form of [value, jsonUnescaped(value), jsonEscaped(value)]) {
       if (form !== null && form.length >= 8 && text.includes(form)) {
         placeholder ??= redactionPlaceholder(type, value);
         text = text.split(form).join(placeholder);
@@ -319,13 +341,42 @@ export interface CaptureRedaction {
 // the wire and Mode B ingest paths. An incomplete scan can't trust any spans,
 // so the raw content is held out entirely (never write raw-and-hope);
 // otherwise each finding's span is substituted in the body it was found in,
-// and the caller scrubs its derived text with the returned values.
+// plus (`extraValues`) the values of secrets another scan of the same call
+// found where no span here can reach them, and the caller scrubs its derived
+// text with the returned values.
 export function applyCaptureRedaction(o: {
   incomplete: boolean;
   requestBytes: Uint8Array;
   requestFindings: Finding[];
   responseBody: Uint8Array | null;
   responseFindings?: Finding[];
+  /** Secrets some OTHER scan of this call reported — the derived-text pass —
+   *  so no span in THESE bytes covers them. The findings lists above are what
+   *  the body scan matched IN the bodies; a derived-only finding is absent from
+   *  them, so without this redactBody masks nothing and the row claims
+   *  `redacted` over a payload still holding the value (35 of 35 derived-only
+   *  findings measured over 671 real wire calls sat verbatim in the body —
+   *  usually because JSON escaping pushed the rule's context out of reach, not
+   *  because the display manufactured anything).
+   *
+   *  BY VALUE, deliberately, and never by an offset re-anchored into these
+   *  bytes: a splice offset must come from the regex's own `d`-flag indices
+   *  (engine.scan), because a value recovered by SEARCHING for the match picks
+   *  whichever occurrence comes first — for `mongodb://root:root@host` that was
+   *  the USERNAME's span, and redaction shipped the password in cleartext. A
+   *  value is insensitive to which occurrence wins; a span is not.
+   *
+   *  Two residuals, both inherited from redactValuesInText and neither closed
+   *  here. The 8-char floor: under it only connection-string can go (it captures
+   *  the password alone), and a value that short is scrubbed from nothing —
+   *  what covers those in practice is that the same bytes usually satisfy the
+   *  rule in the body too, since its password class eats JSON structure up to
+   *  the `@`, so a real span lands over the password. Not floor-exempted here
+   *  because scrubbing a four-char string out of a whole request body blanks
+   *  timestamps and ids along with it. And the fixed list of value forms: a body
+   *  whose serializer escapes what JSON.stringify leaves alone (`\/`, `\u0041`)
+   *  writes a form no re-encoding of the value produces. */
+  extraValues?: Array<{ value: string; type: string }>;
 }): CaptureRedaction {
   if (o.incomplete) {
     return {
@@ -337,7 +388,8 @@ export function applyCaptureRedaction(o: {
     };
   }
   const respFindings = o.responseFindings ?? [];
-  if (o.requestFindings.length === 0 && respFindings.length === 0) {
+  const extra = o.extraValues ?? [];
+  if (o.requestFindings.length === 0 && respFindings.length === 0 && extra.length === 0) {
     return { redacted: false, heldOut: false, requestBody: o.requestBytes, responseBody: o.responseBody, values: [] };
   }
   const req = redactBody(o.requestBytes, o.requestFindings);
@@ -355,7 +407,23 @@ export function applyCaptureRedaction(o: {
   // of a detected secret survives — in the stored bytes or the search index
   // derived from them. Placeholders match redactBody's, so the viewer still
   // highlights them.
+  //
+  // extraValues ride the SAME pass, which is the whole of their fix: they have
+  // no span here by construction, so the scrub is not a backstop for them the
+  // way it is for the spanned values — it is the only thing that masks them.
+  // Returned in `values` as well, so the surfaces the caller redacts from these
+  // same bytes (the raw SSE stream, the search text, the summary's backstop)
+  // cover them without a second list to keep in step.
+  if (extra.length > 0) values = [...values, ...extra];
   const requestBody = redactValues(req.bytes, values) ?? req.bytes;
   responseBody = redactValues(responseBody, values);
-  return { redacted: true, heldOut: false, requestBody, responseBody, values };
+  // Measured, not assumed. A finding always rewrites the body it was found in,
+  // but an extraValue need not appear in these bytes at all — a secret the display
+  // MANUFACTURED by joining two content blocks exists only in the derived text
+  // — and claiming a rewrite that didn't happen would put the viewer's
+  // highlight on unredacted bytes and switch the caller's search text to a body
+  // nothing touched. Identity holds because redactValues returns its input when
+  // it changes nothing.
+  const redacted = requestBody !== o.requestBytes || responseBody !== o.responseBody;
+  return { redacted, heldOut: false, requestBody, responseBody, values };
 }

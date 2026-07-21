@@ -713,6 +713,14 @@ export class Daemon {
           requestFindings: stash?.findings ?? [],
           responseBody: call.response.bodyBytes ?? null,
           responseFindings: respScan?.findings,
+          // What the DERIVED scan found and the body scan did not. Its offsets
+          // index the transcript, so they can never splice these bytes (see
+          // extraValues); the value is what carries over, and it carries over
+          // because the derived text is a rendering of this body — the usual
+          // reason a rule matches one and not the other is escaping, and the
+          // value then sits here verbatim. Without this the row said
+          // `redacted: true` over a request body still holding the key.
+          extraValues: derived.values,
         })
       : null;
     const requestBody = redaction ? redaction.requestBody : call.request.bodyBytes;
@@ -991,6 +999,12 @@ export class Daemon {
             requestFindings: scanResult.findings,
             responseBody: call.response.bodyBytes ?? null,
             responseFindings: respScan?.findings,
+            // The wire path's note applies verbatim: a derived-only finding is
+            // in no body-scan span, so only its VALUE can reach these bytes.
+            // Mode B is where the two views diverge most — the scanned body is
+            // the prompt attribute, which for a resumed conversation is a
+            // serialized message list whose escapes the display drops.
+            extraValues: derived.values,
           })
         : null;
       // OUTBOUND ONLY, the same invariant buildSearchText holds for the wire

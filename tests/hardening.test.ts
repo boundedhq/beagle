@@ -171,6 +171,83 @@ describe("redact-on-capture (R11)", () => {
     }
   });
 
+  test("redactValuesInText scrubs the JSON-ESCAPED form of a decoded value", () => {
+    // The mirror of the two tests above, and the direction extraValues needs:
+    // the value was matched in the DERIVED text (decoded) and has to be scrubbed
+    // from the raw BODY, where it is escaped. Only the decode direction existed,
+    // because every value used to come from the bytes and travel outward.
+    const decoded = '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAsaid"quoted"\n-----END RSA PRIVATE KEY-----';
+    const escaped = '-----BEGIN RSA PRIVATE KEY-----\\nMIIEowIBAAKCAQEAsaid\\"quoted\\"\\n-----END RSA PRIVATE KEY-----';
+    const out = redactValuesInText(`{"prompt":"${escaped}"}`, [{ value: decoded, type: "private-key" }]);
+    expect(out).not.toContain("MIIEowIBAAKCAQEAsaid");
+    expect(out).toBe(`{"prompt":"${redactionPlaceholder("private-key", decoded)}"}`);
+  });
+
+  test("an extraValue no span covers is masked out of the stored bodies", () => {
+    // The derived-scan hole: a finding only the DERIVED scan made is in no
+    // `requestFindings` list, so redactBody masks nothing and the row used to
+    // claim `redacted` over a body still holding the key. JSON escaping is the
+    // usual cause — `\": \"` is six characters where the parsed message content
+    // spends four on `": "`, over the generic rule's `["':=\s]{1,5}` cap (and
+    // starting with a backslash, which that class does not even accept).
+    const key = "Xk7Qm2Vb9Rt4Ws8Yz1Nc6Pd3aJ5Hf0Lg";
+    const body = JSON.stringify({ messages: [{ role: "user", content: `config has "api_key": "${key}" in it` }] });
+    expect(scan(enc(body), {}, rules)).toEqual([]); // premise: the body scan sees nothing
+    const out = applyCaptureRedaction({
+      incomplete: false,
+      requestBytes: enc(body),
+      requestFindings: [],
+      responseBody: enc(`I set ${key} for you`), // …and the echo in the reply
+      extraValues: [{ value: key, type: "generic-api-key" }],
+    });
+    expect(dec(out.requestBody)).not.toContain(key);
+    expect(dec(out.requestBody)).toContain("[REDACTED:generic-api-key:");
+    expect(dec(out.responseBody!)).not.toContain(key);
+    expect(out.redacted).toBe(true);
+    expect(JSON.parse(dec(out.requestBody))).toBeDefined(); // still parseable
+    // Handed back, so the surfaces the CALLER redacts from these same bytes —
+    // the raw SSE stream, the search text, the summary's backstop — cover it
+    // without a second list to keep in step.
+    expect(out.values).toContainEqual({ value: key, type: "generic-api-key" });
+  });
+
+  test("an extraValue is masked in the ESCAPED form the body actually holds", () => {
+    // The derived scan matches the decoded rendering, so its value carries real
+    // newlines while the bytes carry `\n`. A literal-match scrub of the raw form
+    // alone silently no-ops here — the same mismatch that produced this
+    // function's decode direction, read the other way.
+    const decoded = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAonlyInTheRendering\n-----END RSA PRIVATE KEY-----";
+    const body = JSON.stringify({ prompt: `deploy with:\n${decoded}` });
+    const out = applyCaptureRedaction({
+      incomplete: false,
+      requestBytes: enc(body),
+      requestFindings: [],
+      responseBody: null,
+      extraValues: [{ value: decoded, type: "private-key" }],
+    });
+    expect(dec(out.requestBody)).not.toContain("MIIEowIBAAKCAQEAonlyInTheRendering");
+    expect(dec(out.requestBody)).toContain("[REDACTED:private-key:");
+  });
+
+  test("an extraValue absent from the bytes leaves them alone, and `redacted` says so", () => {
+    // The other derived-only shape: a secret the display MANUFACTURED by joining
+    // two content blocks is in no body at all, so there is nothing here to mask.
+    // `redacted` must not claim a rewrite that didn't happen — the viewer paints
+    // its highlight on that flag, and the wire path switches its search text to
+    // the stored body when it is set. (The row still reads redacted overall: the
+    // caller ORs in the derived parts it DID rewrite.)
+    const body = '{"messages":[{"content":"half AKIAZQ3DRSTUV"},{"content":"WXY2345 half"}]}';
+    const out = applyCaptureRedaction({
+      incomplete: false,
+      requestBytes: enc(body),
+      requestFindings: [],
+      responseBody: null,
+      extraValues: [{ value: "AKIAZQ3DRSTUVWXY2345", type: "aws-access-key-id" }],
+    });
+    expect(dec(out.requestBody)).toBe(body); // byte-identical
+    expect(out.redacted).toBe(false);
+  });
+
   // redactDerivedParts is what the value scrub above structurally cannot be:
   // it splices the offsets of a scan run over the DERIVED text itself, so it
   // reaches secrets that exist only in the rendering.

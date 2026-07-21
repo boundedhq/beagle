@@ -1,12 +1,23 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Daemon } from "../src/daemon/daemon";
 import { controlRequest } from "../src/daemon/control";
 import { Store } from "../src/core/store/store";
 import { listCalls, listLeakEvents } from "../src/viewer/feed-query";
+import { compileRules, scan } from "../src/core/scanner/engine";
+import { loadRuleFile } from "../src/core/scanner/rules";
 import type { AlertEvent } from "../src/core/alert/engine";
+
+// The daemon's own corpus, run in-test — for pinning what the BODY scan sees in
+// a fixture, so a test about the derived scan can assert that premise instead of
+// asserting it in a comment. The hmac key only salts fingerprints here.
+const corpusRules = compileRules(
+  loadRuleFile(readFileSync("rules/beagle-rules.json", "utf8")),
+  new Uint8Array(32).fill(7),
+);
+const scanRaw = (text: string) => scan(new TextEncoder().encode(text), {}, corpusRules);
 
 // Claude Code's real Mode-B export (event schema, verified in the Phase-0
 // spike): a turn is a user_prompt + api_request + assistant_response sharing
@@ -303,6 +314,43 @@ describe("Mode B end-to-end through the daemon", () => {
     expect(dm).toContain("[REDACTED:private-key:");
     expect(dm).not.toContain("-----END RSA PRIVATE KEY-----");
     expect(store.searchLiteral("MIIEowIBAAKCAQEAsplitAcrossMessages")).toEqual([]);
+    store.close();
+  });
+
+  test("a secret only the DERIVED scan can see is masked in the stored BODY too", async () => {
+    // Mode B's copy of the wire path's hole (tests/daemon.test.ts). A finding
+    // the BODY scan never made is not in `requestFindings`, so redactBody masks
+    // nothing; the derived pass rewrote display_messages and kept the key out of
+    // the index, and the row said `redacted: true` over a payload still holding
+    // it in the clear.
+    //
+    // Same cause as on the wire, and the same measured-common one: a resumed
+    // conversation serializes its message list into the prompt attribute, so the
+    // scanned bytes spend `\": \"` — six characters, one of them a backslash the
+    // rule's `["':=\s]{1,5}` class does not even accept — where the flattened
+    // display spends four on `": "`.
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    const key = "Xk7Qm2Vb9Rt4Ws8Yz1Nc6Pd3aJ5Hf0Lg";
+    const prompt = JSON.stringify([{ role: "user", content: `config has "api_key": "${key}" in it` }]);
+    // The premise, asserted rather than described: the real engine finds nothing
+    // in the scanned bytes (Mode B's body IS this string — otlp-map's
+    // buildTurnCall). Without it the assertions below would pass just as well on
+    // a body the ordinary span redaction had masked.
+    expect(scanRaw(prompt)).toEqual([]);
+    await post(otlpBody(token, prompt, "otel-conv-derived-body", null));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    expect(listLeakEvents(store).length).toBe(1); // the derived scan did see it
+    const call = store.getCall(store.searchLiteral("config has")[0]!.callId)!;
+    expect(call.redacted).toBe(true);
+    const body = new TextDecoder().decode(call.requestBody!);
+    expect(body).not.toContain(key);
+    expect(body).toContain("[REDACTED:generic-api-key:");
+    // …and the surfaces that were already covered, so the fix can't trade one
+    // hole for another.
+    expect(JSON.stringify(call.displayMessages)).not.toContain(key);
+    expect(call.summary).not.toContain(key);
+    expect(store.searchLiteral(key)).toEqual([]);
     store.close();
   });
 

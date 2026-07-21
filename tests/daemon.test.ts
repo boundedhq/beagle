@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect } from "node:net";
@@ -9,7 +9,18 @@ import { Store } from "../src/core/store/store";
 import { listCalls, listLeakEvents } from "../src/viewer/feed-query";
 import { listSessions } from "../src/viewer/session-view";
 import { buildDetail } from "../src/viewer/detail";
+import { compileRules, scan } from "../src/core/scanner/engine";
+import { loadRuleFile } from "../src/core/scanner/rules";
 import { createServer, type Server } from "node:net";
+
+// The daemon's own corpus, run in-test — for pinning what the BODY scan sees in
+// a fixture, so a test about the derived scan can assert that premise instead of
+// asserting it in a comment. The hmac key only salts fingerprints here.
+const corpusRules = compileRules(
+  loadRuleFile(readFileSync("rules/beagle-rules.json", "utf8")),
+  new Uint8Array(32).fill(7),
+);
+const scanRaw = (text: string) => scan(new TextEncoder().encode(text), {}, corpusRules);
 
 // fake upstream that replies with a fixed Anthropic-ish JSON body
 function fakeUpstream(replyBody?: string): Promise<{ server: Server; port: number; seen: string[] }> {
@@ -637,6 +648,46 @@ describe("Daemon end-to-end", () => {
     // what was rendered against what was found rather than pinning literals.
     const found = view.leaks.map((l) => l.value);
     for (const p of rendered) expect(found).toContain(p);
+    store.close();
+  });
+
+  test("a secret only the DERIVED scan can see is masked in the stored BODY too", async () => {
+    // The other half of the derived scan, and the one it left open: a finding
+    // the body scan never made cannot be in `requestFindings`, so redactBody
+    // masks nothing and the derived pass only rewrites the derived PARTS. The
+    // row then reported `redacted: true` over a body still holding the key.
+    //
+    // JSON escaping is what hides it, and that is the COMMON case rather than a
+    // corner (35 of 35 derived-only findings over 671 real wire calls): the
+    // generic rule allows `["':=\s]{1,5}` between keyword and value, and the
+    // body spends SIX characters on `\": \"` — with a backslash, which is not
+    // even in the class — where the parsed message content spends four on `": "`.
+    const key = "Xk7Qm2Vb9Rt4Ws8Yz1Nc6Pd3aJ5Hf0Lg";
+    const body = JSON.stringify({
+      model: "claude-sonnet-5",
+      messages: [{ role: "user", content: `config has "api_key": "${key}" in it` }],
+    });
+    // Precondition, asserted rather than described: the real engine finds
+    // NOTHING in these bytes. Without it every assertion below would pass just
+    // as well on a body the ordinary span redaction had masked, and the test
+    // would stop covering the hole the moment a rule change made the raw form
+    // matchable.
+    expect(scanRaw(body)).toEqual([]);
+    await sendThroughProxy(daemon.proxyPort, "run-e2e", body);
+    await Bun.sleep(200);
+    const store = Store.openReadOnly(stateDir);
+    const call = store.getCall(store.searchLiteral("config has")[0]!.callId)!;
+    expect(listLeakEvents(store).length).toBe(1); // the derived scan did see it
+    expect(call.redacted).toBe(true);
+    // The stored payload — what redact-on-capture exists to keep off the disk.
+    const stored = new TextDecoder().decode(call.requestBody!);
+    expect(stored).not.toContain(key);
+    expect(stored).toContain("[REDACTED:generic-api-key:");
+    // …and the surfaces that were already covered, so a fix here can't quietly
+    // trade one hole for another.
+    expect(JSON.stringify(call.displayMessages)).not.toContain(key);
+    expect(call.summary).not.toContain(key);
+    expect(store.searchLiteral(key)).toEqual([]);
     store.close();
   });
 
