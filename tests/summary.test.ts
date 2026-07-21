@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { buildSummary } from "../src/daemon/daemon";
+import { redactionPlaceholder } from "../src/transform/redact";
 import type { ParsedRequest } from "../src/parsers/parsers";
 
 // Regression for the Mode B display bug: rows whose only message wasn't from
@@ -192,5 +193,54 @@ describe("buildSummary — wire-order sent half", () => {
     );
     expect(s).not.toContain(SECRET);
     expect(s).toContain("[REDACTED:aws-access-key-id:");
+  });
+
+  test("a placeholder straddling a cap renders WHOLE, not cut to a `[RED…` stump", () => {
+    // The scrub runs before every truncation, so on a leak row a placeholder
+    // straddling a cap is the NORMAL case, not an edge one: a placeholder is
+    // ~35 chars against caps of 40 (the quoted ask) and 100 (the fallback).
+    // Half of one reads as a corrupted transcript AND drops the secret type.
+    const SECRET = "AKIAZQ3DRSTUVWXY2345";
+    const vals = [{ value: SECRET, type: "aws-access-key-id" }];
+    const P = redactionPlaceholder("aws-access-key-id", SECRET);
+
+    // The 40-char quoted ask — the tightest budget in buildSummary.
+    const ask = buildSummary(
+      req([{ role: "user", content: `use key ${SECRET} for deploy` }]),
+      "Deploying.", undefined, vals,
+    );
+    expect(ask).toBe(`"use key ${P}…" → Deploying.`);
+    // ...and the run-past still fits the bound sessionTitle/summaryParts parse
+    // the sent half with — the tripwire if a longer rule id ever lands.
+    expect(ask).toMatch(/^"[^"]{1,200}" → /);
+
+    // The 100-char fallback, with the secret starting at char 95.
+    const fallback = buildSummary(
+      req([{ role: "user", content: `${"p".repeat(94)} ${SECRET}` }]),
+      undefined, undefined, vals,
+    );
+    expect(fallback).toBe(`${"p".repeat(94)} ${P}`);
+    expect(fallback).not.toContain("…"); // nothing followed the secret to drop
+  });
+
+  test("running past a placeholder in BOTH halves still leaves the summary bounded", () => {
+    // The run-past is what keeps a placeholder whole; a ceiling on it is what
+    // keeps the summary a feed LINE — "the summary became unbounded" was a
+    // review finding, and overshooting must not walk it back. Worst real case:
+    // a secret straddling the 40-char ask AND the 80-char reply, each half
+    // overshooting by one placeholder (≤39 chars — the longest rule id is 21).
+    // Ceiling: ask (2 quotes + 38 + 39 + ellipsis = 80) + " → " + reply
+    // (78 + 39 + ellipsis = 118) = 201.
+    const SECRET = "AKIAZQ3DRSTUVWXY2345";
+    const vals = [{ value: SECRET, type: "aws-access-key-id" }];
+    const P = redactionPlaceholder("aws-access-key-id", SECRET);
+    const s = buildSummary(
+      req([{ role: "user", content: `${"a".repeat(30)}${SECRET}${"b".repeat(500)}` }]),
+      `${"c".repeat(70)}${SECRET}${"d".repeat(500)}`,
+      undefined, vals,
+    );
+    expect(s).toBe(`"${"a".repeat(30)}${P}…" → ${"c".repeat(70)}${P}…`);
+    expect(s.length).toBeLessThan(250);
+    expect(s).not.toContain("\n");
   });
 });

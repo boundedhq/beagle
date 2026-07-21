@@ -1327,9 +1327,25 @@ function summarizeActions(actions: ToolAction[], compact = false): string {
   return extra > 0 ? `${shown} +${extra}` : shown;
 }
 
+// Bounded feed-line text. Every caller clamps text buildSummary already
+// redacted (the scrub runs before EVERY truncation, above), so on a leak row a
+// placeholder straddling `max` is the NORMAL case — and a bare slice leaves
+// `my key [RED…`, which reads as a corrupted transcript and drops the secret
+// TYPE the placeholder exists to name. clampRedacted runs past the closing
+// bracket instead; the ellipsis stays for the genuinely-truncated case.
+//
+// This widens a half by at most one placeholder, and STAYS bounded — the
+// property the "summary became unbounded" review finding cared about. The
+// overshoot ceiling is clampRedacted's own: 39 chars for a real placeholder
+// (the longest rule id is 21), 128 for one a captured tool result forged in
+// its content, which is why the quoted-ask regexes in commands.ts/app.js bound
+// that half at 200 rather than firstLine's 40 — see the note there.
 function firstLine(s: string, max: number): string {
   const line = s.split("\n")[0] ?? "";
-  return line.length > max ? line.slice(0, max - 1) + "…" : line;
+  if (line.length <= max) return line;
+  const clamped = clampRedacted(line, max - 1);
+  // Running past to the end dropped nothing — an ellipsis would be a lie.
+  return clamped.length >= line.length ? line : clamped + "…";
 }
 
 function buildSearchText(parsed: ParsedRequest | null, call: CapturedCall, outboundParts: string[]): string {
