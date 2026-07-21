@@ -249,8 +249,9 @@ describe("Daemon end-to-end", () => {
   // frames go out as one chunk; what matters here is the framing the capture
   // path keeps, not how many TCP writes carried it. `extraHeaders` must end
   // with its own CRLF when given. `body` overrides the default well-formed
-  // request for tests about the REQUEST side being broken — the marker must
-  // then appear in the override, since it is what the poll searches for.
+  // request — for tests about the REQUEST side being broken, or ones that need
+  // request-side structure — and the marker must then appear in the override,
+  // since it is what the poll searches for.
   async function streamedCall(runId: string, marker: string, frames: string, extraHeaders = "", body = requestBody(marker)) {
     let replied = false;
     const server = createServer((sock) => {
@@ -902,19 +903,65 @@ describe("Daemon end-to-end", () => {
     // individually innocent frames — so there is no raw copy for the opt-out to
     // protect, and storing nothing just meant the viewer rebuilt it. Same line
     // the always-visible summary already draws.
+    //
+    // The REQUEST carries a manufactured key of its own (block-split, so only
+    // the derived join holds it assembled), because OFF is the one mode where
+    // the viewer consults spans at all — which makes this call the probe for
+    // WHERE a derived-only finding's offsets end up. They index the joined
+    // transcript, not the body, so AlertEngine.process(…, bodySpans=false)
+    // must store NULL: a real offset here would be sliced out of the raw body
+    // by extractLeaks and rendered as a highlight "value" of arbitrary JSON.
     await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: false } });
+    const reqBody = JSON.stringify({
+      model: "claude-sonnet-5",
+      system: "You are Claude Code.",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "stream a split secret unredacted AKIAZQ3DRSTUV" },
+          { type: "text", text: "WXY6789 goes out in the same message" },
+        ],
+      }],
+    });
+    expect(scanRaw(reqBody)).toEqual([]); // premise: the byte scan is blind to both halves
+    let store: Store | undefined;
     try {
       const call = await streamedCall(
         "run-split-noredact",
         "stream a split secret unredacted",
         deltaFrame("key AKIAZQ3DRSTUV") + deltaFrame("WXY2345 done"),
+        "",
+        reqBody,
       );
-      const d = buildDetail(call, []);
+      // The outbound manufactured key alerted — and only it: the response-side
+      // key came FROM the provider and inbound findings never alert.
+      expect(alerts.length).toBe(1);
+      expect(alerts[0]!.secretType).toBe("aws-access-key-id");
+      store = Store.openReadOnly(stateDir);
+      const { leakSpansFor, leakTypesFor } = await import("../src/viewer/detail");
+      // The derived-only event really is recorded on this call (this guard is
+      // what keeps the [] below from passing because nothing was written)…
+      expect(leakTypesFor(store, call.id).map((t) => t.secretType)).toContain("aws-access-key-id");
+      // …and its occurrence stored NULL spans: leakSpansFor filters
+      // span_start IS NOT NULL, so a derived-only row must yield nothing.
+      const spans = leakSpansFor(store, call.id);
+      expect(spans).toEqual([]);
+      const d = buildDetail(call, spans);
+      // The row is NOT redacted in this mode, so buildDetail's span branch is
+      // live: no span, no slice — a leak "value" here would be a garbage
+      // fragment of the body cut at transcript offsets.
+      expect(d.leaks).toEqual([]);
+      // Both manufactured keys are masked in the projection…
+      expect(JSON.stringify(d.messages)).not.toContain("AKIAZQ3DRSTUVWXY6789");
+      expect(JSON.stringify(d.messages)).toContain("[REDACTED:aws-access-key-id:");
       expect(d.responseText).not.toContain("AKIAZQ3DRSTUVWXY2345");
       expect(d.responseText).toContain("[REDACTED:aws-access-key-id:");
-      // The raw panes still show every byte as received — that IS the setting.
+      // …and the raw panes still show every byte as received — that IS the
+      // setting.
+      expect(new TextDecoder().decode(call.requestBody!)).toContain("AKIAZQ3DRSTUV");
       expect(new TextDecoder().decode(call.sseRaw!)).toContain("AKIAZQ3DRSTUV");
     } finally {
+      store?.close();
       await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
     }
   });

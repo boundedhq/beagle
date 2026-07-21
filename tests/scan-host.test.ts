@@ -21,6 +21,28 @@ describe("ScanHost (worker-hosted scanner)", () => {
     expect(r.findings[0]?.secretType).toBe("aws-access-key-id");
   });
 
+  test("the per-rule finding cap truncates silently: 500 findings, state still ok", async () => {
+    // MAX_FINDINGS_PER_RULE is a deadline backstop, not a detection limit, and
+    // hitting it is deliberately NOT a failed scan: "incomplete" is reserved
+    // for a scan whose verdict can't be trusted at all (deadline breach, dead
+    // worker), and flipping it here would hold out or withhold every
+    // pathological-but-scanned body. The cost is real and documented in the
+    // daemon: match 501 of a rule is invisible to every downstream pass, on a
+    // row that reads scanState "ok". This pins both halves of that trade —
+    // whoever changes the cap or its silence on purpose updates this test.
+    const KEY = "AKIAZQ3DRSTUVWXY2345";
+    const body = Array.from({ length: 501 }, () => KEY).join("\n");
+    const r = await host.scan(new TextEncoder().encode(body), {});
+    expect(r.state).toBe("ok"); // the cap does not masquerade as a failure
+    expect(r.findings.length).toBe(500);
+    expect(r.findings.every((f) => f.secretType === "aws-access-key-id")).toBe(true);
+    // Matching is left to right, so the one dropped is exactly the 501st
+    // occurrence — and every reported span still slices a real occurrence.
+    const lastAt = body.lastIndexOf(KEY);
+    expect(r.findings.some((f) => f.start === lastAt)).toBe(false);
+    for (const f of r.findings) expect(body.slice(f.start, f.end)).toBe(KEY);
+  });
+
   test("deadline breach terminates the worker and reports incomplete, then recovers", async () => {
     const evil = new ScanHost({
       rulesJson: RULES_JSON,
