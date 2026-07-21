@@ -442,18 +442,55 @@ describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
       store.close();
     });
 
-    test("the summary composes ONCE, when the row first gains a response", () => {
+    // The store used to compose only on the FIRST attach, so a turn that opened
+    // with a codex preamble kept advertising the preamble while the row held
+    // the real answer (seen in real traffic). It now composes on every write
+    // and hands the callback what it needs to not nest its own output; the
+    // daemon owns that judgement (see composeStitchSummary in summary.test.ts).
+    const attachWith = (
+      store: Store, body: string, compose: (e: string | null, h: boolean) => string | null,
+    ) =>
+      store.attachOtelResponse({
+        sessionId: "sess-1", promptKey: "prompt-1", tsResponse: Date.now(),
+        composeSummary: compose,
+        responseBody: new TextEncoder().encode(body),
+        extend: { ordinal: 0 },
+      });
+
+    test("composeSummary runs on growth too, and is told the row already answered", () => {
       const store = Store.open(dir);
       const turn = promptRow();
       store.insertCall(turn);
-      attachExtend(store, "preamble");
-      expect(store.getCall(turn.id)!.summary).toBe('"how does memory work?" → preamble');
-      attachExtend(store, "preamble\n\nthe real answer");
-      // The grown body replaced; the summary did NOT re-compose (which would
-      // nest the already-composed line inside itself).
+      const seen: Array<{ existing: string | null; hasResponse: boolean }> = [];
+      const record = (out: string) => (e: string | null, h: boolean) => {
+        seen.push({ existing: e, hasResponse: h });
+        return out;
+      };
+      attachWith(store, "preamble", record('"q" → preamble'));
+      attachWith(store, "preamble, then the real answer", record('"q" → the real answer'));
+      // First call sees the bare question and hasResponse=false; the growth
+      // call sees the line the first one produced, and is told so — that flag
+      // is the only thing separating "compose fresh" from "don't nest".
+      expect(seen).toEqual([
+        { existing: "how does memory work?", hasResponse: false },
+        { existing: '"q" → preamble', hasResponse: true },
+      ]);
+      expect(store.getCall(turn.id)!.summary).toBe('"q" → the real answer');
+      store.close();
+    });
+
+    test("a null from composeSummary keeps the stored summary while the body still grows", () => {
+      // The daemon's escape hatch: when it can't recognize its own composed
+      // line it declines rather than risk mangling a real summary. The answer
+      // must still land — declining to re-title a row can't cost the answer.
+      const store = Store.open(dir);
+      const turn = promptRow();
+      store.insertCall(turn);
+      attachWith(store, "preamble", () => '"q" → preamble');
+      attachWith(store, "preamble, then the real answer", () => null);
       const got = store.getCall(turn.id)!;
-      expect(new TextDecoder().decode(got.responseBody!)).toBe("preamble\n\nthe real answer");
-      expect(got.summary).toBe('"how does memory work?" → preamble');
+      expect(new TextDecoder().decode(got.responseBody!)).toBe("preamble, then the real answer");
+      expect(got.summary).toBe('"q" → preamble');
       store.close();
     });
 

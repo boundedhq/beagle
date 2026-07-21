@@ -263,10 +263,17 @@ export class Store {
     model?: string;
     tokensIn?: number;
     tokensOut?: number;
-    /** Given the turn row's existing summary (the question), return the
-     *  combined one. Kept a callback so summary FORMATTING stays in the daemon
-     *  next to buildSummary, and the store stays a dumb writer. */
-    composeSummary?: (existing: string | null) => string | null;
+    /** Given the turn row's existing summary and whether the row already holds
+     *  a response, return the combined one — or null to leave it as is. Kept a
+     *  callback so summary FORMATTING stays in the daemon next to buildSummary,
+     *  and the store stays a dumb writer.
+     *
+     *  Called on EVERY write, growth included, so it must be idempotent: handed
+     *  a summary it produced earlier it has to replace the answer half, never
+     *  nest the whole line inside a fresh one. `hasResponse` is how it tells
+     *  the two apart — see the daemon's callback, which falls back to leaving
+     *  the summary alone when it can't recognize its own output. */
+    composeSummary?: (existing: string | null, hasResponse: boolean) => string | null;
     redacted?: boolean;
     responseBody: Uint8Array | null;
     /** Codex rollout answers GROW while their turn runs (preamble → … → final
@@ -321,9 +328,11 @@ export class Store {
       if (input.extend && (input.responseBody?.byteLength ?? 0) <= have) {
         return { id: target.id, changed: false };
       }
-      // Compose only when the row first gains a response; re-composing on
-      // growth would nest the already-combined "q" → a line inside itself.
-      const summary = input.composeSummary && have === 0 ? input.composeSummary(target.summary) : null;
+      // Compose on growth too, or a turn that opened with a codex preamble
+      // ("I'm checking the docs…") keeps describing the preamble forever while
+      // the row holds the real answer. The callback owns not nesting its own
+      // output — it gets `have > 0` to know this row already had a response.
+      const summary = input.composeSummary ? input.composeSummary(target.summary, have > 0) : null;
       this.db.run(
         `UPDATE exchanges SET ts_response=?, model=COALESCE(?, model),
            tokens_in=?, tokens_out=?, bytes_resp=?, summary=COALESCE(?, summary),

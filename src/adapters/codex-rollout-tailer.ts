@@ -128,6 +128,10 @@ function buildResponseCall(convId: string, ans: RolloutAnswer, fallbackTs: numbe
     convId,
     promptId: ans.promptKey,
     promptOrdinal: ans.ordinal,
+    // Only once narration precedes the reply. On a single-message turn the two
+    // are the same string, and saying so would buy a second redaction pass to
+    // reach the identical feed line.
+    responseHeadline: ans.latest === ans.answer ? undefined : ans.latest,
   };
 }
 

@@ -136,6 +136,34 @@ describe("answersFromText", () => {
       expect(answersFromText(MULTI)[0]!.tsMs).toBe(Date.parse("2026-07-20T21:30:58.000Z"));
     });
 
+    test("`latest` is the final message alone — what the feed line describes", () => {
+      // The whole merged answer OPENS with narration, and a one-line summary
+      // reads the first line: without this the feed said the turn's answer was
+      // "I'm checking the docs first." while the row held the real reply.
+      const [answer] = answersFromText(MULTI);
+      expect(answer!.latest).toBe("Codex has three memory-like layers: …the real answer…");
+      expect(answer!.answer).toBe(MERGED); // the stored body still keeps everything
+    });
+
+    test("`latest` equals the answer on a single-message turn", () => {
+      // No narration, nothing to split — the tailer leans on this equality to
+      // skip sending a headline (and its extra redaction pass) when the turn
+      // has none. True of every turn in the plain two-turn rollout.
+      for (const answer of answersFromText(TWO_TURN)) {
+        expect(answer.latest).toBe(answer.answer);
+      }
+    });
+
+    test("each incremental push carries the newest message as `latest`", () => {
+      const pairing = new RolloutPairing();
+      const lines = MULTI.split("\n");
+      const first = pairing.push(lines.slice(0, 2).join("\n") + "\n");
+      expect(first[0]!.latest).toBe("I’m checking the docs first."); // all there is yet
+      const rest = pairing.push(lines.slice(2).join("\n") + "\n");
+      expect(rest[0]!.latest).toBe("Codex has three memory-like layers: …the real answer…");
+      expect(first[0]!.latest).toBe("I’m checking the docs first."); // snapshot not mutated
+    });
+
     test("fed incrementally, each push yields the merged-so-far answer — a prefix chain", () => {
       // The tailer feeds only NEW lines each poll; the pairing must re-yield
       // the turn's merged whole so the grown answer replaces the shorter view.

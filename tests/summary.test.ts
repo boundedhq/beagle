@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildSummary } from "../src/daemon/daemon";
+import { buildSummary, composeStitchSummary } from "../src/daemon/daemon";
 import { redactionPlaceholder } from "../src/transform/redact";
 import type { ParsedRequest } from "../src/parsers/parsers";
 
@@ -277,5 +277,49 @@ describe("buildSummary — wire-order sent half", () => {
       expect(s).not.toMatch(/\[REDACTED:[^\]]*$/); // never a bisected tail
       expect(s).not.toContain("……"); // one truncation mark, not two
     }
+  });
+});
+
+// The stitched turn's feed line. A codex turn often opens with a preamble
+// ("I'm using the docs skill…") that attaches first and is REPLACED seconds
+// later by the real answer — so this runs more than once per row, handed its
+// own previous output. Observed in real traffic: a row holding the full
+// answer whose feed line still advertised the preamble.
+describe("composeStitchSummary", () => {
+  test("the first attach composes the question and the answer, in wire order", () => {
+    expect(composeStitchSummary("how does codex memory work?", false, "It has four kinds."))
+      .toBe('"how does codex memory work?" → It has four kinds.');
+  });
+
+  test("growth replaces the ANSWER half and keeps the question — never nests", () => {
+    const first = composeStitchSummary("how does codex memory work?", false, "I’m checking the docs.")!;
+    const grown = composeStitchSummary(first, true, "It has four kinds.");
+    expect(grown).toBe('"how does codex memory work?" → It has four kinds.');
+    // The bug this guards: a naive re-compose quotes the whole composed line
+    // and buries the question one level down.
+    expect(grown).not.toContain('""');
+    // Idempotent under repeat — the tailer re-emits, and a growth can land
+    // many times across one turn.
+    expect(composeStitchSummary(grown!, true, "It has four kinds.")).toBe(grown);
+  });
+
+  test("a question containing a quote is left alone on growth rather than corrupted", () => {
+    // The prefix match can't recognize its own output here (`"say "hi"" → …`),
+    // and on a row that already has an answer the safe move is to keep what is
+    // stored: composing fresh would nest the whole line inside a new quote
+    // pair and permanently mangle a real summary.
+    const first = composeStitchSummary('say "hi" to the model', false, "preamble")!;
+    expect(first).toBe('"say "hi" to the model" → preamble');
+    expect(composeStitchSummary(first, true, "the real answer")).toBe(null); // null = keep stored
+  });
+
+  test("no existing summary → the answer stands alone", () => {
+    expect(composeStitchSummary(null, false, "just the answer")).toBe("just the answer");
+  });
+
+  test("an uncomposed summary on a response-less row still composes", () => {
+    // The plain Mode B path: the row holds only its question, no answer yet.
+    expect(composeStitchSummary("a bare question", false, "the answer"))
+      .toBe('"a bare question" → the answer');
   });
 });

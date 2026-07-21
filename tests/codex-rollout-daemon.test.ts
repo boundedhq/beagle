@@ -192,6 +192,11 @@ describe("Codex rollout response capture end-to-end", () => {
       expect(new TextDecoder().decode(call.responseBody!)).toBe(`${preamble}\n\n${finalAnswer}`);
       expect(listCalls(s, 50).length).toBe(1); // still one row — grown, not duplicated
       expect(s.searchLiteral("memory-like layers").length).toBe(0); // inbound stays out of search
+      // The feed line follows the body. Observed in real traffic: the row held
+      // the full answer while its summary still advertised the preamble, so
+      // the turn read as unanswered at a glance.
+      expect(call.summary).toBe(`"${prompt}" → ${finalAnswer}`);
+      expect(call.summary).not.toContain("docs skill");
     });
   });
   test("each stitch pushes 'call-updated' to an open viewer — and silent re-emits stay silent", async () => {

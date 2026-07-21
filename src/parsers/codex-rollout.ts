@@ -26,6 +26,13 @@ export interface RolloutAnswer {
   /** codexPromptKey of the user prompt this answer replies to. */
   promptKey: string;
   answer: string;
+  /** The NEWEST assistant message in `answer` (equal to it until a turn merges
+   *  a second one). Codex narrates before it answers, so a merged answer opens
+   *  with a preamble — "I'm using the docs skill…" — and the one-line summary,
+   *  which reads the FIRST line, would describe the narration while the row
+   *  holds the real reply. The feed line summarizes this instead; the stored
+   *  body stays the whole merged answer. */
+  latest: string;
   /** Rollout line timestamp in ms, or undefined if absent/unparseable. */
   tsMs?: number;
   /** Which same-key turn this is (0-based): hash(prompt) is the only join key,
@@ -124,6 +131,7 @@ export class RolloutPairing {
           const grown: RolloutAnswer = {
             ...this.open,
             answer: this.open.answer + "\n\n" + answer,
+            latest: answer, // the substantive reply, once narration precedes it
             tsMs: tsMs ?? this.open.tsMs, // completion time = last message's
           };
           // Within one push, supersede the same turn's earlier snapshot rather
@@ -134,7 +142,7 @@ export class RolloutPairing {
         } else {
           const ordinal = this.turns.get(this.currentKey) ?? 0;
           this.turns.set(this.currentKey, ordinal + 1);
-          this.open = { promptKey: this.currentKey, answer, tsMs, ordinal };
+          this.open = { promptKey: this.currentKey, answer, latest: answer, tsMs, ordinal };
           out.push(this.open);
         }
       }
