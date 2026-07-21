@@ -65,7 +65,14 @@ function App() {
   const [expanded, setExpanded] = useState(null);
   const [stats, setStats] = useState(null); // whole-store totals — the feed is a 500-row window
   // { id, sessionId, n } — the last row that gained a response in place. The
-  // counter is what makes a repeat stitch on the same row a new value.
+  // counter is what makes a repeat stitch on the SAME row a new value; the
+  // views below select on id/sessionId and pass 0 when it isn't theirs.
+  // That means a stitch elsewhere flips an open pane's prop back to 0, costing
+  // it one extra refetch — bounded (once per pane per stitch of its own row,
+  // and only while it is open) and deliberately preferred over a per-id map
+  // that would grow for the tab's lifetime. It never MISSES a refresh, which
+  // is the direction that matters: n only ever increases, so a stitch naming
+  // this view always changes its prop.
   const [stitched, setStitched] = useState(null);
   const searchBox = useRef(null);
 
