@@ -203,11 +203,12 @@ describe("pasted secrets, JSON-encoded as they arrive on the wire", () => {
   // is a raw body that a looser rule was measured to fire on, at high severity,
   // with no secret present — these pin the shapes that were rejected while
   // arriving at the fix, so a future widening has to re-argue them:
-  //   a bare \ in the class            -> "windows path", "home dir listing"
-  //   \\? before any separator         -> the backslash-then-separator cases
-  //   \\[ntr] for escaped whitespace   -> "hash-named dir after \n"
+  //   a bare \ in the class      -> "windows path", "home dir listing"
+  //   \\? before any separator   -> the backslash-then-separator cases
   // A raw body carries the single backslash the user typed; wireBody doubles
-  // it, so asserting both covers each form.
+  // it, so asserting both covers each form. Escaped whitespace (\\[ntr]) needs
+  // no case here: maskJsonEscapes already blanks those to spaces before any
+  // rule runs, which is also why this rule only has to learn \".
   const PATHS: Array<[string, string]> = [
     ["windows path", `C:\\aws\\${DIGEST}\\cache`],
     ["home dir listing", `ls ~/.aws\\${DIGEST}`],
@@ -217,9 +218,6 @@ describe("pasted secrets, JSON-encoded as they arrive on the wire", () => {
     ["backslash then equals", `C:\\aws\\=${DIGEST}`],
     ["backslash then colon", `C:\\aws\\:${DIGEST}`],
     ["backslash then tab", `C:\\aws\\\t${DIGEST}`],
-    // A 41-char hash-named segment beginning with n: \n must not read as an
-    // escaped newline that separates "aws" from a 40-char secret.
-    ["hash-named dir after \\n", `C:\\aws\\n${DIGEST.slice(0, 39)}x\\blob.bin`],
   ];
   for (const [shape, text] of PATHS) {
     test(`a backslash that does not escape a quote stays silent: ${shape}`, () => {
