@@ -60,8 +60,12 @@ export interface DaemonOptions {
 }
 
 // One derived-text redaction outcome (Daemon.redactDerived). `values` are in
-// the DERIVED form, for scrubbing text built from these parts that is not one
-// of them — the summary's quoted ask, a truncated transcript copy.
+// the DERIVED form, and have two kinds of consumer. Text built FROM these parts
+// that is not one of them — the summary's quoted ask, a truncated transcript
+// copy — and, as applyCaptureRedaction's extraValues, the stored BODIES, which
+// are the opposite relation: the source these parts were rendered from. A value
+// only this scan matched has no span in those bytes, so scrubbing by value is
+// the only thing that reaches it there.
 interface DerivedRedaction {
   /** The request-derived parts, redacted. */
   outbound: string[];
@@ -759,11 +763,23 @@ export class Daemon {
         ? null
         : redactRawStream(sseRaw, call.response.bodyBytes ?? null, respScan?.findings ?? [], redaction.values);
       // Outbound only (see buildSearchText): index the request, not the response.
+      //
+      // This swaps the index off the span-redacted PROJECTION and onto the
+      // stored body, which is the broader surface — the projection is
+      // [system, ...contents] and the body is everything that actually left, so
+      // it is the one that can answer "was this sent" without a false negative
+      // (the Mode B half says the same, at greater length). The trade is that
+      // the body is value-scrubbed where the projection was span-redacted, so
+      // it inherits the 8-char floor. Widened by extraValues: a call whose only
+      // finding is derived now lands here whenever that value was in the body,
+      // where it used to keep the projection. Both surfaces are masked for the
+      // value that got it here; what differs is a SECOND, sub-floor value on
+      // the same call, which the projection would have spanned out.
       searchText = new TextDecoder().decode(requestBody);
     }
     const summary = redaction?.heldOut
       ? "[REDACTION INCOMPLETE: content withheld]"
-      : buildSummary(summaryParsed, derived.inbound[0], summaryActions, [
+      : buildSummary(summaryParsed, derived.inbound[0], summaryActions,
           // A BACKSTOP now, not the defense: the parts above already arrive
           // offset-redacted. What still reaches it is redactDerivedParts'
           // overlap skip — a finding sharing bytes with an already-spliced one
@@ -780,10 +796,15 @@ export class Daemon {
           // scanState "incomplete" so the reader is told. Runs whatever the
           // setting: the feed line is always visible, so it must never depend
           // on redact-on-capture to do its scrubbing.
-          ...(redaction?.values ?? []),
-          ...bodyValues,
-          ...derived.values,
-        ]);
+          //
+          // ONE list, not a union of three: `redaction.values` already contains
+          // the body findings it spliced AND derived.values (handed to it as
+          // extraValues), so re-listing those would just re-scan every message
+          // for strings the first pass replaced — the same O(values x messages)
+          // cost the lazy hashing right below is written to avoid. The tails
+          // are what the OFF path gets, where there is no redaction to ask.
+          redaction ? redaction.values : [...bodyValues, ...derived.values],
+        );
     // A wire row normally persists NO transcript: the viewer re-parses the
     // stored body, which is byte-exact, so re-deriving is faithful and free.
     // Derived redaction breaks that. A secret the display MANUFACTURES by
@@ -824,7 +845,9 @@ export class Daemon {
     if (!redaction?.heldOut && derived.values.length > 0 && parsed) {
       // Built inside the branch: persisting a projection is the exception, so
       // the common row must not pay to assemble a value list it never reads.
-      const values = [...derived.values, ...(redaction?.values ?? []), ...bodyValues];
+      // One list rather than a union — see the summary's note above for why
+      // `redaction.values` already covers the other two.
+      const values = redaction ? redaction.values : [...derived.values, ...bodyValues];
       displayMessages = [
         { role: "system", content: outContents[0]! },
         ...redactedMessages.map((m) =>
@@ -1064,13 +1087,13 @@ export class Daemon {
             { model: call.model, messages: summaryMessages } as ParsedRequest,
             derived.inbound[0],
             undefined,
-            [
-              // The same backstop the wire path keeps, reaching the same two
-              // cases and carrying the same 8-char limit — see there.
-              ...(redaction?.values ?? []),
-              ...bodyValues,
-              ...derived.values,
-            ],
+            // The same backstop the wire path keeps, reaching the same two
+            // cases and carrying the same 8-char limit — see there. And picked
+            // the same way: `redaction.values` is already the union of these
+            // two (the body findings it spliced, plus derived.values as
+            // extraValues), so listing them again would only re-scan every
+            // message for strings the first pass has already replaced.
+            redaction ? redaction.values : [...bodyValues, ...derived.values],
           );
       const scanState =
         redaction?.heldOut || derived.incomplete ? "incomplete" : scanResult.state;

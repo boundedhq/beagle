@@ -342,12 +342,16 @@ describe("Mode B end-to-end through the daemon", () => {
     const store = Store.openReadOnly(stateDir);
     expect(listLeakEvents(store).length).toBe(1); // the derived scan did see it
     const call = store.getCall(store.searchLiteral("config has")[0]!.callId)!;
-    expect(call.redacted).toBe(true);
+    // THE PIN — the stored payload. Deliberately the same fixture as the wire
+    // test: one payload, two ingest paths, so deleting `extraValues` from
+    // either call site leaves the other test green and names which path broke.
     const body = new TextDecoder().decode(call.requestBody!);
     expect(body).not.toContain(key);
     expect(body).toContain("[REDACTED:generic-api-key:");
-    // …and the surfaces that were already covered, so the fix can't trade one
-    // hole for another.
+    // Guards, not pins — all three held before the fix (see the wire test's
+    // note): the row flag is ORed with the derived values upstream, and the
+    // transcript and index were already covered by the derived pass.
+    expect(call.redacted).toBe(true);
     expect(JSON.stringify(call.displayMessages)).not.toContain(key);
     expect(call.summary).not.toContain(key);
     expect(store.searchLiteral(key)).toEqual([]);

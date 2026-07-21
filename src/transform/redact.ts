@@ -66,6 +66,10 @@ function jsonUnescaped(value: string): string | null {
   }
 }
 
+// Hoisted: a literal here would materialize a RegExp per call, and this runs
+// once per value per scrubbed text (O(values x messages) on the summary pass).
+const JSON_MUST_ESCAPE_RE = /["\\\u0000-\u001f]/;
+
 // The same difference read the other way, and needed for the same reason once a
 // value can arrive from a DERIVED surface: applyCaptureRedaction's extraValues
 // are matched in the transcript's decoded text and scrubbed from the raw BODY,
@@ -80,10 +84,21 @@ function jsonUnescaped(value: string): string | null {
 // `\/` for a slash, or `\u0041` for an ASCII letter, renders that value in a
 // third form this misses) — which is why the derived text is SCANNED rather
 // than only re-encoded.
+//
+// Narrow by construction, and unit-tested rather than end-to-end for that
+// reason: of the 30 rules, only connection-string (`[^\s@\/]{4,}`) and
+// private-key (`[\s\S]`) have a secret group that can hold a character JSON
+// escapes at all — every other value class is alphanumeric-ish, so this returns
+// null and costs one regex test. And for those two the body scan usually
+// matches as well, because maskJsonEscapes lets it see through the escapes, so
+// a real span already covers the bytes. This is for the residue of that
+// intersection: a value the derived scan matched decoded, in bytes no span
+// reached.
 function jsonEscaped(value: string): string | null {
-  if (!/["\\\u0000-\u001f]/.test(value)) return null; // nothing JSON must escape
-  const out = JSON.stringify(value).slice(1, -1); // strip the quotes it adds
-  return out === value ? null : out;
+  if (!JSON_MUST_ESCAPE_RE.test(value)) return null; // nothing JSON must escape
+  // Unconditional past the pre-test: every character it lets through is one
+  // JSON must escape, so the encoded form always differs from the raw one.
+  return JSON.stringify(value).slice(1, -1); // strip the quotes it adds
 }
 
 // Scrub known secret values by literal match wherever they appear — used on
@@ -102,10 +117,15 @@ function jsonEscaped(value: string): string | null {
 // survives — buildSummary scrubs raw parsed text by value alone, so a password
 // under the floor reaches the always-visible feed line. Known and unfixed here:
 // a floor low enough to catch it would blank four-char substrings everywhere.
-// Do not read this floor as safe for short values. Re-checked per form, because decoding
-// only shortens — but note the floor is a weaker guarantee for a decoded form
-// than for a raw one: 48 chars of \uXXXX escapes decode to the 8-char word
-// "password", and scrubbing that would blank the word wherever it appears.
+// Do not read this floor as safe for short values. Re-checked per form, because
+// the forms differ in length both ways. Decoding only SHORTENS, and the floor is
+// a weaker guarantee for a decoded form than for a raw one: 48 chars of \uXXXX
+// escapes decode to the 8-char word "password", and scrubbing that would blank
+// the word wherever it appears. Encoding only LENGTHENS, so it runs the other
+// way — a six-char `a"b"cd` is skipped raw and scrubbed as the eight-char
+// `a\"b\"cd`, which is the more distinctive string of the two and so the safer
+// one to act on. Both directions over-redact rather than under-, which is why
+// the check is per form and not on the raw value alone.
 // Over-redaction, i.e. the fail-safe direction, and it needs a client that
 // escapes ASCII letters — no standard serializer does (Python's ensure_ascii
 // escapes only non-ASCII) — so it is documented rather than guarded against.
@@ -327,7 +347,14 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
 }
 
 export interface CaptureRedaction {
-  /** True only when the stored content was actually rewritten (viewer highlight). */
+  /** True only when these BODIES were actually rewritten — measured, not
+   *  claimed. NOT the row's `redacted` column and NOT the viewer highlight:
+   *  those answer "was any stored content rewritten", and the DERIVED surfaces
+   *  (display_messages, summary, search index) are stored content this field
+   *  says nothing about. A secret the display manufactured by joining two
+   *  content blocks rewrites those three and no body, so it reads false here
+   *  and true on the row. The caller owns that OR — it is the half that knows
+   *  what it did with its own parts (daemon.ts, both capture paths). */
   redacted: boolean;
   /** Incomplete scan: bodies withheld outright — the caller must withhold its
    *  derived text (summary, search index, raw stream) too. */
@@ -366,17 +393,18 @@ export function applyCaptureRedaction(o: {
    *  the USERNAME's span, and redaction shipped the password in cleartext. A
    *  value is insensitive to which occurrence wins; a span is not.
    *
-   *  Two residuals, both inherited from redactValuesInText and neither closed
-   *  here. The 8-char floor: under it only connection-string can go (it captures
-   *  the password alone), and a value that short is scrubbed from nothing —
-   *  what covers those in practice is that the same bytes usually satisfy the
-   *  rule in the body too, since its password class eats JSON structure up to
-   *  the `@`, so a real span lands over the password. Not floor-exempted here
-   *  because scrubbing a four-char string out of a whole request body blanks
-   *  timestamps and ids along with it. And the fixed list of value forms: a body
-   *  whose serializer escapes what JSON.stringify leaves alone (`\/`, `\u0041`)
-   *  writes a form no re-encoding of the value produces. */
-  extraValues?: Array<{ value: string; type: string }>;
+   *  So it inherits both of redactValuesInText's residuals, and they stay
+   *  documented on the two functions that OWN them rather than restated here:
+   *  the 8-char floor (see there — under it only connection-string can go, and
+   *  nothing is exempted from it here, because scrubbing a four-char string out
+   *  of a whole request body blanks timestamps and ids along with it), and the
+   *  fixed list of value forms (see jsonEscaped).
+   *
+   *  REQUIRED, not optional, though `[]` is a perfectly good answer. A new
+   *  ingest path that simply forgot this would compile clean while reopening
+   *  exactly the hole it closes — an omission no type checker and no test would
+   *  report. Spelling `[]` is a decision; leaving it out was an accident. */
+  extraValues: Array<{ value: string; type: string }>;
 }): CaptureRedaction {
   if (o.incomplete) {
     return {
@@ -388,18 +416,16 @@ export function applyCaptureRedaction(o: {
     };
   }
   const respFindings = o.responseFindings ?? [];
-  const extra = o.extraValues ?? [];
-  if (o.requestFindings.length === 0 && respFindings.length === 0 && extra.length === 0) {
-    return { redacted: false, heldOut: false, requestBody: o.requestBytes, responseBody: o.responseBody, values: [] };
-  }
+  // No fast path for "nothing to do": every step below returns its input BY
+  // REFERENCE when its list is empty (redactBody, redactValues), so the
+  // fall-through already is that path — `redacted` then measures false and the
+  // caller gets its own bytes back. A guard here would have to enumerate every
+  // input source to stay correct, and getting that enumeration wrong is silent.
+  // That is this fix one level up: the guard read the two findings lists, so
+  // adding a third source of secrets would have skipped the scrub entirely.
   const req = redactBody(o.requestBytes, o.requestFindings);
-  let responseBody = o.responseBody;
-  let values = req.values;
-  if (respFindings.length > 0 && responseBody) {
-    const resp = redactBody(responseBody, respFindings); // spans first: offsets index the original bytes
-    responseBody = resp.bytes;
-    values = [...req.values, ...resp.values];
-  }
+  // spans first: offsets index the original bytes
+  const resp = respFindings.length > 0 && o.responseBody ? redactBody(o.responseBody, respFindings) : null;
   // Span redaction only masks the ONE occurrence the scanner reported, but a
   // secret can appear more than once in a body (the codex request echoes the
   // prompt across several fields) and an echoed key can reappear in the
@@ -414,9 +440,28 @@ export function applyCaptureRedaction(o: {
   // Returned in `values` as well, so the surfaces the caller redacts from these
   // same bytes (the raw SSE stream, the search text, the summary's backstop)
   // cover them without a second list to keep in step.
-  if (extra.length > 0) values = [...values, ...extra];
+  //
+  // Deduped by VALUE, because these lists overlap BY CONSTRUCTION: a secret
+  // matched in both views is in req.values and again in extraValues (the
+  // derived pass reports every finding, not only the derived-only ones), a body
+  // echoing one key reports it once per occurrence, and two rules on the same
+  // bytes report it twice. Every copy after the first is a guaranteed MISS in
+  // redactValuesInText — the first pass already replaced every occurrence — and
+  // a miss is the most expensive search there is, a full pass over the body.
+  // Measured on an 8 MiB body: 1000 identical values cost 346 ms where one
+  // costs 0.31 ms. Output is unchanged, because the first entry already won —
+  // its type picks the placeholder and the duplicates no-op behind it. The
+  // dedup lands HERE and not per consumer because the list leaves through
+  // `values` into five of them (both bodies, the raw stream, the summary, the
+  // transcript), and it rides the array copy those spreads already pay for.
+  const seen = new Set<string>();
+  const values = [...req.values, ...(resp?.values ?? []), ...o.extraValues].filter((v) => {
+    if (seen.has(v.value)) return false;
+    seen.add(v.value);
+    return true;
+  });
   const requestBody = redactValues(req.bytes, values) ?? req.bytes;
-  responseBody = redactValues(responseBody, values);
+  const responseBody = redactValues(resp?.bytes ?? o.responseBody, values);
   // Measured, not assumed. A finding always rewrites the body it was found in,
   // but an extraValue need not appear in these bytes at all — a secret the display
   // MANUFACTURED by joining two content blocks exists only in the derived text

@@ -78,6 +78,7 @@ describe("redact-on-capture (R11)", () => {
     expect(findings.length).toBe(1);
     const out = dec(applyCaptureRedaction({
       incomplete: false, requestBytes: enc(body), requestFindings: findings, responseBody: null,
+      extraValues: [],
     }).requestBody);
     expect(out).not.toContain(":root@"); // the password is gone
     expect(out).toContain("mongodb://root:[REDACTED:connection-string:"); // the username is not
@@ -181,6 +182,25 @@ describe("redact-on-capture (R11)", () => {
     const out = redactValuesInText(`{"prompt":"${escaped}"}`, [{ value: decoded, type: "private-key" }]);
     expect(out).not.toContain("MIIEowIBAAKCAQEAsaid");
     expect(out).toBe(`{"prompt":"${redactionPlaceholder("private-key", decoded)}"}`);
+  });
+
+  test("escaping can lift a sub-floor value OVER the 8-char floor, and that is intended", () => {
+    // The floor is re-checked per form, and the note on redactValuesInText
+    // reasons about decoding, which only SHORTENS. Encoding lengthens: this
+    // six-char value is under the floor raw and eight escaped, so the escaped
+    // form scrubs where the raw one is skipped. Over-redaction of a genuine
+    // secret, i.e. the fail-safe direction — and the form that clears the floor
+    // is the more distinctive of the two, so it is the safer one to act on.
+    // Pinned because it is a behaviour the third form ADDED, not one it
+    // inherited.
+    const raw = 'a"b"cd'; // 6
+    const escaped = 'a\\"b\\"cd'; // 8
+    expect(raw.length).toBe(6);
+    expect(escaped.length).toBe(8);
+    expect(redactValuesInText(`held ${raw} here`, [{ value: raw, type: "x" }])).toBe(`held ${raw} here`);
+    expect(redactValuesInText(`{"k":"${escaped}"}`, [{ value: raw, type: "x" }])).toBe(
+      `{"k":"${redactionPlaceholder("x", raw)}"}`,
+    );
   });
 
   test("an extraValue no span covers is masked out of the stored bodies", () => {
@@ -461,6 +481,7 @@ describe("redact-on-capture (R11)", () => {
       requestBytes: enc("could hold anything"),
       requestFindings: [],
       responseBody: enc("also unverified"),
+      extraValues: [],
     });
     expect(out.redacted).toBe(true);
     expect(out.heldOut).toBe(true);
@@ -479,6 +500,7 @@ describe("redact-on-capture (R11)", () => {
       requestFindings: [],
       responseBody: enc(resp),
       responseFindings: [finding(start, start + secret.length)],
+      extraValues: [],
     });
     expect(out.redacted).toBe(true);
     expect(out.heldOut).toBe(false);
@@ -499,6 +521,7 @@ describe("redact-on-capture (R11)", () => {
       requestBytes: enc(body),
       requestFindings: [finding(first, first + secret.length)], // only the first occurrence
       responseBody: null,
+      extraValues: [],
     });
     expect(dec(out.requestBody)).not.toContain(secret); // both copies gone
     expect(dec(out.requestBody).match(/\[REDACTED:/g)?.length).toBe(2);

@@ -674,21 +674,63 @@ describe("Daemon end-to-end", () => {
     // matchable.
     expect(scanRaw(body)).toEqual([]);
     await sendThroughProxy(daemon.proxyPort, "run-e2e", body);
-    await Bun.sleep(200);
-    const store = Store.openReadOnly(stateDir);
-    const call = store.getCall(store.searchLiteral("config has")[0]!.callId)!;
-    expect(listLeakEvents(store).length).toBe(1); // the derived scan did see it
-    expect(call.redacted).toBe(true);
-    // The stored payload — what redact-on-capture exists to keep off the disk.
+    // Polled, not slept: this row makes THREE worker round-trips (request scan,
+    // response scan, derived scan) where its neighbours make two, and on a cold
+    // daemon the first also pays worker spawn and rule-pin verification. A
+    // fixed delay that loses the race fails as "undefined is not an object" on
+    // the line below rather than as what it is.
+    let store: Store | undefined;
+    let hit: { callId: string } | undefined;
+    for (let i = 0; i < 40 && !hit; i++) {
+      await Bun.sleep(50);
+      store?.close();
+      store = Store.openReadOnly(stateDir);
+      hit = store.searchLiteral("config has")[0];
+    }
+    if (!hit) throw new Error("timed out waiting for the derived-only call to be captured");
+    const call = store!.getCall(hit.callId)!;
+    expect(listLeakEvents(store!).length).toBe(1); // the derived scan did see it
+    // THE PIN — the stored payload, which is what redact-on-capture exists to
+    // keep off the disk, and the one thing the derived pass never touched.
     const stored = new TextDecoder().decode(call.requestBody!);
     expect(stored).not.toContain(key);
     expect(stored).toContain("[REDACTED:generic-api-key:");
-    // …and the surfaces that were already covered, so a fix here can't quietly
-    // trade one hole for another.
+    // Guards, NOT pins: these three held before the fix too. The row flag is
+    // ORed with `derived.values.length > 0` upstream so it read true either
+    // way, and the index was already fed from the span-redacted projection on
+    // a row this one, before the fix, did not count as redacted. They are here
+    // so a fix cannot quietly trade one hole for another — read the two
+    // assertions above as the ones that fail on a revert.
+    expect(call.redacted).toBe(true);
     expect(JSON.stringify(call.displayMessages)).not.toContain(key);
     expect(call.summary).not.toContain(key);
-    expect(store.searchLiteral(key)).toEqual([]);
-    store.close();
+    expect(store!.searchLiteral(key)).toEqual([]);
+    store!.close();
+  });
+
+  test("a derived-only secret in the REPLY is scrubbed from the response body and the raw stream", async () => {
+    // The inbound half of the same hole, and the path extraValues newly
+    // reaches: `redaction.values` is what redactRawStream borrows for the SSE
+    // column (it has no scan of its own), so before this the stream and the
+    // response body both kept a key only the reply's derived text matched.
+    // Same escaping cause read on the response: a text_delta frame serializes
+    // the quotes, so the scanned bytes spend six characters on `\": \"` while
+    // the reassembled answer spends four.
+    const key = "Tq9Wn3Zx6Bv1Mk8Ld5Rf2Cp7Gs4Hj0Y";
+    const frames = deltaFrame(`config has "api_key": "${key}" here`);
+    expect(scanRaw(frames)).toEqual([]); // premise: nothing matches the bytes
+    const call = await streamedCall("run-derived-reply", "ask about the reply", frames);
+    const body = new TextDecoder().decode(call.responseBody!);
+    expect(body).not.toContain(key);
+    expect(body).toContain("[REDACTED:generic-api-key:");
+    // The fidelity column, which nothing scans on its own.
+    expect(call.sseRaw).not.toBeNull();
+    expect(new TextDecoder().decode(call.sseRaw!)).not.toContain(key);
+    // …and it still alerts on NOTHING: a secret in the model's answer came FROM
+    // the provider, so it is redacted without being attributed to the agent.
+    // The asymmetry the response-body scan already holds, now that the derived
+    // scan reaches this half too.
+    expect(alerts.length).toBe(0);
   });
 
   test("an ordinary wire call still renders from its body, with no stored transcript", async () => {
@@ -747,6 +789,15 @@ describe("Daemon end-to-end", () => {
       // The bytes hold only the ESCAPED form, so no rule matched and nothing was
       // spliced — the precondition that makes this unreachable by body redaction.
       expect(new TextDecoder().decode(call.responseBody!)).not.toContain(key);
+      // …and this row is a live instance of the residual applyCaptureRedaction's
+      // extraValues note documents: the derived value is the DECODED key, and
+      // none of the three forms scrubbed from these bytes is `AKIA…`,
+      // because \uXXXX is an escape JSON.stringify never emits for an ASCII
+      // letter. Pinned deliberately, the way the two-events case in
+      // tests/otlp-daemon.test.ts is: the card the user reads is masked (below),
+      // the raw pane still shows the bytes as received. A change that starts
+      // reaching this should update this line, not discover it.
+      expect(new TextDecoder().decode(call.responseBody!)).toContain("\\u0041KIAZQ3DRSTUVWXY2345");
       const action = buildDetail(call, []).responseCalls[0]!;
       expect(action.args ?? "").not.toContain(key);
       expect(action.detail ?? "").not.toContain(key);
