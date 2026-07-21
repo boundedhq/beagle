@@ -3,8 +3,10 @@
 // tailer polls it, emitting each assistant answer as a response-only OtelCall
 // the daemon stitches onto the turn row (store.attachOtelResponse). Lives in
 // adapters (fs + timers). Pairing/keying is in ../parsers/codex-rollout (pure).
-// A file is read ONLY for a conversation Beagle itself launched and observed via
-// its own OTel receiver — never the sessions tree at large.
+// Content is read ONLY for a conversation Beagle itself launched and observed
+// via its own OTel receiver: locating that conversation's file walks the
+// sessions tree by filename (see locateRollout), but its rollout is the only
+// one ever opened and parsed.
 import { createHash } from "node:crypto";
 import { closeSync, lstatSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";

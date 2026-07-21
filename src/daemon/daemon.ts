@@ -1296,8 +1296,8 @@ export class Daemon {
       // ensure a rollout tailer for it. Triggered here, AFTER the turn row is
       // written, so the tailer's answer attaches instead of racing the insert.
       // This is both the trigger and the authorization to read that one
-      // session's file: Beagle never enumerates the sessions tree for Codex
-      // conversations it did not launch.
+      // session's file: Beagle never opens a rollout for a Codex conversation
+      // it did not launch.
       if (call.agent === "codex" && call.convId && call.origin !== "codex-rollout") {
         this.codexRollout?.onActivity(call.convId);
       }
