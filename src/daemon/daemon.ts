@@ -14,7 +14,7 @@ import { SessionResolver, type Resolution } from "../core/session/resolver";
 import { Store } from "../core/store/store";
 import { ScanHost, dropIdentityFieldNoise } from "../adapters/scan-host";
 import type { Finding } from "../core/scanner/engine";
-import { applyCaptureRedaction, clampRedacted, derivedScanText, derivedSplitAt, redactDerivedParts, redactValues, redactValuesInText, secretKeys } from "../transform/redact";
+import { applyCaptureRedaction, clampRedacted, derivedScanText, derivedSplitAt, redactDerivedParts, redactRawStream, redactValuesInText, secretKeys } from "../transform/redact";
 import { scrubAuthHeaders } from "../core/normalize/normalize";
 import { Notifier, type AlertMessage } from "../notifier/notifier";
 import { buildAlertMessage } from "../notifier/alert-copy";
@@ -496,16 +496,28 @@ export class Daemon {
       sseRaw = null; // the raw stream could hold the unverified value
       searchText = "";
     } else if (redaction?.redacted) {
-      // A content-encoded raw stream is compressed bytes — a literal scrub
-      // can't find the secret in it, so keeping it would silently retain an
-      // echoed value. Drop it; the decoded (scrubbed) body remains.
+      // The header says this stream is encoded, and we do not decode it here to
+      // find out otherwise — so nothing below can be trusted to have read what
+      // is in it, and keeping it could silently retain an echoed value. Drop it
+      // on the header's word alone (fail-safe: the cost is a fidelity view, the
+      // alternative is cleartext); the decoded, scrubbed body remains. Note the
+      // same-bytes check below does NOT subsume this: decodeBody falls back to
+      // the raw compressed bytes when it cannot decompress, and then the stream
+      // and the scanned body match while neither pass can read either.
       const contentEncoded = call.response.headers?.some(
         ([n, v]) =>
           n.toLowerCase() === "content-encoding" &&
           v.trim() !== "" &&
           v.trim().toLowerCase() !== "identity",
       );
-      sseRaw = contentEncoded ? null : redactValues(sseRaw, redaction.values);
+      // Otherwise the stream IS the bytes the response scan read, so redact it
+      // from that scan's spans and keep the value pass for echoes — see
+      // redactRawStream for why a value pass alone was not enough here, and for
+      // the same-bytes check that decides between spans and withholding. No
+      // extra scan: the offsets are already paid for.
+      sseRaw = contentEncoded
+        ? null
+        : redactRawStream(sseRaw, call.response.bodyBytes ?? null, respScan?.findings ?? [], redaction.values);
       // Outbound only (see buildSearchText): index the request, not the response.
       searchText = new TextDecoder().decode(requestBody);
     }
