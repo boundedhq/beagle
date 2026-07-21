@@ -118,6 +118,36 @@ describe("tiering & precision", () => {
     const f = scanText('aws_secret_access_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"');
     expect(f.find((x) => x.secretType === "aws-secret-access-key")).toBeUndefined();
   });
+
+  // Documentation describing config keys is a `key: "…"` + entropy-passing
+  // value farm — a fetched Codex config-reference page fired generic-api-key
+  // NINE times on names like memories.disable_on_external_context (live
+  // session 01KY1F0V56X9B64ZQEPC9CPPZB). A value that is ENTIRELY a lowercase
+  // dotted identifier path is a name, not key material: real generic secrets
+  // essentially always carry case mixing or symbols beyond [a-z0-9_-].
+  test("a lowercase dotted identifier path after key: is a name, not a secret", () => {
+    const doc = [
+      'key: "memories.disable_on_external_context",',
+      'key: "memories.max_raw_memories_for_consolidation",',
+      'token: "app.settings.refresh_interval_ms",',
+      'password: "vault.paths.primary-credential_v2",',
+    ].join("\n");
+    expect(scanText(doc).filter((x) => x.secretType === "generic-api-key")).toEqual([]);
+  });
+
+  test("dotted-identifier suppression never eats a real-shaped value", () => {
+    // Case mixing → not an identifier path: still a candidate. The guard must
+    // stay case-SENSITIVE inside this i-flagged rule ((?-i:…)) or it would
+    // swallow every dotted token — a JWT is three dot-joined [A-Za-z0-9_-] runs.
+    const mixed = scanText('key: "zQ3k9XvT2m.Wp8RfYhN4cLdJ6b"');
+    expect(mixed.find((x) => x.secretType === "generic-api-key")).toBeDefined();
+    // A dotted lowercase PREFIX with real key material after it stays caught.
+    const prefixed = scanText('api_key = "prod.api.zQ3k9XvT2mWp8RfYhN4c"');
+    expect(prefixed.find((x) => x.secretType === "generic-api-key")).toBeDefined();
+    // No dot at all (plain lowercase hex-ish run) is untouched by the guard.
+    const hexish = scanText('secret = "e9c4a7f21b8d63054afe19c2b7d80a41"');
+    expect(hexish.find((x) => x.secretType === "generic-api-key")).toBeDefined();
+  });
 });
 
 // The post-keyword window is [a-zA-Z_ ] with no hyphen, so after
