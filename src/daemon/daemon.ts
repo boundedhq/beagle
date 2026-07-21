@@ -782,8 +782,8 @@ export class Daemon {
       // move — the derived-only ones — onto the weaker surface.
       const bodySpans = (stash?.findings.length ?? 0) > 0 || (respScan?.findings.length ?? 0) > 0;
       // `parsed` is the precondition for indexing the projection's parts:
-      // without it buildSearchText fell back to the RAW request bytes, which is
-      // the one thing that must never reach the index on a redacted row.
+      // without it buildSearchText falls back to the RAW request bytes, which
+      // is the one thing that must never reach the index on a redacted row.
       if (bodySpans || !parsed) searchText = new TextDecoder().decode(requestBody);
     }
     const summary = redaction?.heldOut
