@@ -90,6 +90,54 @@ describe("tiering & precision", () => {
   });
 });
 
+// The post-keyword window is [a-zA-Z_ ] with no hyphen, so after
+// secret[_-]?access matched "secret-access" the trailing "-key" could not be
+// crossed and the canonical GitHub Actions spelling only ever reached the
+// quiet tier — recorded, but AlertEngine.process fires on "structured" alone,
+// so the user was never told. The fix is an optional literal "-key"; the
+// negatives below pin WHICH formulation, because the looser shapes that also
+// fix the positives cost measured precision (see the rule's description).
+describe("hyphenated aws key names (tier regression)", () => {
+  const KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYZZZZZKEY42";
+  const loud = (t: string) =>
+    scanText(t).filter((f) => f.tier === "structured").map((f) => f.secretType);
+
+  test("the canonical GitHub Actions spelling alerts", () => {
+    expect(loud(`      aws-secret-access-key: ${KEY}`)).toContain("aws-secret-access-key");
+  });
+
+  test("hyphenated and underscored spellings agree", () => {
+    // The bug was that these two disagreed: same secret, same shape, and the
+    // verdict turned on the separator character alone.
+    expect(loud(`aws-secret-access-key=${KEY}`)).toEqual(loud(`aws_secret_access_key=${KEY}`));
+  });
+
+  test("the 'secret-access' prescan keyword is reachable without 'aws'", () => {
+    // Nothing in this body contains "aws", so the match must come through the
+    // "secret-access" keyword — which before the fix advertised a spelling the
+    // regex structurally could not reach, making it dead weight.
+    expect(loud(`secret-access-key: ${KEY}`)).toContain("aws-secret-access-key");
+  });
+
+  test("a hyphen-chained identifier before a digest stays silent", () => {
+    // Rejected fix #1: widening the window to [a-zA-Z_ -]. A 40-hex digest's
+    // ~4.0 entropy clears the rule's 3.0 gate, so this fired structured/high.
+    expect(scanText("aws-cdk-lib-construct-x 3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5e")).toEqual([]);
+  });
+
+  test("aws vocabulary that merely ends in -key does not alert", () => {
+    // Rejected fix #2: allowing bounded hyphen segments before the anchor,
+    // (?:-[a-zA-Z]{1,12}){0,3}-key. These are ordinary DynamoDB/S3 field names
+    // and a trailing digest is exactly what they carry.
+    // Asserted on the loud tier, not on zero findings: <name>-key: <high-entropy>
+    // is a generic-api-key shape and trips that rule quietly both before and
+    // after this change. Quiet is the correct verdict — it never alerts.
+    for (const id of ["aws-object-key", "aws-partition-key", "aws-cdk-cache-key"]) {
+      expect(loud(`${id}: 3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5e`)).toEqual([]);
+    }
+  });
+});
+
 describe("auth exception (R5)", () => {
   test("destination's own key in the body is annotated, still found", () => {
     const key = "sk-ant-api03-Zx9Yw8Vu7Tt6Ss5Rr4Qq3Pp2Oo1Nn0Mm";
