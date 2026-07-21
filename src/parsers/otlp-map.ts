@@ -321,42 +321,6 @@ function isCodexPayload(records: OtlpRecord[]): boolean {
   return false;
 }
 
-// A tool RESULT is the one display message with unbounded content — the output
-// of `cat` on a big file, a whole HTTP response — so its stored copy is capped
-// where a prompt's is not. The content here is UNTRUNCATED and the cap rides
-// along as a request: the ingest path redacts first and cuts second, because
-// cutting first can strand the head of a secret in the transcript that neither
-// redaction pass can then reach (capDisplay carries the full argument). The
-// cap counts from the output, so a `tool: ` label of any sane length never
-// eats into it (bounded allowance below) and the non-secret case is cut
-// exactly where it was before the order changed.
-//
-// The label's contribution is itself bounded, or the "cap" would not be one:
-// tool_name is agent-supplied and unbounded, so deriving the budget from its
-// full length let a 50k-char name carry a 54k-char row into the transcript
-// (true before this cap existed too — the name was always the content prefix).
-// A name past the allowance is cut by capDisplay like anything else, which is
-// safe precisely because that cut happens AFTER the scrub — truncating the
-// name HERE would recreate the very hole this indirection exists to close.
-//
-// The memory this carries is bounded and mostly not new: scanText already
-// holds this output (plus the call's arguments), and the receiver caps a
-// payload at 32 MiB. So the untruncated display adds one transient copy of the
-// output, freed once the row is stored — nothing retains it, as the session
-// resolver only hashes messages and the store gets the capped string.
-const TOOL_OUTPUT_DISPLAY_MAX = 4000;
-const TOOL_LABEL_DISPLAY_MAX = 64;
-
-function toolResultDisplay(tool: string, output: string): DisplayMessage {
-  return {
-    role: "tool",
-    content: `${tool}: ${output}`,
-    displayMax: Math.min(tool.length, TOOL_LABEL_DISPLAY_MAX) + 2 + TOOL_OUTPUT_DISPLAY_MAX,
-    tool: sanitizeTool(tool),
-    kind: "result",
-  };
-}
-
 function buildCodexCall(o: {
   ts: number;
   convId?: string;
@@ -494,12 +458,19 @@ function mapCodexRecords(records: OtlpRecord[]): OtelCall[] {
         model: g.model,
         endpoint: `otel:codex:tool_result:${g.tool}`,
         scanText: [g.tool, ...g.args, g.output].filter(Boolean).join("\n"),
-        // The WHOLE reassembled output, not just the tail chunk: the scan
-        // surface above is every chunk, so a value matched across a seam has to
-        // be a substring of the display text or the value scrub cannot find it
-        // — and rendering one chunk of a multi-chunk result silently dropped
-        // the rest of what the agent actually saw.
-        display: toolResultDisplay(g.tool, g.output),
+        // Full output — the daemon clamps it to DISPLAY_RESULT_CAP after
+        // redaction. Clamping here ran before the scrub, so a secret straddling
+        // the cap left its raw prefix in the stored transcript.
+        //
+        // "Full" means the WHOLE reassembled output, not just the tail chunk.
+        // The scan surface above is every chunk, so a value matched across a
+        // seam has to be a substring of the display text or the derived
+        // redaction cannot line it up — and rendering one chunk of a
+        // multi-chunk result silently dropped the rest of what the agent saw.
+        display: {
+          role: "tool", content: `${g.tool}: ${g.output}`,
+          tool: sanitizeTool(g.tool), kind: "result",
+        },
       }),
     });
   }
@@ -603,7 +574,12 @@ export function mapHookToCall(payload: unknown, ctx: OtlpContext): OtelCall | nu
       endpoint: `otel:tool_output:${toolName}`,
       request: {
         bodyBytes: new TextEncoder().encode(scanText),
-        messages: [toolResultDisplay(toolName, toolResponse)],
+        // Full output; the daemon clamps to DISPLAY_RESULT_CAP after redaction
+        // (see the codex tool_result mapper above for why not here).
+        messages: [{
+          role: "tool", content: `${toolName}: ${toolResponse}`,
+          tool: sanitizeTool(toolName), kind: "result",
+        }] as DisplayMessage[],
       },
       response: { text: "", bodyBytes: new Uint8Array() },
       meta: { tsRequest: ts, tsResponse: ts },

@@ -199,46 +199,130 @@ describe("Mode B end-to-end through the daemon", () => {
     store.close();
   });
 
-  test("redact-on-capture scrubs a secret that STRADDLES the tool-output display cap", async () => {
-    // A tool result's display copy is capped (the output can be megabytes).
-    // Cutting BEFORE redacting is a hole neither pass can close: the cut lands
-    // mid-key, so the head of the key survives in the display text with no
-    // -----END----- for the private-key rule to re-match and no whole value for
-    // the literal scrub to find. The body scanned the untruncated output, so it
-    // redacts and alerts correctly — the transcript was the only leaking copy.
+  // ---- derived-text redaction: the display is not the scanned bytes ----
+  //
+  // The three below share one root cause and one remedy. The scanner reads the
+  // RAW bytes; display_messages, the summary and the Mode B half of searchText
+  // render a TRANSFORMED view of them. Where the transform changes more than
+  // escaping, no value-scrub keyed off the raw match can reach the result — the
+  // derived text has to be scanned on its own and offset-redacted (see
+  // Daemon.redactDerived).
+
+  test("a secret MANUFACTURED by joining two content blocks is caught and ALERTS", async () => {
+    // The worst of the family, because it is the only one that used to be
+    // silent: flattenPromptText joins adjacent content blocks with NOTHING
+    // between them, so this key does not exist in the scanned bytes — split
+    // across the block boundary, no rule matches — while the transcript,
+    // summary and search index all hold it whole. Zero findings, zero leak
+    // events, `redacted` false, and `beagle search` handing the key back.
     await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
-    // Sized so the cap falls INSIDE the key: filler pushes the BEGIN marker
-    // close to the cut, and the key body is long enough that END lands past it.
-    const filler = "reading configuration file...\n".repeat(105); // 3150 chars
-    const keyBody = Array.from({ length: 20 }, (_, i) => `MIIEowIBAAKCAQEAstraddle${i}${"K".repeat(40)}`).join("\n");
-    const pem = `-----BEGIN RSA PRIVATE KEY-----\n${keyBody}\n-----END RSA PRIVATE KEY-----`;
-    const output = filler + pem;
-    expect(output.slice(0, 4000)).toContain("MIIEowIBAAKCAQEAstraddle"); // key material inside the cap…
-    expect(output.slice(0, 4000)).not.toContain("-----END RSA PRIVATE KEY-----"); // …its closing marker outside
-    await post(codexLogs([
-      codexEvent("codex.tool_result", {
-        "conversation.id": "otel-conv-straddle",
-        tool_name: "exec_command",
-        arguments: '{"cmd":"cat deploy/id_rsa"}',
-        output,
-      }),
-    ]));
+    const prompt = JSON.stringify([{
+      role: "user",
+      content: [
+        { type: "text", text: "here is the key AKIAZQ3DRSTUV" },
+        { type: "text", text: "WXY2345 use it" },
+      ],
+    }]);
+    await post(otlpBody(token, prompt, "otel-conv-split", null));
     await settled(daemon.socketPath);
     const store = Store.openReadOnly(stateDir);
-    expect(listLeakEvents(store).length).toBe(1); // the leak still alerts
-    const call = store.getCall(store.searchLiteral("cat deploy/id_rsa")[0]!.callId)!;
-    expect(call.redacted).toBe(true);
-    // The body was always fine — it scanned the untruncated output.
-    const body = new TextDecoder().decode(call.requestBody!);
-    expect(body).not.toContain("MIIEowIBAAKCAQEAstraddle");
-    expect(body).toContain("[REDACTED:private-key:");
-    // The transcript is what the cut-then-redact order leaked.
+    // It alerts — the whole point. The scanned bytes hold no secret, so this
+    // event can only have come from scanning the rendered text.
+    expect(alerts.length).toBe(1);
+    expect(alerts[0]!.secretType).toBe("aws-access-key-id");
+    expect(listLeakEvents(store).length).toBe(1);
+    const call = store.getCall(store.searchLiteral("here is the key")[0]!.callId)!;
+    expect(call.redacted).toBe(true); // derived text WAS rewritten
     const dm = JSON.stringify(call.displayMessages);
-    expect(dm).not.toContain("MIIEowIBAAKCAQEAstraddle");
+    expect(dm).not.toContain("AKIAZQ3DRSTUVWXY2345");
+    expect(dm).toContain("[REDACTED:aws-access-key-id:");
+    expect(call.summary).not.toContain("AKIAZQ3DRSTUVWXY2345");
+    expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
+    store.close();
+  });
+
+  test("a PEM spanning two messages of a serialized list is scrubbed from the transcript", async () => {
+    // The matched value in the raw bytes runs BEGIN…END straight through the
+    // structural `"},{"role":"user","content":"` between the two messages —
+    // text the flattened display drops, so neither the raw form nor its decoded
+    // form is a substring of what got stored. The body was offset-redacted and
+    // the leak alerted, while the transcript and the index kept the key.
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    const prompt = JSON.stringify([
+      { role: "user", content: "part one:\n-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAsplitAcrossMessages" },
+      { role: "user", content: "part two:\nbbb\n-----END RSA PRIVATE KEY-----" },
+    ]);
+    await post(otlpBody(token, prompt, "otel-conv-span", null));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    // TWO events, deliberately pinned: the body scan's value carries the
+    // structural `"},{"role":…` and the transcript's does not, so they are
+    // different strings and nothing can key them together — secretKeys collapses
+    // escaping and line wrapping, not dropped JSON. One paste therefore alerts
+    // twice here. Over-alerting on a leak that already alerts, and it needs a
+    // key split across two messages to happen at all; if a future change does
+    // manage to relate the two values, update this deliberately.
+    expect(listLeakEvents(store).length).toBe(2);
+    const call = store.getCall(store.searchLiteral("part one")[0]!.callId)!;
+    const dm = JSON.stringify(call.displayMessages);
+    expect(dm).not.toContain("MIIEowIBAAKCAQEAsplitAcrossMessages");
+    // Both halves lose their share of the span, so neither message is left
+    // holding a readable fragment of the key.
     expect(dm).toContain("[REDACTED:private-key:");
-    // …and the cap still holds, so redacting first did not grow the transcript.
+    expect(dm).not.toContain("-----END RSA PRIVATE KEY-----");
+    expect(store.searchLiteral("MIIEowIBAAKCAQEAsplitAcrossMessages")).toEqual([]);
+    store.close();
+  });
+
+  test("a secret straddling the transcript's length cap leaves no raw prefix", async () => {
+    // A codex tool result is stored as `${tool}: ${output}` clamped to
+    // DISPLAY_RESULT_CAP. Clamping in the mapper ran BEFORE the scrub, so a key
+    // sitting across the cap was cut in half: the scrub looked for the whole
+    // value, found nothing, and the first characters of the key rode into
+    // display_messages — in the viewer's transcript, while the body beside it
+    // was correctly redacted and the leak fired. The cap now lands after the
+    // redaction instead.
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    // The display line is `exec_command: ${output}` — a 14-char prefix — so
+    // 3976 chars of filler start the key at 3990, putting its first ten
+    // characters inside the cap and the rest beyond it. The filler ends in a
+    // space because the rule is \b-anchored and would not match mid-word.
+    const output = "f".repeat(3976 - 1) + " AKIAZQ3DRSTUVWXY2345 trailing";
+    await post({
+      resourceLogs: [{
+        scopeLogs: [{
+          scope: { name: "codex_otel.log_only" },
+          logRecords: [{
+            timeUnixNano: "0",
+            observedTimeUnixNano: String(Date.now() * 1e6),
+            attributes: [
+              { key: "event.name", value: { stringValue: "codex.tool_result" } },
+              { key: "conversation.id", value: { stringValue: "otel-conv-cap" } },
+              { key: "call_id", value: { stringValue: "call-cap" } },
+              { key: "tool_name", value: { stringValue: "exec_command" } },
+              { key: "output", value: { stringValue: output } },
+            ],
+          }],
+        }],
+      }],
+    });
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    expect(listLeakEvents(store).length).toBe(1); // the body scan fires as it always did
+    const call = store.getCall(store.searchLiteral("exec_command")[0]!.callId)!;
+    const dm = JSON.stringify(call.displayMessages);
+    expect(dm).not.toContain("AKIAZQ3DRSTUVWXY2345");
+    expect(dm).not.toContain("AKIAZQ3DRS"); // …nor the prefix the cap used to spare
+    expect(dm).toContain("[REDACTED:aws-access-key-id:");
+    expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
+    // Still capped: the transcript keeps a bounded slice, it just cuts a
+    // redacted string now instead of a raw one. The cut runs to the end of the
+    // placeholder it landed inside (clampRedacted) rather than leaving a stump,
+    // so the length overshoots the cap by that placeholder and no further.
     const content = call.displayMessages![0]!.content;
-    expect(content.length).toBeLessThanOrEqual("exec_command: ".length + 4000);
+    expect(content.length).toBeGreaterThan(4000);
+    expect(content.length).toBeLessThan(4100);
+    expect(content.endsWith("]")).toBe(true);
     store.close();
   });
 
@@ -293,27 +377,26 @@ describe("Mode B end-to-end through the daemon", () => {
     store.close();
   });
 
-  test("a long tool output is still capped — moving the cut must not grow transcripts", async () => {
-    // The other half of the fix above: the cap moved from the mapper to the
-    // store step, so nothing else asserts it still happens. Without this, the
-    // cap could be dropped entirely and every other test would still pass while
-    // megabytes of tool output landed in display_messages. No secret here — the
-    // point is the ordinary path, where redaction changes nothing.
+  test("a long tool output with NO secret is still clamped", async () => {
+    // The straddling test above pins the clamp on the redacted path, where the
+    // cut runs to the end of a placeholder. This pins the ordinary path: no
+    // finding, nothing rewritten, and the transcript still must not grow to
+    // hold a whole `cat` of a large file. Without it the clamp could be lost
+    // for every non-secret result and only the redacted case would notice.
     const output = "log line that says nothing secret\n".repeat(1000); // 34k chars
     await post(codexLogs([
       codexEvent("codex.tool_result", {
-        "conversation.id": "otel-conv-cap",
-        tool_name: "exec_command",
-        arguments: '{"cmd":"cat build.log"}',
-        output,
+        "conversation.id": "otel-conv-plain", call_id: "call-plain",
+        tool_name: "exec_command", arguments: '{"cmd":"cat build.log"}', output,
       }),
     ]));
     await settled(daemon.socketPath);
     const store = Store.openReadOnly(stateDir);
     const call = store.getCall(store.searchLiteral("cat build.log")[0]!.callId)!;
-    // Exactly the pre-fix length: the `tool: ` label plus 4000 chars of output.
-    expect(call.displayMessages![0]!.content.length).toBe("exec_command: ".length + 4000);
-    expect(call.displayMessages![0]!.content).toBe(`exec_command: ${output.slice(0, 4000)}`);
+    // No placeholder to overshoot, so the clamp is exact — the whole display
+    // line, label included, is what DISPLAY_RESULT_CAP bounds.
+    const content = call.displayMessages![0]!.content;
+    expect(content).toBe(`exec_command: ${output}`.slice(0, 4000));
     store.close();
   });
 
@@ -681,8 +764,8 @@ describe("Codex Mode B end-to-end through the daemon", () => {
   });
 
   test("search covers the WHOLE tool result, past the display truncation", async () => {
-    // The display copy of a tool result is capped (`${tool}: ${output.slice(0,
-    // 4000)}`) and carries no arguments at all. Indexing that copy made search
+    // The display copy of a tool result is capped (DISPLAY_RESULT_CAP, applied
+    // by the daemon) and carries no arguments at all. Indexing that copy made search
     // lie by omission: a string genuinely sent — scanned, and redacted if it
     // were a secret — came back "never sent through Beagle" purely because it
     // sat past the cap. Search is meant to be a definitive answer, so it is
@@ -703,9 +786,9 @@ describe("Codex Mode B end-to-end through the daemon", () => {
 
   test("the widened index is still redacted: a secret past the truncation never lands in it", async () => {
     // The flip side of the coverage fix. Indexing the scanned bytes means the
-    // index now holds text the 4000-char display copy used to keep out, so the
-    // redaction pass has to cover that new surface — offset-redacted bytes
-    // rather than the by-value scrub the display copy gets. A secret past the
+    // index now holds text the capped display copy used to keep out, so the
+    // redaction pass has to cover that new surface — offset-redacted bytes,
+    // the same footing the display copy is on now. A secret past the
     // old cap, and one in an argument that never reaches a display message at
     // all, must both be findable ONLY as their placeholder.
     await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });

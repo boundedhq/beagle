@@ -402,15 +402,14 @@ describe("Codex OTLP → Call mapping (Codex Mode B, codex.* schema)", () => {
     expect(scanned).toContain("AKIAZQ3DRSTUVWXY2345"); // the tool OUTPUT — the key gap Codex closes natively
   });
 
-  test("BOTH tool-result mappers emit UNTRUNCATED content, carrying the cap as a hint", () => {
-    // The cap belongs to the ingest path now, applied only after redaction has
-    // scrubbed whole values (capDisplay). A mapper that truncates again would
-    // reopen the hole — a secret straddling the cut keeps its head in the
-    // transcript, unreachable by BOTH passes (the rule needs the tail it lost,
-    // the value scrub needs the whole value). The daemon-level regression
-    // covers the codex mapper end-to-end; this pins the contract at the layer
-    // where it is actually expressed, and covers the hook mapper, whose
-    // display message no other test touches.
+  test("BOTH tool-result mappers emit UNTRUNCATED content — the clamp is the daemon's", () => {
+    // DISPLAY_RESULT_CAP is applied at store time, after the derived redaction
+    // has run. A mapper that clamps here instead reopens the hole: a secret
+    // straddling the cut keeps its head in the transcript, out of reach of the
+    // rule (which lost the tail it keys on) and of the value scrub (which needs
+    // the whole value). The daemon test pins the clamp end-to-end; this pins
+    // the mappers' half of the contract, and is the only coverage of the hook
+    // mapper's display message.
     const big = "z".repeat(9000);
     const codex = mapCodexOtlpToCalls(
       codexLogs([codexEvent("codex.tool_result", { "conversation.id": "c", tool_name: "exec_command", output: big })]),
@@ -418,13 +417,9 @@ describe("Codex OTLP → Call mapping (Codex Mode B, codex.* schema)", () => {
     const hookCall = mapHookToCall({ session_id: "s", tool_name: "Bash", tool_response: big }, ctx)!;
     for (const [tool, call] of [["exec_command", codex], ["Bash", hookCall]] as const) {
       const m = call.request.messages![0]! as DisplayMessage;
-      expect(m.content).toBe(`${tool}: ${big}`); // untruncated: the whole output rides through
-      expect(m.displayMax).toBe(`${tool}: `.length + 4000); // the cap the daemon will apply
+      expect(m.content).toBe(`${tool}: ${big}`); // the whole output rides through
+      expect(m.kind).toBe("result"); // what the daemon keys the clamp on
     }
-    // tool_name is agent-supplied and unbounded — the cap must not scale with
-    // it, or a hostile name carries an arbitrarily large row into the store.
-    const hostile = mapHookToCall({ session_id: "s", tool_name: "T".repeat(50_000), tool_response: big }, ctx)!;
-    expect((hostile.request.messages![0]! as DisplayMessage).displayMax).toBe(64 + 2 + 4000);
   });
 
   test("operational codex.* events (api_request, sse_event) carry no content and map to nothing", () => {
