@@ -493,6 +493,134 @@ describe("Daemon end-to-end", () => {
     store.close();
   });
 
+  test("a `detail` secret UNDER the value-scrub floor is span-redacted", async () => {
+    // The sibling of "a persisted transcript scrubs a tool result's detail",
+    // and the reason `detail` had to become a scanned part rather than keep the
+    // value scrub that test pins: the scrub floors at 8 chars, and
+    // connection-string's secretGroup captures the password ALONE, so this one
+    // is a FOUR-char value. That test's AWS key clears the floor and so passes
+    // under either approach — it structurally cannot catch this. Below the
+    // floor, only offsets of its own reach the field. Same row, masked in the
+    // body and in the sibling content, printed in full in the detail.
+    await sendThroughProxy(
+      daemon.proxyPort, "run-e2e",
+      JSON.stringify({
+        model: "gpt-5",
+        input: [
+          { role: "user", content: "run the migration" },
+          {
+            type: "function_call", call_id: "c1", name: "Bash",
+            arguments: JSON.stringify({ command: "psql postgres://svc:pw12@db.internal/app" }),
+          },
+          { type: "function_call_output", call_id: "c1", output: "ok" },
+        ],
+      }),
+      "/v1/responses",
+    );
+    await Bun.sleep(150);
+    const store = Store.openReadOnly(stateDir);
+    const call = store.getCall(store.searchLiteral("run the migration")[0]!.callId)!;
+    // The projection IS persisted here (the derived scan rewrote it), so this is
+    // the copy the viewer renders — not a re-parse of the scrubbed body.
+    expect(call.displayMessages).not.toBeNull();
+    const result = call.displayMessages!.find(
+      (m) => (m as { kind?: string }).kind === "result",
+    ) as { detail?: string } | undefined;
+    // Still labeled — redacted, not dropped: losing the field would hide which
+    // command produced the result and pass this test for the wrong reason.
+    expect(result?.detail).toBeDefined();
+    expect(result!.detail).not.toContain("pw12");
+    expect(result!.detail).toContain("[REDACTED:connection-string:");
+    expect(JSON.stringify(call.displayMessages)).not.toContain("pw12");
+    store.close();
+  });
+
+  test("a detail that echoes its own call's arguments doesn't alert twice", async () => {
+    // The cost of giving `detail` its own offsets: the same secret is now
+    // scanned in two outbound parts, and they are two DIFFERENT strings — a
+    // detail decodes one JSON level further than the content it echoes, so the
+    // escaped and decoded forms fingerprint differently and land as two leak
+    // events rather than one event with two occurrences. Two rows for one
+    // secret sent once is exactly what the value-keyed dedup exists to stop.
+    // Needs a password carrying an escape, or both forms are the same bytes and
+    // the body scan's own dedup would cover this without the echo rule.
+    //
+    // The fixture carries that password EXACTLY ONCE, inside `arguments`, and
+    // that is load-bearing for the count below. Put the same escaped password
+    // in a plain user message too and the row emits two events from the BODY
+    // scan alone — the body then holds it at two escaping depths, which
+    // fingerprint differently — while every derived finding is suppressed by
+    // `known` and the echo rule never engages at all. The assertion would then
+    // read "2" for reasons that have nothing to do with what it guards.
+    await sendThroughProxy(
+      daemon.proxyPort, "run-e2e",
+      JSON.stringify({
+        model: "gpt-5",
+        input: [
+          { role: "user", content: "escaped password ask" },
+          {
+            type: "function_call", call_id: "c1", name: "Bash",
+            arguments: JSON.stringify({ command: 'psql postgres://svc:pw"12@db.internal/app' }),
+          },
+          { type: "function_call_output", call_id: "c1", output: "ok" },
+        ],
+      }),
+      "/v1/responses",
+    );
+    await Bun.sleep(150);
+    const store = Store.openReadOnly(stateDir);
+    const events = listLeakEvents(store);
+    expect(events.length).toBe(1);
+    expect(events[0]!.secretType).toBe("connection-string");
+    // …and the suppressed half is still REDACTED. Dropping a finding from the
+    // alert set must never drop it from the splice — the two are independent,
+    // and only the alert set is deduped.
+    const call = store.getCall(store.searchLiteral("escaped password ask")[0]!.callId)!;
+    expect(JSON.stringify(call.displayMessages)).not.toContain('pw"12');
+    expect(JSON.stringify(call.displayMessages)).not.toContain('pw\\"12');
+    store.close();
+  });
+
+  test("a placeholder that exists only in a `detail` is still highlighted", async () => {
+    // R7 marks a redacted row by DISCOVERING placeholders in the text it
+    // renders, and dedups them by the whole placeholder — hash included. The
+    // hash is over the form found at those offsets, and a detail's form is one
+    // escaping level further decoded than its sibling content's, so one secret
+    // legitimately leaves two DIFFERENT placeholders. Discovery that reads only
+    // `content` finds one of them and the transcript renders the other as
+    // unmarked text: masked, but silently.
+    await sendThroughProxy(
+      daemon.proxyPort, "run-e2e",
+      JSON.stringify({
+        model: "gpt-5",
+        input: [
+          { role: "user", content: "highlight both forms" },
+          {
+            type: "function_call", call_id: "c1", name: "Bash",
+            arguments: JSON.stringify({ command: 'psql postgres://svc:pw"12@db.internal/app' }),
+          },
+          { type: "function_call_output", call_id: "c1", output: "ok" },
+        ],
+      }),
+      "/v1/responses",
+    );
+    await Bun.sleep(150);
+    const store = Store.openReadOnly(stateDir);
+    const call = store.getCall(store.searchLiteral("highlight both forms")[0]!.callId)!;
+    const { buildDetail, leakSpansFor } = await import("../src/viewer/detail");
+    const view = buildDetail(call, leakSpansFor(store, call.id));
+    const rendered = new Set(
+      [...JSON.stringify(view.messages).matchAll(/\[REDACTED:[^\s:\]]+:[0-9a-f]{6}\]/g)].map((m) => m[0]!),
+    );
+    // The premise: two distinct placeholders, or this asserts nothing.
+    expect(rendered.size).toBe(2);
+    // Every one of them is marked — the hash is per-install, so this compares
+    // what was rendered against what was found rather than pinning literals.
+    const found = view.leaks.map((l) => l.value);
+    for (const p of rendered) expect(found).toContain(p);
+    store.close();
+  });
+
   test("an ordinary wire call still renders from its body, with no stored transcript", async () => {
     // The guard on the row above: persisting a projection is the EXCEPTION, for
     // rows whose body would re-derive wrongly. Every other call keeps the old

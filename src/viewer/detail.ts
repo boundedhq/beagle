@@ -226,8 +226,15 @@ function storedProjection(
 
 // Every string a row stores as its own transcript, for placeholder discovery
 // (extractLeaks). Empty for the rows that keep none.
+//
+// `detail` counts as much as `content`: it is redacted from its own offsets and
+// so carries its own placeholder, whose hash is over the form found THERE — a
+// detail decodes one escaping level further than the content beside it, so the
+// two forms of one secret hash differently and finding only the content's would
+// leave the detail's rendering unhighlighted (the case the redacted branch of
+// extractLeaks exists for).
 function storedText(call: CallRecord): string {
-  return (call.displayMessages ?? []).map((m) => m.content).join("\n");
+  return (call.displayMessages ?? []).flatMap((m) => [m.content, m.detail ?? ""]).join("\n");
 }
 
 // Just the parsed request messages — same result as buildDetail(call).messages,

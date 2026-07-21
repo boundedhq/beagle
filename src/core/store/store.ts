@@ -45,8 +45,10 @@ export interface CallRecord {
   responseBody: Uint8Array | null;
   responseHeaders: Array<[string, string]> | null;
   sseRaw: Uint8Array | null;
-  /** Mode B only: pre-flattened display messages (the self-report's structure). */
-  displayMessages?: Array<{ role: string; content: string }> | null;
+  /** Pre-flattened display messages (Mode B's self-report structure, and the
+   *  wire path's redacted projection). `detail` is redacted like `content` and
+   *  is typed here so a reader can't silently skip a masked surface. */
+  displayMessages?: Array<{ role: string; content: string; detail?: string }> | null;
   searchText: string;
 }
 
