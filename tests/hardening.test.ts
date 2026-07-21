@@ -207,7 +207,9 @@ describe("redact-on-capture (R11)", () => {
     const stream = 'data: {"text":"postgres://svc:pw12@db.internal/app"}\n\n';
     const start = stream.indexOf("pw12");
     const spans = [finding(start, start + 4, "connection-string")];
-    const out = redactRawStream(enc(stream), enc(stream), spans, [{ value: "pw12", type: "connection-string" }]);
+    // No values passed: the span pass alone must do it. Handing it the value too
+    // would still pass if the floor were lowered, hiding which pass did the work.
+    const out = redactRawStream(enc(stream), enc(stream), spans, []);
     expect(dec(out!)).not.toContain("pw12");
     expect(dec(out!)).toContain("[REDACTED:connection-string:");
     // and the surrounding stream is intact — the splice is the span, not the frame
@@ -232,8 +234,12 @@ describe("redact-on-capture (R11)", () => {
     const scanned = "reassembled: key AKIAZQ3DRSTUVWXY2345";
     const start = scanned.indexOf("AKIA");
     expect(redactRawStream(enc(stream), enc(scanned), [finding(start, start + 20)], [])).toBeNull();
-    // same length, different bytes — the check is content, not size
-    expect(redactRawStream(enc("aaaa"), enc("aaab"), [], [])).toBeNull();
+    // Same LENGTH, different bytes: the check is content, not size. The span
+    // would land inside the stream here, so a length-only guard would splice
+    // the wrong 20 characters and hand back a corrupted stream that looks fine.
+    const a = 'data: {"k":"AKIAZQ3DRSTUVWXY2345"}';
+    const b = 'data: {"k":"AKIAZQ3DRSTUVWXY9999"}';
+    expect(redactRawStream(enc(a), enc(b), [finding(12, 32)], [])).toBeNull();
   });
 
   test("applyCaptureRedaction holds all content out on an incomplete scan", () => {

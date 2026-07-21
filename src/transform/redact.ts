@@ -1,6 +1,7 @@
 // redact-on-capture (design §4/R11): drop the raw secret value at capture
 // time, keeping a stable typed placeholder. The single biggest store-liability
-// reducer; off by default in v1 (raw fidelity serves the parity story).
+// reducer, and ON by default (config.ts) — a detection tool must not itself
+// keep detected secrets in cleartext. Opting out buys the raw-fidelity view.
 import { createHash } from "node:crypto";
 import type { Finding } from "../core/scanner/engine";
 
@@ -72,13 +73,14 @@ function jsonUnescaped(value: string): string | null {
 // shorter value is still span-redacted from the body it was found in but
 // SURVIVES here. A rule matching that short is not hypothetical —
 // connection-string captures the password alone, so `postgres://u:pw12@host/db`
-// yields a four-char value. That is why every surface with bytes of its own to
-// point at redacts by SPAN and keeps this as the echo pass only (redactBody,
-// redactRawStream, redactDerivedParts). One caller still leans on it alone:
-// buildSummary scrubs raw parsed text by value, so a password under the floor
-// reaches the always-visible feed line. Known and unfixed here — a floor low
-// enough to catch it would blank four-char substrings everywhere. Do not read
-// this floor as safe for short values. Re-checked per form, because decoding
+// yields a four-char value. So treat this pass as an echo-catcher and never as
+// a guarantee: what actually removes a short secret is a SPAN, and only from
+// bytes some scan matched it in (redactBody, redactRawStream, redactDerivedParts).
+// Where no span can exist the floor is the whole defence and a short value
+// survives — buildSummary scrubs raw parsed text by value alone, so a password
+// under the floor reaches the always-visible feed line. Known and unfixed here:
+// a floor low enough to catch it would blank four-char substrings everywhere.
+// Do not read this floor as safe for short values. Re-checked per form, because decoding
 // only shortens — but note the floor is a weaker guarantee for a decoded form
 // than for a raw one: 48 chars of \uXXXX escapes decode to the 8-char word
 // "password", and scrubbing that would blank the word wherever it appears.
@@ -218,17 +220,20 @@ export function redactValues(
 
 // The raw event stream kept beside a streamed response (the Layer 2 fidelity
 // view). Despite the name it is not a RENDER of the response body — for a
-// stream that carries no content-encoding it is the very SAME bytes: the
-// capture path content-decodes into bodyBytes and reassembles nothing, so
-// bodyBytes IS sseRaw there. That is what makes the response scan's offsets
-// index this stream exactly, and why the spans are worth applying rather than
-// leaving a value-scrub as the only pass over it: redactValuesInText carries an
-// 8-char floor, and connection-string's secretGroup captures the password alone
-// — `postgres://u:pw12@host/db` yields a FOUR-char value, spliced out of the
-// body and silently left raw here. The stream is the one stored surface with no
-// scan of its own to fall back on. Spans first, then the value scrub, so an
-// echoed request-side secret is caught too: the order applyCaptureRedaction
-// already uses on the two bodies.
+// stream carrying no content-encoding the two hold the SAME BYTES: the capture
+// path content-decodes into bodyBytes and reassembles nothing, so both are
+// copies of one buffer (core/proxy/server.ts). Nothing scans this column on its
+// own; it borrows the response scan's verdict, which is sound only because of
+// that. Borrowing the SPANS as well as the values is the point: redactValuesInText
+// carries an 8-char floor, and connection-string's secretGroup captures the
+// password alone — `postgres://u:pw12@host/db` yields a FOUR-char value, spliced
+// out of the body and, until this ran, silently left raw here.
+//
+// Spans first, then the value scrub for echoes of secrets found elsewhere — the
+// order applyCaptureRedaction uses on the two bodies. That second pass inherits
+// the floor it just indicted, so read it as best-effort, not a second guarantee:
+// what makes this column safe is the span pass, and only for what the response
+// scan itself matched in these bytes.
 //
 // The spans hold only while the two really are the same bytes. If that ever
 // stops being true — a capture path that reassembles deltas into bodyBytes —

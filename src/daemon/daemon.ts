@@ -490,9 +490,14 @@ export class Daemon {
       sseRaw = null; // the raw stream could hold the unverified value
       searchText = "";
     } else if (redaction?.redacted) {
-      // A content-encoded raw stream is compressed bytes — neither a scrub nor
-      // a scan can read a secret in it, so keeping it would silently retain an
-      // echoed value. Drop it; the decoded (scrubbed) body remains.
+      // The header says this stream is encoded, and we do not decode it here to
+      // find out otherwise — so nothing below can be trusted to have read what
+      // is in it, and keeping it could silently retain an echoed value. Drop it
+      // on the header's word alone (fail-safe: the cost is a fidelity view, the
+      // alternative is cleartext); the decoded, scrubbed body remains. Note the
+      // same-bytes check below does NOT subsume this: decodeBody falls back to
+      // the raw compressed bytes when it cannot decompress, and then the stream
+      // and the scanned body match while neither pass can read either.
       const contentEncoded = call.response.headers?.some(
         ([n, v]) =>
           n.toLowerCase() === "content-encoding" &&
