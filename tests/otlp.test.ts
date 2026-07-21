@@ -499,13 +499,16 @@ describe("Codex OTLP → Call mapping (Codex Mode B, codex.* schema)", () => {
   });
 
   test("a genuinely-throwing record is skipped, co-batched valid records still map", () => {
-    // `attributes: [null]` makes attrMap execute `null.key` → a real TypeError
-    // INSIDE the per-record try/catch (the Array.isArray guard doesn't catch
-    // this one — it's a non-empty array). Proves the catch actually isolates a
-    // throwing record rather than taking the whole secret-bearing batch down.
+    // A null RECORD makes the loop body execute `null.attributes` → a real
+    // TypeError INSIDE the per-record try/catch. It has to be the record:
+    // `attributes: [null]`, which this test originally threw with, is absorbed
+    // entry-wise by attrMap now — kept alongside to pin that it stays absorbed.
+    // Proves the catch actually isolates a throwing record rather than taking
+    // the whole secret-bearing batch down.
     const calls = mapCodexOtlpToCalls(
       codexLogs([
-        { attributes: [null] }, // throws mid-map
+        null, // throws mid-map
+        { attributes: [null] }, // no longer throws; attrMap skips the entry
         codexEvent("codex.user_prompt", { "conversation.id": "c", prompt: "still scanned AKIAZQ3DRSTUVWXY2345" }),
       ]),
     );

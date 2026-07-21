@@ -53,9 +53,10 @@ export interface OtelCall extends Call {
 function attrMap(attrs: Array<{ key: string; value: AttrValue }> | undefined): Map<string, AttrValue> {
   const m = new Map<string, AttrValue>();
   // Array- AND entry-safe: a record whose `attributes` is an object, or whose
-  // array holds a null entry (malformed) must not throw — it would take the
-  // whole batch's scanning down with it. A bad entry is skipped; the record's
-  // remaining attributes still map, so its content is still scanned.
+  // array holds a null entry (malformed) must not throw. The callers' catches
+  // would contain a throw to one record — but skipping just the bad ENTRY is
+  // strictly better: the record's remaining attributes still map, so its
+  // content is still scanned instead of the whole record being dropped.
   for (const a of Array.isArray(attrs) ? attrs : []) if (a && typeof a === "object") m.set(a.key, a.value);
   return m;
 }
