@@ -69,6 +69,21 @@ describe("redact-on-capture (R11)", () => {
     expect(inner.content).toContain("# prod creds\n"); // a real newline, decoded
   });
 
+  // End-to-end for the span bug above: a 4-char password equal to the username
+  // is below redactValuesInText's 8-char echo-scrub floor, so nothing downstream
+  // rescues it — if the span is wrong, the password ships in cleartext.
+  test("a connection-string password matching the username is redacted, not the username", () => {
+    const body = '{"MONGO_URL":"mongodb://root:root@db.internal:27017/app"}';
+    const findings = scan(enc(body), {}, rules).filter((f) => f.secretType === "connection-string");
+    expect(findings.length).toBe(1);
+    const out = dec(applyCaptureRedaction({
+      incomplete: false, requestBytes: enc(body), requestFindings: findings, responseBody: null,
+    }).requestBody);
+    expect(out).not.toContain(":root@"); // the password is gone
+    expect(out).toContain("mongodb://root:[REDACTED:connection-string:"); // the username is not
+    expect(JSON.parse(out)).toBeDefined(); // stored JSON still parses
+  });
+
   test("overlapping findings on the same span don't corrupt the body", () => {
     // Two quiet-tier rules can flag the same 40-char value (generic-assignment
     // + aws-secret-shape). A naive double-splice ate the bytes after the span.

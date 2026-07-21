@@ -60,6 +60,36 @@ describe("structured detectors (loud tier)", () => {
   });
 });
 
+describe("capture-group spans", () => {
+  // The span must cover the group the rule actually captured, at the offsets it
+  // really matched. Searching the match for the group's TEXT instead silently
+  // picks the first identical occurrence — and a connection string whose
+  // password equals its username is an ordinary dev-config shape, so the span
+  // landed on the username and redaction spliced that, leaving the password in
+  // the stored body. Short passwords escaped the echo-scrub's 8-char floor too,
+  // so they survived end to end.
+  test("a password identical to the username spans the PASSWORD", () => {
+    for (const [body, user, pass] of [
+      ["MONGO_URL=mongodb://root:root@db.internal:27017/app", "root", "root"],
+      ["REDIS_URL=redis://admin:admin@cache:6379/0", "admin", "admin"],
+    ] as const) {
+      const hit = scanText(body).find((f) => f.secretType === "connection-string")!;
+      expect(hit).toBeDefined();
+      expect(body.slice(hit.start, hit.end)).toBe(pass);
+      // The span sits after the colon that separates user from password.
+      expect(body.lastIndexOf(`${user}:`, hit.start)).toBeLessThan(hit.start);
+      expect(body[hit.start - 1]).toBe(":");
+      expect(body[hit.end]).toBe("@");
+    }
+  });
+
+  test("distinct username and password still span the password", () => {
+    const body = "postgres://appuser:s3cretpw@db:5432/app";
+    const hit = scanText(body).find((f) => f.secretType === "connection-string")!;
+    expect(body.slice(hit.start, hit.end)).toBe("s3cretpw");
+  });
+});
+
 describe("tiering & precision", () => {
   test("generic high-entropy secret is possible tier, never structured", () => {
     const f = scanText('api_key = "zQ3k9XvT2mWp8RfYhN4cLdJ6bGa1sE5u"');
@@ -369,6 +399,19 @@ describe("JSON-escape-prefixed secrets (leading-boundary regression)", () => {
     }
   });
 
+  // The prebuilt blank table covers runs up to 32; past that the mask falls back
+  // to building one. That boundary fails SILENTLY if the fallback is ever
+  // dropped — the mask would return a short string and every span offset after
+  // it would shift — so pin both sides of it explicitly.
+  test("length is preserved for backslash runs past the prebuilt table", () => {
+    for (const n of [1, 2, 16, 31, 32, 33, 64, 200]) {
+      const s = `x${"\\".repeat(n)}ny`;
+      expect(maskJsonEscapes(s).length).toBe(s.length);
+    }
+    // A run of 40 followed by an escape char blanks to exactly 41 spaces.
+    expect(maskJsonEscapes(`x${"\\".repeat(40)}ny`)).toBe(`x${" ".repeat(41)}y`);
+  });
+
   test("offsets stay exact across multi-byte and astral characters", () => {
     // Offsets are UTF-16 indices; a surrogate pair or a 3-byte character before
     // the secret must not shift the span redaction slices out.
@@ -506,6 +549,24 @@ describe("secrets nested in tool-call arguments (R5)", () => {
     expect([1, 2, 3].map((d) =>
       scanText(at(d)).some((f) => f.secretType === "generic-api-key"),
     )).toEqual([true, true, false]);
+  });
+
+  // The same ceiling, reached one layer earlier by whitespace. A PRETTY-PRINTED
+  // config file spends one separator char on the space after the colon, so at
+  // depth 2 it needs 6 and gets none — while the compact form of the very same
+  // file is caught. Worth pinning precisely because it is not obvious: "agent
+  // writes a config file" is this PR's own motivating story, and it works or
+  // not depending on how the agent formatted the JSON. Fixing it means widening
+  // the rule's quantifier in beagle-rules.json (which re-pins its sha256 and
+  // widens the quiet tier's FP surface), so it is a data decision, not this one.
+  test("a pretty-printed config file loses keyword-adjacency one depth sooner", () => {
+    const secret = "Zx9Yw8Vu7Tt6Ss5Rr4Qq3Pp2Oo1Nn0Mm";
+    const pretty = `{\n  "api_key": "${secret}"\n}`;
+    const found = (b: string) => scanText(b).some((f) => f.secretType === "generic-api-key");
+    expect(found(pretty)).toBe(true); // depth 1: 4 separator chars, still inside
+    expect(found(`{"arguments":${JSON.stringify(pretty)}}`)).toBe(false); // depth 2: 6, over
+    // ...while the compact spelling of the same file survives that depth.
+    expect(found(`{"arguments":${JSON.stringify(`{"api_key":"${secret}"}`)}}`)).toBe(true);
   });
 
   // The dedup guarantee R6 leans on: one secret is one fingerprint however deeply

@@ -31,6 +31,7 @@ export interface ScanCtx {
 const STOPWORDS = ["example", "sample", "placeholder", "dummy", "xxxxxx", "changeme"];
 
 const MAX_FINDINGS_PER_RULE = 500;
+const MAX_PROBES = 1 << 16;
 
 // Bodies are scanned as raw wire bytes — nothing on the scan path decodes them
 // — so every secret arrives wrapped in however many layers of JSON string
@@ -51,8 +52,10 @@ const MAX_FINDINGS_PER_RULE = 500;
 // keyword-adjacency rule (generic-api-key, aws-secret-access-key) matches at
 // most 5 separator chars between keyword and value, and every layer of encoding
 // DOUBLES the backslashes in `":"` — 3 chars at depth 1, 5 at depth 2, 9 at
-// depth 3. So those rules reach depth 2 and stop. Pinned by a test; widening the
-// quantifier is a rules-data change, not an engine one.
+// depth 3. So those rules reach depth 2 and stop, and a PRETTY-PRINTED file
+// stops one depth sooner still, because the space after the colon spends one of
+// the five. Both pinned by tests; widening the quantifier is a rules-data
+// change, not an engine one.
 //
 // Fixed by masking rather than by loosening the rules: an escape run is blanked
 // to spaces before matching, so the separator the rules already expect is
@@ -100,23 +103,34 @@ const MAX_FINDINGS_PER_RULE = 500;
 const ESCAPE_RUN = /\\+(?:u[0-9a-fA-F]{4}|[bfnrt"/])?/g;
 
 // Hot path: an escape-dense 8 MiB body runs the replacer millions of times, so
-// blanking indexes a prebuilt string rather than allocating per match. Runs are
-// short in practice (2 for `\n`, 3 for `\\n`, 7 for `\\uXXXX`); the fallback
-// covers a pathological body padded with backslashes.
-const SPACES = " ".repeat(16); // length is load-bearing below — don't count spaces in a diff
+// blanking returns a shared, prebuilt string rather than building one per match
+// (~28% faster than slicing a longer one). Runs are short in practice — 2 for
+// `\n`, 3 for `\\n`, 7 for `\\uXXXX` — so the table covers every real case.
+//
+// The `repeat` fallback is NOT redundant, and dropping it would fail SILENTLY:
+// a body padded with more than 32 consecutive backslashes would blank to a
+// shorter string, and length preservation is what every span offset, redaction
+// splice and store slice depends on.
+const BLANKS = Array.from({ length: 33 }, (_, n) => " ".repeat(n));
+const BACKSLASH = 92;
 
 export function maskJsonEscapes(text: string): string {
   if (!text.includes("\\")) return text; // fast path: nothing to mask
   return text.replace(ESCAPE_RUN, (run) => {
-    // A run with no escape char after it is literal text at every depth.
-    if (run.endsWith("\\")) return run;
-    return run.length <= SPACES.length ? SPACES.slice(0, run.length) : " ".repeat(run.length);
+    // A run ending in a backslash consumed no escape char, so it is literal
+    // text at every depth — leave it exactly as it arrived.
+    if (run.charCodeAt(run.length - 1) === BACKSLASH) return run;
+    return BLANKS[run.length] ?? " ".repeat(run.length);
   });
 }
 
 export function compileRules(specs: RuleSpec[], hmacKey: Uint8Array): CompiledRules {
+  // `d` (hasIndices) is added to every rule so matchAll can read a capture
+  // group's REAL offsets instead of searching for its text — see the span
+  // comment there for the leak that search caused. Rule data is untouched, so
+  // the file's sha256 pin still validates.
   return {
-    rules: specs.map((spec) => ({ spec, re: new RegExp(spec.regex, spec.flags ?? "g") })),
+    rules: specs.map((spec) => ({ spec, re: new RegExp(spec.regex, (spec.flags ?? "g") + "d") })),
     hmacKey,
   };
 }
@@ -131,23 +145,35 @@ export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): 
   // backslash followed by an escape character — whether that is a real escape or
   // literal text is exactly what cannot be known here, which is the point. A
   // miss costs far more than the extra pass.
-  const findings = matchAll(raw, masked, ctx, compiled);
+  //
+  // The caps are shared ACROSS both passes, not per pass. They are stated per
+  // rule per body, and a second view silently doubling them would double what a
+  // crafted body can push into suppressOverlaps below — the opposite of what a
+  // deadline backstop is for.
+  const budget: ScanBudget = { probes: MAX_PROBES, perRule: new Map() };
+  const findings = matchAll(raw, masked, ctx, compiled, budget);
   if (masked !== raw) {
     // Keyed dedup, not a scan of `findings` per candidate: both views can hit
     // the per-rule cap, and pairwise comparison would square that into a
     // pathological body's cheapest way to burn the scan deadline.
     const key = (f: Finding) => `${f.start}:${f.end}:${f.detector}`;
     const seen = new Set(findings.map(key));
-    for (const f of matchAll(raw, raw, ctx, compiled)) {
+    for (const f of matchAll(raw, raw, ctx, compiled, budget)) {
       if (!seen.has(key(f))) findings.push(f);
     }
   }
   return suppressOverlaps(findings);
 }
 
+/** Per-body caps, shared by both views so each means what its name says. */
+interface ScanBudget {
+  probes: number;
+  perRule: Map<string, number>;
+}
+
 // Run every rule over `text` (one view of the body), reporting spans that index
 // `raw`. Split out of scan() only so both views share one implementation.
-function matchAll(raw: string, text: string, ctx: ScanCtx, compiled: CompiledRules): Finding[] {
+function matchAll(raw: string, text: string, ctx: ScanCtx, compiled: CompiledRules, budget: ScanBudget): Finding[] {
   const lower = text.toLowerCase();
   const authNorm = ctx.authValue ? normalize(ctx.authValue) : undefined;
   const findings: Finding[] = [];
@@ -159,14 +185,18 @@ function matchAll(raw: string, text: string, ctx: ScanCtx, compiled: CompiledRul
     // anchor-free entropy rules) have no anchor substring to prescan for.
     if (spec.keywords.length > 0 && !spec.keywords.some((k) => lower.includes(k))) continue;
     re.lastIndex = 0;
-    // probeBudget: decode-probe attempts are capped per rule pass because
-    // rejected candidates don't count toward MAX_FINDINGS_PER_RULE. The cap is
-    // a deadline backstop, not a detection limit: a probe is ~0.35µs, so even
-    // an 8 MB body (the capture cap) full of ~134k base64 runs adds well under
-    // 50ms — the cap is set far above any realistic blob count so a genuine
-    // wrapped secret isn't lost behind a wall of benign base64, while a truly
-    // pathological body still can't ride the probe past the scan deadline.
-    let ruleFindings = 0, probeBudget = 1 << 16;
+    // Decode-probe attempts are capped per body because rejected candidates
+    // don't count toward MAX_FINDINGS_PER_RULE. The cap is a deadline backstop,
+    // not a detection limit: it sits far above any realistic blob count, so a
+    // genuine wrapped secret isn't lost behind a wall of benign base64.
+    //
+    // It is NOT cheap enough to ignore, which an earlier version of this note
+    // claimed — it put a probe at ~0.35µs and concluded a saturated 8 MiB body
+    // stayed "well under 50ms". Measured here: 0.84µs for a 16-char blob, 2.64µs
+    // at 256 chars. A saturated budget is therefore on the order of 100ms+, i.e.
+    // a real fraction of the 500ms worker deadline rather than a rounding error.
+    // The deadline, not this cap, is what actually bounds a pathological body.
+    let ruleFindings = budget.perRule.get(spec.id) ?? 0;
     let m: RegExpExecArray | null;
     while (ruleFindings < MAX_FINDINGS_PER_RULE && (m = re.exec(text)) !== null) {
       if (m[0].length === 0) { re.lastIndex++; continue; } // zero-width guard
@@ -174,14 +204,20 @@ function matchAll(raw: string, text: string, ctx: ScanCtx, compiled: CompiledRul
       // delimiters and keyword prefixes must not leak into the span, or
       // redact-on-capture splices them out too (e.g. eating a quote corrupts
       // the stored JSON) and echo-scrubbing fails to match the bare secret.
-      // indexOf is exact when the group text appears once in the match; on a
-      // duplicate it still spans an identical occurrence of the same value.
-      const matched = m[spec.secretGroup] ?? m[0];
-      const start = m.index + m[0].indexOf(matched);
+      //
+      // Read the group's REAL offsets from the `d` flag. This used to search the
+      // match for the group's text, which silently spans the WRONG occurrence
+      // when a capture repeats text appearing earlier in the match — and that is
+      // not a curiosity: `mongodb://root:root@host` (password same as username,
+      // an ordinary dev-config shape) reported the USERNAME's span, so redaction
+      // spliced the username and left the password in cleartext. Only the
+      // 8-char floor on echo-scrubbing hid it for longer passwords.
+      const at = m.indices?.[spec.secretGroup] ?? m.indices?.[0];
+      const [start, end] = at ?? [m.index, m.index + m[0].length];
       // Masking is length-preserving, so the span maps straight back onto the
       // unmasked bytes — every gate below judges the value that really shipped,
       // and the finding reports the bytes redaction will splice.
-      const secretRaw = raw.slice(start, start + matched.length);
+      const secretRaw = raw.slice(start, end);
       const secret = normalize(secretRaw);
       if (secret.length === 0) continue;
       const secretLower = secret.toLowerCase();
@@ -198,7 +234,7 @@ function matchAll(raw: string, text: string, ctx: ScanCtx, compiled: CompiledRul
       // in-flight cursor is never touched; probed regexes need no lastIndex
       // restore because this loop resets lastIndex before every rule's scan.
       if (spec.validators?.includes("base64-secret")) {
-        const decoded = --probeBudget >= 0 ? Buffer.from(secret, "base64").toString("utf8") : "";
+        const decoded = --budget.probes >= 0 ? Buffer.from(secret, "base64").toString("utf8") : "";
         if (decoded.length < 8 || STOPWORDS.some((w) => decoded.toLowerCase().includes(w)) || !compiled.rules.some(({ spec: s, re: r }) =>
           s.tier === "structured" && !s.validators?.length && ((r.lastIndex = 0), r.test(decoded)))) continue;
       }
@@ -209,12 +245,13 @@ function matchAll(raw: string, text: string, ctx: ScanCtx, compiled: CompiledRul
         severity: spec.severity,
         tier: spec.tier,
         start,
-        end: start + secretRaw.length,
+        end,
         fingerprint: fingerprint(secret, compiled.hmacKey),
         destinationOwnKey:
           authNorm !== undefined && (authNorm === secret || authNorm.includes(secret)),
       });
     }
+    budget.perRule.set(spec.id, ruleFindings); // carries into the second view
   }
 
   return findings;
@@ -225,6 +262,13 @@ function matchAll(raw: string, text: string, ctx: ScanCtx, compiled: CompiledRul
 // not double-report). Runs on the UNION of both views, so a structured hit
 // found only in the raw view still silences a quiet-tier hit from the masked
 // one.
+//
+// This is O(possible x structured) and stays that way. What bounds it is
+// MAX_FINDINGS_PER_RULE, which is per rule PER BODY — shared across both views
+// on purpose (see scan). That caps the union at rules x 500 ≈ 15k findings,
+// where this measures ~30ms, comfortably inside the worker's 500ms deadline.
+// Were the cap ever made per-view again, or raised, this is the term that grows
+// quadratically and the one to rewrite as a sweep over sorted spans.
 function suppressOverlaps(findings: Finding[]): Finding[] {
   const structuredSpans = findings.filter((f) => f.tier === "structured");
   const result = findings.filter(

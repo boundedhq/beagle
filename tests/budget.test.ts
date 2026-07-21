@@ -58,7 +58,14 @@ describe("scan-time budget (R5: p99 ≤ ~10ms on 1 MB)", () => {
   // that keeps scan time flat, so a keyword-free body measures almost nothing:
   // only 3 of 30 rules survive it, and the second pass re-runs just those. With
   // keywords it is 5 of 30 — still not "every rule", which no realistic body
-  // reaches — and ~3.9x the plain-body gate above rather than ~3.1x.
+  // reaches. (The ratio to the plain-body gate is machine-specific: measured
+  // between 2.2x and 3.9x on different hosts, so no number is quoted here.)
+  //
+  // Note what this body did BEFORE the change that added this gate: masking used
+  // to leave `\"` alone, so a body whose only escapes were quotes took the
+  // single-pass fast path. Blanking them is what moves ordinary tool-call
+  // traffic onto two passes. The cost below is that decision's, not a standing
+  // property of two-view scanning.
   //
   // What this catches is a blow-up: masking going superlinear, or a third view
   // being added. It is far too loose to catch a modest regression, exactly as
