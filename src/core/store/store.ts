@@ -89,9 +89,9 @@ const DB_FILE = "beagle.db";
 // that PREDATES it — an answer is generated after its own prompt, so a
 // response-less row newer than the answer belongs to a later turn (a re-emitted
 // codex-rollout answer racing a re-typed identical prompt). The margin absorbs
-// cross-source timestamp imprecision (rollout ISO-ms vs OTLP ns, batch-observed
-// times), not real ordering: keep it well under the seconds a human takes to
-// read an answer and re-send the same prompt.
+// cross-source timestamp imprecision (rollout ISO-ms vs OTLP ns, file-mtime
+// fallback stamps), not real ordering: keep it well under the seconds a human
+// takes to read an answer and re-send the same prompt.
 const ATTACH_MAX_SKEW_MS = 2000;
 
 // Disk bytes the fts5 trigram index costs per byte of indexed content —

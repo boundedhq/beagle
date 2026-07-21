@@ -259,6 +259,11 @@ describe("Codex rollout duplicate-prompt staleness", () => {
   }, 15_000);
 
   test("a recreated tailer's historical re-emits attach nowhere; the new turn still stitches", async () => {
+    // retryWindowMs FAR below the retirement sleep is load-bearing: turn 1's
+    // retry re-emits are long expired by the time the duplicate prompt lands,
+    // so any ANSWER_ONE re-emit after it can only come from a RECREATED tailer
+    // re-reading the file — the flavor this test exists to pin. Relaxing the
+    // window quietly turns this back into the retry-window test above.
     await startDaemon({ pollMs: 100, retryWindowMs: 300, retireMs: 2000 });
     const conv = "conv-retire";
     const prompt = "continue";

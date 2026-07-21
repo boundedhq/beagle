@@ -58,10 +58,14 @@ function locateRollout(root: string, convId: string): string | null {
   return bestPath;
 }
 
-// `fallbackTs` stands in for a timestamp-less rollout line: the answer's
-// FIRST-SEEN time, frozen across re-emits. A live now() here would defeat the
-// store's stale-attach bound (ts_request <= tsResponse) — every re-emit would
-// look freshly produced and could claim a newer identical-prompt turn's row.
+// `fallbackTs` stands in for a timestamp-less rollout line: the file's
+// last-write time when the answer was discovered, frozen across re-emits. A
+// live now() here would defeat the store's stale-attach bound (ts_request <=
+// tsResponse) — every re-emit would look freshly produced and could claim a
+// newer identical-prompt turn's row. The poll clock would fail the same way
+// one step later, on a RECREATED tailer (its first poll is "now" no matter
+// how old the answers are); mtime is old at recreation, so it is the one
+// stamp that keeps historical answers refusable there too.
 function buildResponseCall(convId: string, ans: RolloutAnswer, fallbackTs: number): OtelCall {
   const ts = ans.tsMs ?? fallbackTs;
   return {
@@ -98,7 +102,13 @@ export interface TailerOptions {
 export class CodexRolloutTailer {
   private timer: ReturnType<typeof setInterval> | null = null;
   private filePath: string | null;
-  private readonly firstSeen = new Map<number, number>(); // answer index → first-seen ms
+  private readonly firstSeen = new Map<number, number>(); // answer index → first-seen ms (retry-window clock only)
+  // answer index → the file's mtime at discovery: the stand-in production time
+  // for a timestamp-less line (see buildResponseCall). Kept apart from
+  // firstSeen, which must stay the POLL time — reusing mtime there would age
+  // a recreated tailer's answers straight past the retry window and kill the
+  // back-fill emit.
+  private readonly tsFallback = new Map<number, number>();
   private answers: RolloutAnswer[] = []; // cache; re-parsed only when the file grows
   private lastSize = -1;
   private lastChange: number;
@@ -138,13 +148,14 @@ export class CodexRolloutTailer {
         return;
       }
     }
-    let size: number;
+    let st: ReturnType<typeof statSync>;
     try {
-      size = statSync(this.filePath).size;
+      st = statSync(this.filePath);
     } catch {
       this.checkRetire(); // file gone/unreadable — still age toward retirement
       return;
     }
+    const size = st.size;
     const now = this.now();
     // The rollout is append-only, so re-read+parse only when it grew. The tailer
     // polls for the whole session; re-parsing a static multi-MB log every tick
@@ -174,8 +185,11 @@ export class CodexRolloutTailer {
       if (seen === undefined) {
         seen = now;
         this.firstSeen.set(i, seen);
+        // Floored: ulid()'s base32 digits come from `t % 32`, garbage on a
+        // fractional ms (mtimeMs is a float).
+        this.tsFallback.set(i, Math.floor(st.mtimeMs));
       }
-      if (now - seen <= window) due.push(buildResponseCall(this.opts.convId, ans, seen));
+      if (now - seen <= window) due.push(buildResponseCall(this.opts.convId, ans, this.tsFallback.get(i) ?? seen));
     });
     if (due.length) this.opts.emit(due);
     this.checkRetire(now);

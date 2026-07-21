@@ -175,10 +175,13 @@ attach query therefore also carries a **stale-attach bound**: the target row's
 margin). An answer is always produced after its own prompt, so a row newer than
 the answer belongs to a later turn — refusing it fails safe (§4.3: no stitch,
 never a wrong one), while post-retirement back-fill (row old, answer late) still
-attaches. For a rollout line with no parseable timestamp the tailer stamps the
-answer's *first-seen* time, frozen across re-emits, so re-emits can't look
-freshly produced. One shared helper `codexPromptKey(text)` guarantees the two
-sides compute byte-identical keys.
+attaches. For a rollout line with no parseable timestamp (0.144.x always
+stamps one — this is schema-drift defense) the tailer stands in the file's
+*mtime at discovery*, frozen across re-emits: unlike the poll clock, mtime is
+old on a recreated tailer, so historical answers stay refusable there too,
+while a post-retirement back-fill still carries the late write time it needs
+to attach. One shared helper `codexPromptKey(text)` guarantees the two sides
+compute byte-identical keys.
 
 ### 4.3 Why hash-of-prompt, not ordinal or timestamp
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CodexRolloutTailer, CodexRolloutWatcher } from "../src/adapters/codex-rollout-tailer";
@@ -107,23 +107,43 @@ describe("CodexRolloutTailer", () => {
     expect(out[0]!.meta.tsResponse).toBe(Date.parse("2026-07-20T21:00:00.000Z"));
   });
 
-  test("a timestamp-less answer's time freezes at first-seen across re-emits", () => {
+  // No `timestamp` field on the lines: the parser leaves tsMs undefined.
+  const bare = (role: string, text: string) => JSON.stringify({ type: "response_item", payload: msg(role, text) });
+
+  test("a timestamp-less answer is stamped with the file's write time, frozen across re-emits", () => {
     const dir = tmp();
     const file = join(dir, "rollout-x-conv1.jsonl");
-    // No `timestamp` field on the lines: the parser leaves tsMs undefined.
-    const bare = (role: string, text: string) => JSON.stringify({ type: "response_item", payload: msg(role, text) });
     writeFileSync(file, [bare("user", PA), bare("assistant", "ALPHA111")].join("\n") + "\n");
+    const mtime = Math.floor(statSync(file).mtimeMs);
     let clock = 1000;
     const out: OtelCall[] = [];
     const t = new CodexRolloutTailer({ convId: "conv1", filePath: file, emit: (c) => out.push(...c), now: () => clock, retryWindowMs: 5000 });
     t.poll();
-    expect(out.at(-1)!.meta.tsResponse).toBe(1000);
+    expect(out.at(-1)!.meta.tsResponse).toBe(mtime);
     clock = 3000;
     t.poll(); // re-emit within the retry window
-    // Still the FIRST-seen time. A live clock here would make every re-emit
-    // look freshly produced, letting a stale answer pass the store's
+    // Still the discovery-time stamp. A live clock here would make every
+    // re-emit look freshly produced, letting a stale answer pass the store's
     // stale-attach bound and claim a newer identical-prompt turn's row.
-    expect(out.at(-1)!.meta.tsResponse).toBe(1000);
+    expect(out.at(-1)!.meta.tsResponse).toBe(mtime);
+  });
+
+  test("a recreated tailer stamps timestamp-less answers with the file's age, not its own clock", () => {
+    const dir = tmp();
+    const file = join(dir, "rollout-x-conv1.jsonl");
+    writeFileSync(file, [bare("user", PA), bare("assistant", "ALPHA111")].join("\n") + "\n");
+    const mtime = Math.floor(statSync(file).mtimeMs);
+    // A fresh instance over an OLD file — the retire→recreate flow. Its first
+    // poll is "now" however old the answers are, so stamping the poll clock
+    // would make every historical answer look freshly produced and reopen the
+    // duplicate-prompt race for timestamp-less lines. The file's mtime is old
+    // at recreation, keeping them refusable — while a genuinely late answer
+    // (back-fill) still carries the late write time it needs to attach.
+    const clock = mtime + 60_000;
+    const out: OtelCall[] = [];
+    const t = new CodexRolloutTailer({ convId: "conv1", filePath: file, emit: (c) => out.push(...c), now: () => clock });
+    t.poll();
+    expect(out.at(-1)!.meta.tsResponse).toBe(mtime);
   });
 
   test("a missing/unreadable file never throws", () => {
