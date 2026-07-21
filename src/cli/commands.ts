@@ -17,6 +17,7 @@ import { listLeakEvents } from "../viewer/feed-query";
 import { sessionHeadlines } from "../viewer/session-view";
 import { buildDetail, leakSpansFor, leakTypesFor } from "../viewer/detail";
 import { secretName } from "../notifier/alert-copy";
+import { clampRedacted } from "../transform/redact";
 import { buildCodexOtelArgs, buildCodexOtelEnv, buildHookSettings, buildOtelEnv, mergeHookIntoSettings } from "../parsers/otlp-map";
 import { codexSessionsRoot } from "../adapters/codex-rollout-tailer";
 import { buildExtensionRedirect, buildRedirectConfig, readFirstConfig, writeRedirectConfig, writeRedirectExtension } from "../install/config-redirect";
@@ -414,8 +415,11 @@ export function cmdLeaks(stateDir: string): string {
     const head = headlines.get(sessionId) ?? {};
     const full = clean(unwrapTitle(head.title));
     // Cap the headline: stored summaries can run a sentence long, and the
-    // title only needs to identify the conversation.
-    const title = (full.length > 64 ? full.slice(0, 63) + "…" : full) || "(untitled session)";
+    // title only needs to identify the conversation. clampRedacted, not a bare
+    // slice — this is the leak log, where cutting a placeholder in half would
+    // stump the one thing the line is about right where it names the type.
+    const capped = full.length > 64 ? clampRedacted(full, 63) : full;
+    const title = (capped.length < full.length ? capped + "…" : full) || "(untitled session)";
     const agent = head.agent ? clean(head.agent) : "unknown agent";
     lines.push("", `  ${title} — ${agent} · session ${clean(sessionId)}`);
     for (const e of group) {

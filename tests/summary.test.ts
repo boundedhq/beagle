@@ -223,24 +223,59 @@ describe("buildSummary — wire-order sent half", () => {
     expect(fallback).not.toContain("…"); // nothing followed the secret to drop
   });
 
-  test("running past a placeholder in BOTH halves still leaves the summary bounded", () => {
-    // The run-past is what keeps a placeholder whole; a ceiling on it is what
-    // keeps the summary a feed LINE — "the summary became unbounded" was a
-    // review finding, and overshooting must not walk it back. Worst real case:
-    // a secret straddling the 40-char ask AND the 80-char reply, each half
-    // overshooting by one placeholder (≤39 chars — the longest rule id is 21).
-    // Ceiling: ask (2 quotes + 38 + 39 + ellipsis = 80) + " → " + reply
-    // (78 + 39 + ellipsis = 118) = 201.
+  test("run-pasts COMPOSE, so the assembled line clamps once more at SUMMARY_CAP", () => {
+    // Keeping a placeholder whole widens a half; the halves then compose. An
+    // ask plus three tool details is FOUR independent run-pasts, and without a
+    // bound on the assembled line they stacked to 274 chars of real placeholder
+    // (541 for one forged in captured content) — quietly walking back the
+    // "summary became unbounded" fix that the branch-level clamps exist for.
+    // Both fixtures below exceed the cap only via run-past, never raw length.
     const SECRET = "AKIAZQ3DRSTUVWXY2345";
-    const vals = [{ value: SECRET, type: "aws-access-key-id" }];
-    const P = redactionPlaceholder("aws-access-key-id", SECRET);
-    const s = buildSummary(
-      req([{ role: "user", content: `${"a".repeat(30)}${SECRET}${"b".repeat(500)}` }]),
-      `${"c".repeat(70)}${SECRET}${"d".repeat(500)}`,
-      undefined, vals,
+    const vals = [{ value: SECRET, type: "aws-secret-access-key" }]; // longest rule id: 21
+    const straddle = `${"g".repeat(38)}${SECRET}${"t".repeat(400)}`;
+    const real = buildSummary(
+      req([{ role: "user", content: straddle }]),
+      undefined,
+      Array.from({ length: 3 }, () => ({ tool: "grep", detail: straddle })),
+      vals,
     );
-    expect(s).toBe(`"${"a".repeat(30)}${P}…" → ${"c".repeat(70)}${P}…`);
-    expect(s.length).toBeLessThan(250);
-    expect(s).not.toContain("\n");
+
+    // A placeholder-SHAPED literal in captured content is not a real secret,
+    // so no scrub is involved — clampRedacted still runs past it, up to its
+    // 128-char window. This is the ceiling an agent's own output can reach.
+    const forged = `${"g".repeat(38)}[REDACTED:${"F".repeat(110)}:abcdef]${"t".repeat(400)}`;
+    const spoofed = buildSummary(
+      req([{ role: "user", content: forged }]),
+      undefined,
+      Array.from({ length: 3 }, () => ({ tool: "grep", detail: forged })),
+    );
+
+    for (const s of [real, spoofed]) {
+      // SUMMARY_CAP (200) plus at most ONE placeholder run-past — the outer
+      // clamp's whole point is that the overshoot no longer multiplies.
+      expect(s.length).toBeLessThanOrEqual(200 + 128);
+      expect(s).not.toContain("\n"); // still one stored line
+    }
+    // The real-placeholder case is the one a leak actually produces; pin it
+    // tightly so a future widening cannot hide inside the forged headroom.
+    expect(real.length).toBeLessThanOrEqual(200 + 39);
+
+    // Both fixtures above land the OUTER clamp in filler, so they say nothing
+    // about bisection — a bare slice would pass them. This padding puts a
+    // placeholder across SUMMARY_CAP itself, so the outer clamp has to run past
+    // it exactly as the inner ones do. A bare slice here ends
+    // `…D:aws-secret-access-key:6cc69…` — the stump this whole PR is about.
+    const atTheCap = buildSummary(
+      req([{ role: "user", content: `${SECRET}${"t".repeat(300)}` }]),
+      undefined,
+      Array.from({ length: 2 }, () => ({ tool: "grep", detail: `${"h".repeat(27)}${SECRET}${"u".repeat(300)}` })),
+      vals,
+    );
+    expect(atTheCap.length).toBeGreaterThan(200); // the outer clamp DID run past
+    expect(atTheCap).toEndWith(`${redactionPlaceholder("aws-secret-access-key", SECRET)}…`);
+    for (const s of [real, spoofed, atTheCap]) {
+      expect(s).not.toMatch(/\[REDACTED:[^\]]*$/); // never a bisected tail
+      expect(s).not.toContain("……"); // one truncation mark, not two
+    }
   });
 });
