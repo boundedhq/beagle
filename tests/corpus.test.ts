@@ -152,6 +152,62 @@ describe("precision fixes", () => {
     expect(f).toEqual([]);
   });
 
+  // The structured rule's twin of the shape rule's hex gate above. Its keyword
+  // window ([a-zA-Z_ ]{0,20}) bounds this only by accident of phrasing, so
+  // before entropy 4.0 every one of these was a high-severity alert on a
+  // digest. Each fires at 3.0, and the third adds an UPPERCASE digest — same
+  // 16-symbol ceiling, and this rule is case-insensitive. These go fully
+  // silent because no generic keyword precedes the digest; for the shapes
+  // where one does, see the downgrade test below.
+  test("40-hex digest near an 'aws' keyword is not a structured leak", () => {
+    for (const text of [
+      "aws deploy commit a3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5",
+      "aws build sha 3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5e",
+      "aws commit A3F9C1E8B7D62049F5E1C0A8B4D7E2F6C9A1B3D5",
+    ]) {
+      expect(scanText(text)).toEqual([]);
+    }
+  });
+
+  // Recall guard, and the reason this rule sits at 4.0 rather than borrowing
+  // aws-secret-shape's 4.5. Both fixtures are real base64-of-30-random-bytes
+  // keys drawn from the ~1.8% tail that lands between the two gates (4.396 and
+  // 4.446) — they pass here and would be silently MISSED at 4.5, so they pin
+  // the floor against a future FP being "fixed" by cranking the gate up to the
+  // sibling's value. Deliberately not the wJalr… key every other suite uses:
+  // at 4.71 it clears both gates and would pin nothing.
+  test("a real AWS secret key still trips the structured tier after the hex gate", () => {
+    for (const text of [
+      "aws_secret_access_key: FHMoLafZBokrItqNbuBFuxaMxrL0Cru2fNSo0Ixm",
+      "AWS_SECRET_ACCESS_KEY=uU52LWLuUdCm1EbfHbg+suqJXujmLA2+ZffsxzU2",
+    ]) {
+      const hit = scanText(text).find((x) => x.detector === "aws-secret-access-key");
+      expect(hit).toBeDefined();
+      expect(hit?.tier).toBe("structured");
+    }
+  });
+
+  // The one behavior change beyond silencing the FP. Where a generic keyword
+  // (key/secret/token) also precedes the digest, suppressOverlaps had been
+  // hiding generic-api-key behind the structured hit, so dropping the loud
+  // finding reveals it: these move structured/high -> possible/medium rather
+  // than going silent. A downgrade, not a new FP. The second case is the
+  // quoted .env shape this rule widened its separator for; the third is the
+  // hyphenated GitHub Actions spelling the -key anchor newly reaches, which
+  // made a digest pasted there a high-severity alert. Pinned so neither the
+  // tier nor the silence can drift back.
+  test("digest after a generic keyword downgrades to the quiet tier, not silence", () => {
+    for (const text of [
+      "secret_access_key: 199ff3573afbe988e42a1e9d9ff95fd8334dd6aa",
+      'aws_secret_access_key = "a3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5"',
+      "aws-secret-access-key: a3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5",
+    ]) {
+      const f = scanText(text);
+      expect(f.some((x) => x.tier === "structured")).toBe(false);
+      expect(f.find((x) => x.detector === "generic-api-key")?.tier).toBe("possible");
+    }
+  });
+
   test("epoch:hash pair is not a telegram token (:AA prefix required)", () => {
     const f = scanText("row 1626890000:aB3dEf6hIj9lMn2pQr5tUv8xYz1Bc4De7Fg");
     expect(f.some((x) => x.detector === "telegram-bot-token")).toBe(false);
