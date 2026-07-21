@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store, SCHEMA_VERSION, StoreVersionError } from "../src/core/store/store";
@@ -61,6 +61,11 @@ describe("Store lifecycle", () => {
     expect(store.pragma("user_version")).toBe(SCHEMA_VERSION);
     expect(store.pragma("journal_mode")).toBe("wal");
     expect(store.pragma("secure_delete")).toBe(1);
+    // 2 = INCREMENTAL. Guards a silent ordering trap: auto_vacuum is baked
+    // into the header when the file is initialized, so setting it AFTER
+    // journal_mode=WAL leaves it 0 and turns every `PRAGMA incremental_vacuum`
+    // into a no-op — swept pages stay on the freelist, the file never shrinks.
+    expect(store.pragma("auto_vacuum")).toBe(2);
     store.close();
   });
 
@@ -130,6 +135,7 @@ describe("Store lifecycle", () => {
     raw.exec("ALTER TABLE payloads DROP COLUMN display_messages"); // v3 column
     raw.exec("ALTER TABLE exchanges DROP COLUMN prompt_key"); // v5 column
     raw.exec("ALTER TABLE exchanges DROP COLUMN one_shot"); // v4 column
+    raw.exec("ALTER TABLE exchanges DROP COLUMN search_bytes"); // v6 column
     raw.exec("PRAGMA user_version=1");
     raw.close();
 
@@ -148,6 +154,14 @@ describe("Store lifecycle", () => {
     expect(migrated.getCall(ex2.id)?.oneShot).toBe(true); // v4 column round-trips post-migration
     expect(migrated.getCall(ex2.id)?.promptKey).toBe("p-77"); // v5 column round-trips post-migration
     expect(migrated.getCall(call.id)?.oneShot).toBe(false); // pre-migration row reads false, not undefined
+    // v6 backfills search_bytes from the existing index, so rows captured
+    // before the column existed bill their search index too. Without it they'd
+    // count 0 against the size cap until they aged out — and a store big
+    // enough to have hit that bug is the one that needs the cap enforced now.
+    expect(
+      migrated.queryAll<{ n: number }>(
+        `SELECT search_bytes AS n FROM exchanges WHERE id=?`, [call.id])[0]?.n,
+    ).toBe(Buffer.byteLength(call.searchText, "utf8"));
     migrated.close();
   });
 });
@@ -401,6 +415,99 @@ describe("Retention & purge", () => {
     store.sweep({ payloadWindowMs: Infinity, eventWindowMs: Infinity, sizeCapBytes: 450_000 });
     expect(store.getCall(a.id)).toBeNull();
     expect(store.getCall(c.id)).not.toBeNull();
+    store.close();
+  });
+
+  test("sweep bills the search index against the size cap, not payload blobs alone", () => {
+    // A Mode B row indexes its whole request body, so exchanges_fts holds a
+    // second copy of that text plus the trigram postings over it — several
+    // times the blob the sweeper used to bill. These rows are payload-light
+    // and search-heavy: counting blobs only, all three fit the cap and nothing
+    // would evict.
+    const store = Store.open(dir);
+    const body = new Uint8Array(50_000);
+    const searchText = "y".repeat(200_000);
+    const mk = (ageMs: number) =>
+      fakeCall({ tsRequest: Date.now() - ageMs, requestBody: body, searchText });
+    const [a, b, c] = [mk(3000), mk(2000), mk(1000)];
+    for (const e of [a, b, c]) store.insertCall(e);
+
+    const cap = 1_000_000;
+    // Guard the regression directly: payload bytes alone are well under the
+    // cap, so a payload-only sweeper evicts nothing here.
+    const payloadBytes = store.queryAll<{ n: number }>(
+      `SELECT SUM(COALESCE(length(request_body),0) + COALESCE(length(response_body),0)
+              + COALESCE(length(sse_raw),0)) AS n FROM payloads`,
+    )[0]!.n;
+    expect(payloadBytes).toBeLessThan(cap);
+
+    store.sweep({ payloadWindowMs: Infinity, eventWindowMs: Infinity, sizeCapBytes: cap });
+    expect(store.getCall(c.id)).not.toBeNull(); // newest row fits
+    expect(store.getCall(b.id)).toBeNull();
+    expect(store.getCall(a.id)).toBeNull();
+    store.close();
+  });
+
+  test("a search-text-heavy store actually shrinks to the configured cap on disk", () => {
+    // End-to-end: the cap has to bound the file the user sees in `beagle
+    // status`, not an internal tally. Realistic log-like text, since the
+    // trigram index's disk cost scales with content entropy.
+    const store = Store.open(dir);
+    const rowText = (i: number) => {
+      let s = "";
+      while (s.length < 64 * 1024) {
+        s += `2026-07-20T14:32:${String(s.length % 60).padStart(2, "0")}Z run-${i} ` +
+          `src/core/store/store.ts:${s.length % 997} export function sweep(policy) { evict(); } ` +
+          `the quick brown fox jumps over the lazy dog ${i * 7919 + s.length}\n`;
+      }
+      return s.slice(0, 64 * 1024);
+    };
+    for (let i = 0; i < 24; i++) {
+      store.insertCall(fakeCall({
+        tsRequest: Date.now() - (24 - i) * 1000,
+        requestBody: new TextEncoder().encode("{}"),
+        responseBody: null,
+        searchText: rowText(i),
+      }));
+    }
+    const cap = 1_500_000;
+    store.sweep({ payloadWindowMs: Infinity, eventWindowMs: Infinity, sizeCapBytes: cap });
+    expect(store.countCalls()).toBeGreaterThan(0); // a cap evicts, it does not wipe
+    store.close(); // folds the WAL back into the main db
+
+    const onDisk = statSync(join(dir, "beagle.db")).size +
+      (existsSync(join(dir, "beagle.db-wal")) ? statSync(join(dir, "beagle.db-wal")).size : 0);
+    // Measured ~1.5 MB against the 1.5 MB cap. The 2x headroom absorbs page
+    // granularity and index-entropy drift, and still fails every way this can
+    // regress: un-billed search text keeps all 24 rows (~7 MB), a no-op
+    // incremental_vacuum strands the freed pages on the freelist (~5 MB), and
+    // skipping the fts5 merge leaves dead trigram postings behind (~4 MB).
+    expect(onDisk).toBeLessThan(cap * 2);
+  });
+
+  test("a mass eviction survives SQLite's bound-parameter ceiling", () => {
+    // The eviction list used to go into one `id IN (...)`, which throws past
+    // 65535 ids — SQLite indexes bound parameters with a 16-bit value. The
+    // daemon's sweeper has no try/catch, so that throw takes the sweep out
+    // entirely. Reachable exactly where this accounting fix bites: a large
+    // over-cap store's first sweep drops everything above the cap at once.
+    // 4500 rows crosses several EVICT_BATCH boundaries in ~a second; the same
+    // loop is what keeps the 65535-id case from ever forming a statement.
+    const store = Store.open(dir);
+    const n = 4500;
+    for (let i = 0; i < n; i++) {
+      store.insertCall(fakeCall({
+        tsRequest: Date.now() - (n - i) * 10,
+        requestBody: new TextEncoder().encode("{}"),
+        responseBody: null,
+        searchText: `row ${i} short search text`,
+      }));
+    }
+    expect(store.countCalls()).toBe(n);
+    store.sweep({ payloadWindowMs: Infinity, eventWindowMs: Infinity, sizeCapBytes: 10_000 });
+    // Evicted down to what the cap holds, and nothing threw on the way.
+    expect(store.countCalls()).toBeLessThan(200);
+    expect(store.countCalls()).toBeGreaterThan(0);
     store.close();
   });
 

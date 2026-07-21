@@ -1,6 +1,6 @@
 // Schema from design §4. Version stamped in PRAGMA user_version; every
 // reader checks it before querying (two binaries share this file).
-export const SCHEMA_VERSION = 5; // v5: exchanges.prompt_key (Mode B cross-batch turn stitching)
+export const SCHEMA_VERSION = 6; // v6: exchanges.search_bytes (size-cap accounting for the search index)
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS exchanges (
@@ -20,7 +20,12 @@ CREATE TABLE IF NOT EXISTS exchanges (
   session_tier  TEXT NOT NULL,
   prompt_key    TEXT, -- Mode B: per-turn prompt id, lets a later-batch response rejoin its turn row
   redacted      INTEGER, -- 1 when redact-on-capture rewrote the body (viewer highlight)
-  one_shot      INTEGER -- 1: stateless utility turn (e.g. title-gen), no conversation identity
+  one_shot      INTEGER, -- 1: stateless utility turn (e.g. title-gen), no conversation identity
+  -- UTF-8 length of this row's exchanges_fts.content, stamped at insert. The
+  -- sweeper's size cap needs the search index's footprint, and fts5 can't
+  -- supply it: exchange_id is UNINDEXED there, so correlating back per row
+  -- scans the whole virtual table (O(n²)). See FTS_DISK_FACTOR in store.ts.
+  search_bytes  INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_exch_session ON exchanges(session_id);
 CREATE INDEX IF NOT EXISTS ix_exch_ts ON exchanges(ts_request);

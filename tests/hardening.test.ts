@@ -74,6 +74,59 @@ describe("redact-on-capture (R11)", () => {
     expect(out).toContain("[REDACTED:aws-access-key-id:");
   });
 
+  // The scanner matches the RAW bytes; the transcript, summary and Mode B
+  // search index render a JSON-DECODED view of them. A value matched inside a
+  // JSON string carries the two-char escape `\n`, so a literal-match scrub of
+  // the decoded text found nothing and silently no-opped — the body was masked
+  // while the raw key stayed readable in the viewer and searchable by `beagle
+  // search`. Every escaping form of a value must scrub.
+  test("redactValuesInText scrubs the JSON-decoded form of an escaped value", () => {
+    // Both forms written out literally rather than derived from each other: a
+    // test that decodes with the same primitive the fix uses would agree with
+    // a wrong decoding instead of catching it.
+    const escaped = "-----BEGIN RSA PRIVATE KEY-----\\nMIIEowIBAAKCAQEAderivedTextRegression\\n-----END RSA PRIVATE KEY-----";
+    const decoded = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAderivedTextRegression\n-----END RSA PRIVATE KEY-----";
+    const out = redactValuesInText(`deploy:\n${decoded}`, [{ value: escaped, type: "private-key" }]);
+    expect(out).not.toContain("MIIEowIBAAKCAQEAderivedTextRegression");
+    expect(out).toContain("[REDACTED:private-key:");
+    // One secret reads as ONE placeholder whichever form was found, so the
+    // viewer highlights the transcript and the body identically.
+    expect(out).toContain(redactionPlaceholder("private-key", escaped));
+  });
+
+  test("redactValuesInText still scrubs the raw escaped form (stored bodies keep their escapes)", () => {
+    const escaped = "-----BEGIN RSA PRIVATE KEY-----\\nMIIEowIBAAKCAQEAderivedTextRegression\\n-----END RSA PRIVATE KEY-----";
+    const out = redactValuesInText(`{"prompt":"${escaped}"}`, [{ value: escaped, type: "private-key" }]);
+    expect(out).not.toContain("MIIEowIBAAKCAQEAderivedTextRegression");
+    expect(out).toContain("[REDACTED:private-key:");
+  });
+
+  test("a value whose escapes are malformed still scrubs by its raw form", () => {
+    // A match that cut an escape in half is not a well-formed JSON string body,
+    // so no decoded variant exists. The failed decode must not throw out of the
+    // scrub, and must not cost the RAW form its scrub either — asserted with the
+    // value actually PRESENT, since a no-op on absent text would pass either way.
+    const value = "secret-value-with-trailing\\";
+    const out = redactValuesInText(`held ${value} here`, [{ value, type: "x" }]);
+    expect(out).toBe(`held ${redactionPlaceholder("x", value)} here`);
+  });
+
+  test("redactValuesInText scrubs escapes other than \\n (quote, tab, unicode)", () => {
+    // The `\n` case is what surfaced the bug, but the mismatch is general: any
+    // escape the display decodes leaves the raw matched value un-findable.
+    const tab = String.fromCharCode(9);
+    // Each pair is [what the scanner matched in the raw bytes, what the display shows].
+    const pairs: Array<[string, string]> = [
+      ['api\\"key\\"value', 'api"key"value'],
+      ["api\\tkey\\tvalue", `api${tab}key${tab}value`],
+      ["api\\u0041key\\u0042value", "apiAkeyBvalue"],
+    ];
+    for (const [escaped, decoded] of pairs) {
+      const out = redactValuesInText(`sent ${decoded} onward`, [{ value: escaped, type: "x" }]);
+      expect(out).toBe(`sent ${redactionPlaceholder("x", escaped)} onward`);
+    }
+  });
+
   test("applyCaptureRedaction holds all content out on an incomplete scan", () => {
     const out = applyCaptureRedaction({
       incomplete: true,

@@ -83,6 +83,24 @@ export interface SearchHit {
 
 const DB_FILE = "beagle.db";
 
+// Disk bytes the fts5 trigram index costs per byte of indexed content —
+// the stored content copy plus the trigram postings. Measured on bun:sqlite
+// (fts5, tokenize='trigram'): ~2.3x for highly repetitive text, ~3.0x for
+// typical agent traffic (JSON + prose + code + paths), ~5.3x for high-entropy
+// text like base64 blobs. 3 tracks the typical case; the cap is a budget, not
+// a hard invariant, so a rough factor beats today's implicit 0.
+const FTS_DISK_FACTOR = 3;
+
+// Page budget for the post-delete fts5 segment merge (see reclaim()). Bounds
+// the work one sweep can do on a large index; a merge with nothing to do is
+// free (~0.01ms), so it can run on every sweep unconditionally.
+const FTS_MERGE_PAGES = 4096;
+
+// Max ids per eviction statement. SQLite indexes bound parameters with a
+// 16-bit value, so one `id IN (...)` carrying more than 65535 of them throws;
+// stay well under, since deleteCallsWhere nests the list inside subqueries.
+const EVICT_BATCH = 2000;
+
 export class Store {
   private constructor(private db: Db) {}
 
@@ -92,9 +110,14 @@ export class Store {
     const path = join(stateDir, DB_FILE);
     const db = openDb(path);
     chmodSync(path, 0o600);
+    // auto_vacuum FIRST, before anything writes the header: the setting is
+    // baked in when the db file is initialized, and journal_mode=WAL does that
+    // initializing. Set after WAL it is silently ignored (auto_vacuum stays 0),
+    // which makes every `PRAGMA incremental_vacuum` below a no-op and leaves
+    // swept pages on the freelist instead of returning them to the OS.
+    db.exec("PRAGMA auto_vacuum=INCREMENTAL");
     db.exec("PRAGMA journal_mode=WAL");
     db.exec("PRAGMA secure_delete=ON");
-    db.exec("PRAGMA auto_vacuum=INCREMENTAL");
     db.exec("PRAGMA foreign_keys=ON");
     const v = pragmaNumber(db, "user_version");
     if (v > SCHEMA_VERSION) throw versionError(v); // a newer store: upgrade beagle
@@ -164,13 +187,15 @@ export class Store {
       this.db.run(
         `INSERT INTO exchanges (id, session_id, run_id, source, agent, provider, model,
            endpoint, ts_request, ts_response, status, tokens_in, tokens_out,
-           bytes_req, bytes_resp, summary, scan_state, capture_state, session_tier, redacted, one_shot, prompt_key)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           bytes_req, bytes_resp, summary, scan_state, capture_state, session_tier, redacted, one_shot,
+           prompt_key, search_bytes)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [call.id, call.sessionId, call.runId, call.source, call.agent ?? null, call.provider ?? null,
          call.model ?? null, call.endpoint ?? null, call.tsRequest, call.tsResponse ?? null,
          call.status ?? null, call.tokensIn ?? null, call.tokensOut ?? null, call.bytesReq ?? null,
          call.bytesResp ?? null, call.summary ?? null, call.scanState, call.captureState, call.sessionTier,
-         call.redacted ? 1 : null, call.oneShot ? 1 : null, call.promptKey ?? null],
+         call.redacted ? 1 : null, call.oneShot ? 1 : null, call.promptKey ?? null,
+         Buffer.byteLength(call.searchText, "utf8")],
       );
       this.db.run(
         `INSERT INTO payloads (exchange_id, request_body, request_headers,
@@ -403,13 +428,20 @@ export class Store {
       this.deleteCallsWhere("ts_request < ?", [now - policy.payloadWindowMs]);
     }
     if (Number.isFinite(policy.sizeCapBytes)) {
-      // Oldest-first eviction until payload bytes fit the cap.
-      const rows = this.db.all<{ id: string; sz: number; ts: number }>(
-        `SELECT e.id AS id, e.ts_request AS ts,
+      // Oldest-first eviction until stored bytes fit the cap. A row costs its
+      // payload blobs PLUS its search index: exchanges_fts keeps a second copy
+      // of the row's outbound text and the trigram postings over it, which for
+      // a Mode B row (search text ~= request body) outweighs the blobs. The
+      // index cost is read from the stamped search_bytes rather than joined
+      // from fts5 — see the schema note on why that join is O(n²).
+      const rows = this.db.all<{ id: string; sz: number }>(
+        `SELECT e.id AS id,
                 COALESCE(length(p.request_body),0) + COALESCE(length(p.response_body),0)
-                + COALESCE(length(p.sse_raw),0) AS sz
+                + COALESCE(length(p.sse_raw),0)
+                + COALESCE(e.search_bytes,0) * ? AS sz
          FROM exchanges e LEFT JOIN payloads p ON p.exchange_id = e.id
          ORDER BY e.ts_request DESC`,
+        [FTS_DISK_FACTOR],
       );
       let acc = 0;
       const evict: string[] = [];
@@ -417,9 +449,14 @@ export class Store {
         acc += r.sz;
         if (acc > policy.sizeCapBytes) evict.push(r.id);
       }
-      if (evict.length > 0) {
-        const qs = evict.map(() => "?").join(",");
-        this.deleteCallsWhere(`id IN (${qs})`, evict);
+      // Batched: an over-cap store can evict far more than one statement can
+      // carry (see EVICT_BATCH). That is not a corner case here — a multi-GB
+      // db of small calls is exactly what this accounting fix targets, and its
+      // first sweep drops everything above the cap at once. Each batch is its
+      // own transaction, so a sweep interrupted midway just resumes next pass.
+      for (let i = 0; i < evict.length; i += EVICT_BATCH) {
+        const batch = evict.slice(i, i + EVICT_BATCH);
+        this.deleteCallsWhere(`id IN (${batch.map(() => "?").join(",")})`, batch);
       }
     }
     if (Number.isFinite(policy.eventWindowMs)) {
@@ -431,6 +468,17 @@ export class Store {
       this.db.run(`DELETE FROM sessions WHERE last_ts < ?`, [cutoff]);
       this.db.run(`DELETE FROM runs WHERE created_ts < ?`, [cutoff]);
     }
+    this.reclaim();
+  }
+
+  // Hand the space a delete freed back to the OS. Order matters: fts5 keeps a
+  // deleted row's trigram postings as tombstones until its segments are
+  // merged, so straight after an eviction the index can still hold several
+  // times the live content in dead postings — vacuuming first would find
+  // almost nothing to release. Merge, then release.
+  private reclaim(): void {
+    this.db.run(`INSERT INTO exchanges_fts(exchanges_fts, rank) VALUES('merge', ?)`,
+      [-FTS_MERGE_PAGES]);
     this.db.exec("PRAGMA incremental_vacuum");
   }
 
@@ -444,7 +492,7 @@ export class Store {
     } else {
       this.deleteCallsWhere("ts_request < ?", [spec.ts]);
     }
-    this.db.exec("PRAGMA incremental_vacuum");
+    this.reclaim();
   }
 
   panicPurge(): void {
@@ -508,6 +556,31 @@ function migrate(db: Db, from: number): void {
   if (from < 3) add("payloads", "display_messages TEXT");
   if (from < 4) add("exchanges", "one_shot INTEGER");
   if (from < 5) add("exchanges", "prompt_key TEXT");
+  if (from < 6) {
+    add("exchanges", "search_bytes INTEGER");
+    backfillSearchBytes(db);
+  }
+}
+
+// v6: stamp search_bytes on rows captured before the column existed. Without
+// it they'd bill 0 for their search index until they aged out — and a store
+// big enough to have hit the bug is exactly the one that needs the cap
+// enforced now. One sequential pass over the index into an indexed temp table,
+// then a join: correlating exchanges_fts per row would be O(n²) (exchange_id
+// is UNINDEXED). Best-effort — on failure the column stays NULL, which reads
+// as 0: the pre-v6 accounting, not a broken store.
+function backfillSearchBytes(db: Db): void {
+  try {
+    db.exec("BEGIN");
+    db.exec(`CREATE TEMP TABLE sb AS
+               SELECT exchange_id AS id, length(CAST(content AS BLOB)) AS n FROM exchanges_fts`);
+    db.exec(`CREATE INDEX temp.ix_sb ON sb(id)`);
+    db.exec(`UPDATE exchanges SET search_bytes = (SELECT n FROM sb WHERE sb.id = exchanges.id)`);
+    db.exec("COMMIT");
+  } catch {
+    try { db.exec("ROLLBACK"); } catch { /* no open tx */ }
+  }
+  try { db.exec(`DROP TABLE IF EXISTS temp.sb`); } catch { /* never created */ }
 }
 
 // Token counts stay NULL when neither side reported one — 0 would read as

@@ -123,8 +123,8 @@ provider (the endpoint override Beagle uses for API-key Codex doesn't reach
 it), and Anthropic restricts Claude.ai subscription OAuth to its official
 client. So for those two, Beagle captures sessions from the agent's own
 usage reporting instead. Your prompts, tool inputs, and tool outputs (including
-files the agent reads) are still scanned — but it's the agent's self-report,
-not observed wire bytes. Those rows are badged **self-reported** in the
+files the agent reads) are still scanned and searchable — but it's the agent's
+self-report, not observed wire bytes. Those rows are badged **self-reported** in the
 dashboard (wire rows say **observed**), and alerts can lag a few seconds.
 Nothing leaves your machine: the report goes to a loopback receiver on
 `127.0.0.1`, and the vendor's reporting flags are set per run, never written
@@ -213,7 +213,7 @@ Trust needs numbers, not adjectives:
 |---|---|---|
 | Core security path | ≤ 2,000 LOC | `bun run loc:check` fails the build over budget |
 | Detection false-positive rate | < 5% | `tests/precision.test.ts` — the ship gate |
-| Scan time, 1 MB body | p99 ~10 ms | `tests/budget.test.ts` (< 50 ms ceiling for CI variance) |
+| Scan time, 1 MB body | p99 ~10 ms | `tests/budget.test.ts` (median < 50 ms ceiling for CI variance); pathological inputs are bounded separately, by the scan worker's 500 ms fail-safe deadline |
 | Added request latency | p50 ≤ 5 ms | `tests/budget.test.ts` (< 25 ms ceiling for CI variance) |
 | Install size | ≤ 100 MB | CI binary-size check |
 

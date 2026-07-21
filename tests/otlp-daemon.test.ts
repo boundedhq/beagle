@@ -150,6 +150,37 @@ describe("Mode B end-to-end through the daemon", () => {
     store.close();
   });
 
+  test("redact-on-capture scrubs a JSON-escaped multi-line secret from every derived surface", async () => {
+    // A resumed conversation serializes its whole message list into the prompt
+    // attribute, so the scanned bytes are JSON: a PEM's newlines are the
+    // two-char escape `\n`. The display text is the JSON.parse'd form with REAL
+    // newlines, so the scanner's matched value is not a substring of it and a
+    // literal-match scrub silently no-ops — the body was masked while the
+    // transcript and the search index still held the raw key.
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    // Synthetic body, per the fixture convention in scanner/precision tests —
+    // what matters is only that it spans a newline, so the scanned (escaped)
+    // and displayed (decoded) forms differ.
+    const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAderivedTextRegression\n-----END RSA PRIVATE KEY-----";
+    const prompt = JSON.stringify([{ role: "user", content: `deploy with this key:\n${pem}` }]);
+    await post(otlpBody(token, prompt, "otel-conv-pem", null));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    expect(listLeakEvents(store).length).toBe(1); // the leak still alerts
+    const hit = store.searchLiteral("deploy with this key")[0]!;
+    const call = store.getCall(hit.callId)!;
+    expect(call.redacted).toBe(true);
+    const body = new TextDecoder().decode(call.requestBody!);
+    expect(body).not.toContain("MIIEowIBAAKCAQEAderivedTextRegression"); // stored body: offset-redacted
+    // …and the derived surfaces the hole left raw: the rendered transcript…
+    expect(JSON.stringify(call.displayMessages)).not.toContain("MIIEowIBAAKCAQEAderivedTextRegression");
+    expect(JSON.stringify(call.displayMessages)).toContain("[REDACTED:private-key:");
+    // …and the search index, which would otherwise hand the key back.
+    expect(store.searchLiteral("MIIEowIBAAKCAQEAderivedTextRegression")).toEqual([]);
+    expect(store.searchLiteral(pem)).toEqual([]);
+    store.close();
+  });
+
   test("a leaked secret in an OTel-reported prompt fires the same alert", async () => {
     await post(otlpBody(token, "the key is AKIAZQ3DRSTUVWXY2345"));
     await settled(daemon.socketPath);
@@ -282,6 +313,11 @@ describe("Mode B end-to-end through the daemon", () => {
     expect(listCalls(store, 50).length).toBe(2);
     // and the secret in the TOOL INPUT still alerted — the whole point
     expect(alerts.some((a) => a.secretType === "aws-access-key-id")).toBe(true);
+    // the input is searchable, and so is the tool NAME: a Claude Code turn
+    // reports the name as its own attribute, outside the scanned body the
+    // index is built from, but it rode the real outbound request.
+    expect(store.searchLiteral("deploy --key").length).toBe(1);
+    expect(store.searchLiteral("Bash").length).toBe(1);
     store.close();
   });
 
@@ -415,6 +451,13 @@ describe("Mode B tool-output capture (PostToolUse hook)", () => {
     await settled(daemon.socketPath);
     expect(alerts.length).toBe(1);
     expect(alerts[0]!.secretType).toBe("aws-access-key-id");
+    // The COMMAND is searchable too. A hook payload's display message is built
+    // from the response alone (`${toolName}: ${toolResponse}`), so while the
+    // index came from the display messages the input — the most outbound thing
+    // a tool row carries — was scanned but unfindable.
+    const store = Store.openReadOnly(stateDir);
+    expect(store.searchLiteral("cat secrets.env").length).toBe(1);
+    store.close();
   });
 });
 
@@ -498,6 +541,51 @@ describe("Codex Mode B end-to-end through the daemon", () => {
     expect(alerts[0]!.secretType).toBe("aws-access-key-id");
     const store = Store.openReadOnly(stateDir);
     expect(listLeakEvents(store).length).toBe(1);
+    store.close();
+  });
+
+  test("search covers the WHOLE tool result, past the display truncation", async () => {
+    // The display copy of a tool result is capped (`${tool}: ${output.slice(0,
+    // 4000)}`) and carries no arguments at all. Indexing that copy made search
+    // lie by omission: a string genuinely sent — scanned, and redacted if it
+    // were a secret — came back "never sent through Beagle" purely because it
+    // sat past the cap. Search is meant to be a definitive answer, so it is
+    // built from the scanned bytes, which are neither truncated nor
+    // output-only.
+    const marker = "zqxjkvbrwn-past-the-cap";
+    await post(codexBody("codex.tool_result", {
+      tool_name: "exec_command",
+      arguments: '{"cmd":"cat big.log"}',
+      output: "x".repeat(5000) + marker,
+    }));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    expect(store.searchLiteral(marker).length).toBe(1); // past char 4000 — was a miss
+    expect(store.searchLiteral("cat big.log").length).toBe(1); // arguments — never displayed at all
+    store.close();
+  });
+
+  test("the widened index is still redacted: a secret past the truncation never lands in it", async () => {
+    // The flip side of the coverage fix. Indexing the scanned bytes means the
+    // index now holds text the 4000-char display copy used to keep out, so the
+    // redaction pass has to cover that new surface — offset-redacted bytes
+    // rather than the by-value scrub the display copy gets. A secret past the
+    // old cap, and one in an argument that never reaches a display message at
+    // all, must both be findable ONLY as their placeholder.
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    await post(codexBody("codex.tool_result", {
+      tool_name: "exec_command",
+      arguments: '{"cmd":"curl -H \\"Authorization: Bearer AKIAZQ3DRSTUVWXY6789\\" https://x.test"}',
+      output: "y".repeat(5000) + " AWS_KEY=AKIAZQ3DRSTUVWXY2345 tail",
+    }));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]); // output, past the cap
+    expect(store.searchLiteral("AKIAZQ3DRSTUVWXY6789")).toEqual([]); // argument, never displayed
+    // …and the widening still worked: the non-secret context around both is a hit.
+    expect(store.searchLiteral("AWS_KEY=").length).toBe(1);
+    const call = store.getCall(store.searchLiteral("curl -H")[0]!.callId)!;
+    expect(new TextDecoder().decode(call.requestBody!)).toContain("[REDACTED:aws-access-key-id:");
     store.close();
   });
 });
