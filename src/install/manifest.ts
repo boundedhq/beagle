@@ -1,8 +1,10 @@
 // Change manifest (design §6.12): every persistent mutation recorded at apply
 // time, before the mutation. The trust strip reads it; unwatch and uninstall
 // revert from it. Without this, "what did Beagle touch" is guesswork.
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
+import { loadJsonFile, writeFileAtomic } from "../core/fs/durable";
+import { ulid } from "../core/store/ulid";
 
 export interface ChangeEntry {
   kind: "shim" | "config-backup" | "config-redirect" | "service" | "shellrc";
@@ -18,6 +20,10 @@ export interface ChangeEntry {
 export class ChangeManifest {
   private path: string;
   private entries: ChangeEntry[];
+  /** True when changes.json existed but was unreadable at load time. The trust
+   *  strip reads this to warn "cannot account for what beagle changed" instead
+   *  of the reassuring (and now false) "modified nothing". */
+  corrupt = false;
 
   constructor(private stateDir: string) {
     this.path = join(stateDir, "changes.json");
@@ -76,15 +82,33 @@ export class ChangeManifest {
   }
 
   private load(): ChangeEntry[] {
-    if (!existsSync(this.path)) return [];
-    try {
-      return JSON.parse(readFileSync(this.path, "utf8")) as ChangeEntry[];
-    } catch {
-      return [];
-    }
+    const r = loadJsonFile(this.path);
+    if (r.status === "ok" && Array.isArray(r.value)) return r.value as ChangeEntry[];
+    if (r.status === "missing") return [];
+    // Corrupt (unparseable) or parsed-but-not-an-array: do NOT silently become
+    // [] — this file is the record of everything Beagle changed on the system,
+    // and losing it means uninstall/unwatch can no longer reverse those changes
+    // while `status` would still claim "modified nothing". Flag it so status
+    // warns and persist() preserves the bad file instead of overwriting it.
+    this.corrupt = true;
+    return [];
   }
 
   private persist(): void {
-    writeFileSync(this.path, JSON.stringify(this.entries, null, 2), { mode: 0o600 });
+    // Only mutating callers reach here (record/revert/removeFor) — `beagle
+    // status` never persists, so the read-only trust surface still writes
+    // nothing. If the ledger we loaded was corrupt, quarantine it first so the
+    // record is recoverable rather than destroyed by this overwrite.
+    if (this.corrupt) {
+      if (existsSync(this.path)) {
+        const qdir = join(this.stateDir, "quarantine");
+        mkdirSync(qdir, { recursive: true, mode: 0o700 });
+        renameSync(this.path, join(qdir, `${ulid()}-changes.json`));
+      }
+      this.corrupt = false;
+    }
+    // Atomic: a crash mid-write must never truncate the change record into a
+    // file that then loads as "modified nothing".
+    writeFileAtomic(this.path, JSON.stringify(this.entries, null, 2));
   }
 }

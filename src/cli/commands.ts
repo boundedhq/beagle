@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { Store, StoreVersionError } from "../core/store/store";
 import { loadConfig, readConfig, saveConfig } from "../core/config/config";
+import { loadJsonFile } from "../core/fs/durable";
 import { controlRequest, openLease } from "../daemon/control";
 import { Notifier, stripControlChars } from "../notifier/notifier";
 import { GraduationTracker } from "../install/graduation";
@@ -313,13 +314,25 @@ export function cmdStatus(
   lines.push(
     row("retention", `payloads ${cfg.payloadWindowDays} days / ${cfg.sizeCapMB} MB · leak events ${cfg.eventWindowDays} days`),
   );
+  // A corrupt config.json loads as safe defaults so the daemon never crashes —
+  // but the user must not mistake those defaults for their saved settings.
+  if (loadJsonFile(join(stateDir, "config.json")).status === "corrupt") {
+    lines.push(cont("▲ config.json is corrupt — the retention/redaction above are safe DEFAULTS, not your"));
+    lines.push(cont("  saved settings; remove the file, or run `beagle config …` to rewrite it"));
+  }
   lines.push("");
 
   lines.push(
-    row("changes", manifest.list().length === 0
-      ? "none — beagle has modified nothing on this system"
-      : `${manifest.summary()} — \`beagle unwatch <agent>\` reverts them`),
+    row("changes", manifest.corrupt
+      ? "▲ changes.json is CORRUPT — cannot account for what beagle changed on this system"
+      : manifest.list().length === 0
+        ? "none — beagle has modified nothing on this system"
+        : `${manifest.summary()} — \`beagle unwatch <agent>\` reverts them`),
   );
+  if (manifest.corrupt) {
+    lines.push(cont("  the change record is unreadable — `beagle uninstall`/`unwatch` may not fully"));
+    lines.push(cont("  reverse prior changes; check PATH shims and any service unit by hand"));
+  }
   lines.push(row("privacy", "local only — outbound traffic is just your agents' own model calls"));
   lines.push(cont("no telemetry · viewer off until requested"));
   return lines.join("\n");

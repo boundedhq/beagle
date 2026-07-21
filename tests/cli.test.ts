@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, cmdUninstall, countPossibleLeaksSince, detectLine, interpretAskAnswer, isLoopbackHookEndpoint, otelCallsArrivedSince, parseRunArgs, readCodexApiKey, resolveRunMode, runCallsArrived } from "../src/cli/commands";
@@ -905,6 +905,27 @@ describe("cmdStatus — daemon wording + service health", () => {
     const s = cmdStatus(dir, null, () => true);
     expect(existsSync(join(dir, "config.json"))).toBe(false);
     expect(s).toContain("beagle has modified nothing on this system");
+  });
+
+  test("a corrupt config.json is surfaced loudly — and status still writes nothing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-status-cfgcorrupt-"));
+    writeFileSync(join(dir, "config.json"), "{ truncated");
+    const before = readFileSync(join(dir, "config.json"), "utf8");
+    const s = cmdStatus(dir, null, () => true);
+    expect(s).toContain("config.json is corrupt");
+    expect(s).toContain("safe DEFAULTS");
+    // Read-only invariant holds even on the corrupt path: no repair, no quarantine.
+    expect(readFileSync(join(dir, "config.json"), "utf8")).toBe(before);
+    expect(existsSync(join(dir, "quarantine"))).toBe(false);
+  });
+
+  test("a corrupt changes.json makes status DROP 'modified nothing' for a loud warning", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-status-chgcorrupt-"));
+    writeFileSync(join(dir, "changes.json"), "[ {bad");
+    const s = cmdStatus(dir, null, () => true);
+    expect(s).toContain("changes.json is CORRUPT");
+    expect(s).not.toContain("modified nothing on this system"); // the dangerous false claim
+    expect(existsSync(join(dir, "quarantine"))).toBe(false); // a mere check never quarantines
   });
 
   test("search on a fresh install doesn't claim 'never sent' — nothing was captured", () => {

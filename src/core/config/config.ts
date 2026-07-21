@@ -1,8 +1,9 @@
 // Config + install key (design §6.11). One 0600 file in the state dir;
 // defaults are the R11 retention posture.
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
+import { loadJsonFile, writeFileAtomic } from "../fs/durable";
 
 export interface BeagleConfig {
   payloadWindowDays: number;
@@ -31,30 +32,28 @@ export const DEFAULT_CONFIG: BeagleConfig = {
 
 export function loadConfig(stateDir: string): BeagleConfig {
   const path = join(stateDir, "config.json");
-  if (!existsSync(path)) {
-    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-    writeFileSync(path, JSON.stringify(DEFAULT_CONFIG, null, 2), { mode: 0o600 });
+  const r = loadJsonFile(path);
+  if (r.status === "ok") return sanitizeConfig(r.value as Partial<BeagleConfig>);
+  if (r.status === "missing") {
+    writeFileAtomic(path, JSON.stringify(DEFAULT_CONFIG, null, 2));
     return { ...DEFAULT_CONFIG };
   }
-  try {
-    return sanitizeConfig(JSON.parse(readFileSync(path, "utf8")) as Partial<BeagleConfig>);
-  } catch {
-    return { ...DEFAULT_CONFIG }; // corrupt config: defaults, never crash the daemon
-  }
+  // Corrupt: run on safe defaults so the daemon never crashes, but LEAVE the bad
+  // file in place. `beagle status` reads it and surfaces the corruption; a silent
+  // rewrite here would erase the only signal that the user's saved retention /
+  // redaction / run-mode settings were lost. An explicit `beagle config …` write
+  // replaces it atomically when the user chooses to.
+  return { ...DEFAULT_CONFIG };
 }
 
-/** Read config WITHOUT creating anything. For read-only callers like `beagle
- *  status` — loadConfig writes DEFAULT_CONFIG on first run, which would make
- *  the trust strip's "beagle has modified nothing on this system" a lie by
- *  the act of checking. Missing/corrupt → in-memory defaults, no file. */
+/** Read config WITHOUT creating or repairing anything. For read-only callers
+ *  like `beagle status` — loadConfig writes DEFAULT_CONFIG on first run, which
+ *  would make the trust strip's "beagle has modified nothing on this system" a
+ *  lie by the act of checking. Missing/corrupt → in-memory defaults, no file.
+ *  Corruption is surfaced by `beagle status` via loadJsonFile, not swallowed. */
 export function readConfig(stateDir: string): BeagleConfig {
-  const path = join(stateDir, "config.json");
-  if (!existsSync(path)) return { ...DEFAULT_CONFIG };
-  try {
-    return sanitizeConfig(JSON.parse(readFileSync(path, "utf8")) as Partial<BeagleConfig>);
-  } catch {
-    return { ...DEFAULT_CONFIG };
-  }
+  const r = loadJsonFile(join(stateDir, "config.json"));
+  return r.status === "ok" ? sanitizeConfig(r.value as Partial<BeagleConfig>) : { ...DEFAULT_CONFIG };
 }
 
 /** Merge a parsed config over the defaults, taking each field ONLY when it is
@@ -64,6 +63,10 @@ export function readConfig(stateDir: string): BeagleConfig {
  *  the secure default; unknown keys are dropped. */
 export function sanitizeConfig(raw: Partial<BeagleConfig>): BeagleConfig {
   const c: BeagleConfig = { ...DEFAULT_CONFIG };
+  // A file that parses to null / a scalar / an array is not a config object —
+  // every field falls back. (Also makes this total: without the guard a `null`
+  // raw crashes at `raw.redactOnCapture`, previously masked only by a try/catch.)
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return c;
   const posNum = (v: unknown, min: number): number | undefined =>
     typeof v === "number" && Number.isFinite(v) && v >= min ? v : undefined;
   c.payloadWindowDays = posNum(raw.payloadWindowDays, 0) ?? c.payloadWindowDays;
@@ -84,11 +87,9 @@ export function sanitizeConfig(raw: Partial<BeagleConfig>): BeagleConfig {
 }
 
 export function saveConfig(stateDir: string, config: BeagleConfig): void {
-  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-  const path = join(stateDir, "config.json");
-  writeFileSync(path, JSON.stringify(config, null, 2), { mode: 0o600 });
-  // mode on writeFileSync only applies at creation; enforce on existing files.
-  chmodSync(path, 0o600);
+  // Atomic: a crash or full disk mid-write must never leave a truncated
+  // config.json that silently loads as defaults on the next start.
+  writeFileAtomic(join(stateDir, "config.json"), JSON.stringify(config, null, 2));
 }
 
 export function loadOrCreateInstallKey(stateDir: string): Uint8Array {
@@ -97,9 +98,9 @@ export function loadOrCreateInstallKey(stateDir: string): Uint8Array {
     const raw = readFileSync(path);
     if (raw.length === 32) return new Uint8Array(raw);
   }
-  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  // Atomic: a torn write would fail the length check next start and silently
+  // regenerate the key, breaking every stored leak fingerprint's continuity.
   const key = randomBytes(32);
-  writeFileSync(path, key, { mode: 0o600 });
-  chmodSync(path, 0o600);
+  writeFileAtomic(path, key);
   return new Uint8Array(key);
 }

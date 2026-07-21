@@ -1,7 +1,8 @@
 // The daemon (design §6.7): owns the proxy listener, store writer, scanner
 // host, session resolver, alert engine, control socket, and sweeper. The
 // only writer; CLI and viewer read the store directly.
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import { writeFileAtomic } from "../core/fs/durable";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { Server, Socket } from "node:net";
@@ -214,13 +215,12 @@ export class Daemon {
     d.sweep();
     d.sweeper = setInterval(() => d.sweep(), opts.sweepIntervalMs ?? SWEEP_INTERVAL_MS);
     d.sweeper.unref?.();
-    writeFileSync(
+    writeFileAtomic(
       join(opts.stateDir, "daemon.json"),
       JSON.stringify({
         pid: process.pid, proxyPort: d.proxyPort, socketPath: d.socketPath,
         otlpPort: d.otlpPort, otlpToken: d.otlpToken,
       }),
-      { mode: 0o600 },
     );
     d.isRunning = true;
     d.persistent = opts.persistent ?? process.env.BEAGLE_SERVICE === "1";

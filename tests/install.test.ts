@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, chmodSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, chmodSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChangeManifest } from "../src/install/manifest";
@@ -56,6 +56,39 @@ describe("ChangeManifest", () => {
     expect(m.summary()).toContain("codex (telemetry)");
     expect(m.summary()).toContain("claude");
     expect(m.summary()).not.toContain("claude (telemetry)");
+  });
+
+  test("a corrupt changes.json is FLAGGED, never silently emptied", () => {
+    // changes.json is the record of everything Beagle touched. Silently reading
+    // it as [] would make `status` claim "modified nothing" and leave uninstall
+    // unable to reverse what it no longer knows about.
+    writeFileSync(join(dir, "changes.json"), "{ not an array");
+    const m = new ChangeManifest(dir);
+    expect(m.corrupt).toBe(true);
+    expect(m.list()).toEqual([]); // in-memory empty so mutating callers don't crash
+    // Merely loading it (a read) must not repair, rewrite, or quarantine it.
+    expect(existsSync(join(dir, "quarantine"))).toBe(false);
+    expect(readFileSync(join(dir, "changes.json"), "utf8")).toBe("{ not an array");
+  });
+
+  test("parsed-but-not-an-array counts as corrupt (record() would have thrown on it)", () => {
+    writeFileSync(join(dir, "changes.json"), JSON.stringify({ oops: true }));
+    const m = new ChangeManifest(dir);
+    expect(m.corrupt).toBe(true);
+    expect(m.list()).toEqual([]);
+  });
+
+  test("recording onto a corrupt ledger quarantines the bad file, then writes a fresh one", () => {
+    writeFileSync(join(dir, "changes.json"), "corrupt-bytes-not-json");
+    const m = new ChangeManifest(dir);
+    m.record({ kind: "shim", agent: "claude", path: join(dir, "shims", "claude"), backup: null });
+    // The corrupt record is preserved for recovery, not destroyed by the overwrite.
+    expect(readdirSync(join(dir, "quarantine")).some((n) => n.endsWith("-changes.json"))).toBe(true);
+    // …and the live ledger is now valid, holds the new entry, and is 0600.
+    const reloaded = new ChangeManifest(dir);
+    expect(reloaded.corrupt).toBe(false);
+    expect(reloaded.list().map((e) => e.agent)).toEqual(["claude"]);
+    expect(statSync(join(dir, "changes.json")).mode & 0o777).toBe(0o600);
   });
 
   test("recordReplacing updates a re-watched agent's entry instead of stacking duplicates", () => {

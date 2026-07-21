@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
-import { DEFAULT_CONFIG, loadConfig, readConfig, sanitizeConfig } from "../src/core/config/config";
+import { DEFAULT_CONFIG, loadConfig, readConfig, sanitizeConfig, saveConfig } from "../src/core/config/config";
+import { loadJsonFile } from "../src/core/fs/durable";
 
 describe("readConfig (read-only — never writes)", () => {
   test("missing file → defaults, and no config.json is created", () => {
@@ -62,5 +63,49 @@ describe("sanitizeConfig (validate-or-default per field)", () => {
     const c = loadConfig(dir);
     expect(c.payloadWindowDays).toBe(DEFAULT_CONFIG.payloadWindowDays); // sanitized
     expect(c.redactOnCapture).toBe(false); // valid override kept
+  });
+
+  test("null / scalar / array config never crashes sanitize — total, all defaults", () => {
+    // Guards a real crash: before the object guard, sanitizeConfig(null) threw at
+    // `raw.redactOnCapture`, surviving only because a caller happened to catch it.
+    expect(sanitizeConfig(null as never)).toEqual(DEFAULT_CONFIG);
+    expect(sanitizeConfig(42 as never)).toEqual(DEFAULT_CONFIG);
+    expect(sanitizeConfig([1, 2] as never)).toEqual(DEFAULT_CONFIG);
+  });
+});
+
+describe("corrupt config is surfaced, never silently rewritten to defaults", () => {
+  test("loadConfig on a corrupt file → safe defaults, but LEAVES the bad file in place", () => {
+    // The daemon must not crash, but must also not erase the only on-disk signal
+    // that the user's saved settings were lost — `beagle status` reads this file.
+    const dir = mkdtempSync(join(tmpdir(), "beagle-cfg-corrupt-"));
+    const p = join(dir, "config.json");
+    writeFileSync(p, "{ this is not json");
+    const before = readFileSync(p, "utf8");
+    expect(loadConfig(dir)).toEqual(DEFAULT_CONFIG); // daemon-safe
+    expect(readFileSync(p, "utf8")).toBe(before); // NOT overwritten with defaults
+  });
+
+  test("readConfig on a corrupt file → defaults, and still writes nothing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-cfg-corrupt-"));
+    writeFileSync(join(dir, "config.json"), "\x00\x00garbage");
+    expect(readConfig(dir)).toEqual(DEFAULT_CONFIG);
+  });
+
+  test("a truncated (interrupted) write is detectable as corrupt, not mistaken for config", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-cfg-corrupt-"));
+    const p = join(dir, "config.json");
+    saveConfig(dir, { ...DEFAULT_CONFIG, payloadWindowDays: 30 });
+    // Simulate a non-atomic crash truncating the file in place:
+    writeFileSync(p, readFileSync(p, "utf8").slice(0, 12));
+    expect(loadJsonFile(p).status).toBe("corrupt"); // surfaced, not swallowed as a default
+  });
+
+  test("saveConfig persists atomically: exact content, 0600, no temp sidecar left", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-cfg-save-"));
+    saveConfig(dir, { ...DEFAULT_CONFIG, redactOnCapture: false });
+    expect(loadConfig(dir).redactOnCapture).toBe(false);
+    expect(statSync(join(dir, "config.json")).mode & 0o777).toBe(0o600);
+    expect(readdirSync(dir).some((n) => n.endsWith(".tmp"))).toBe(false);
   });
 });

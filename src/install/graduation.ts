@@ -1,8 +1,9 @@
 // Graduation nudge (design §6.12, R2): after the 3rd wrapper run of the same
 // agent, one dismissable prompt to watch it automatically — shown once,
 // never nags if declined, never applies without an explicit yes.
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { writeFileAtomic } from "../core/fs/durable";
 
 const NUDGE_AT = 3;
 
@@ -63,6 +64,6 @@ export class GraduationTracker {
   }
 
   private persist(): void {
-    writeFileSync(this.path, JSON.stringify(this.state), { mode: 0o600 });
+    writeFileAtomic(this.path, JSON.stringify(this.state));
   }
 }
