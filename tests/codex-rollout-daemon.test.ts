@@ -194,6 +194,88 @@ describe("Codex rollout response capture end-to-end", () => {
       expect(s.searchLiteral("memory-like layers").length).toBe(0); // inbound stays out of search
     });
   });
+  test("each stitch pushes 'call-updated' to an open viewer — and silent re-emits stay silent", async () => {
+    // Guards the daemon->viewer->app.js contract for stitches. The answer lands
+    // on a row that is ALREADY on screen, so it must arrive as "call-updated"
+    // (app.js refetches that row) and never as "call" (app.js prepends those —
+    // the turn would show up twice). Pushing NOTHING was the bug: a live
+    // dashboard sat on the question until some unrelated call happened by.
+    //
+    // Growth is the case that makes it visible, so it's the case under test:
+    // the preamble attaches, the real answer replaces it seconds later, and
+    // both writes must push. The tailer also re-emits an UNCHANGED answer every
+    // poll of its retry window; those must stay silent, or every open tab
+    // refetches the feed, the transcript and the open detail pane on a timer.
+    const conv = "conv-sse";
+    const prompt = "does the open dashboard see this answer?";
+    const preamble = "Let me check the docs first.";
+    const finalAnswer = "It does — the row refreshes in place.";
+    const ui = await controlRequest(daemon.socketPath, { cmd: "ui" });
+    const url = new URL((ui.data as { url: string }).url);
+    const sess = await fetch(`${url.origin}/api/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ boot: url.searchParams.get("boot") }),
+    });
+    const cred = ((await sess.json()) as { credential: string }).credential;
+    // Subscribe BEFORE driving traffic so the pushes can't be missed. Frames
+    // are split and parsed exactly as app.js does, so this exercises the shape
+    // the dashboard actually consumes, not just the substring.
+    const stream = await fetch(`${url.origin}/api/stream`, { headers: { "x-beagle-token": cred } });
+    const reader = stream.body!.getReader();
+    const events: Array<{ ev: string; data: { id?: string; sessionId?: string } }> = [];
+    const pump = (async () => {
+      const dec = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let i: number;
+        while ((i = buf.indexOf("\n\n")) !== -1) {
+          const frame = buf.slice(0, i);
+          buf = buf.slice(i + 2);
+          const ev = /^event: (.*)$/m.exec(frame)?.[1];
+          const data = /^data: (.*)$/m.exec(frame)?.[1];
+          if (ev && data) events.push({ ev, data: JSON.parse(data) });
+        }
+      }
+    })();
+    const updates = () => events.filter((e) => e.ev === "call-updated");
+
+    try {
+      writeRollout(codexRoot, conv, rolloutTurn(prompt, preamble));
+      await post(codexPrompt(conv, prompt));
+      await waitFor(() => updates().length >= 1, "the preamble stitch to push a frame");
+
+      // The turn's real answer flushes to the same rollout turn.
+      appendFileSync(rolloutPath(codexRoot, conv), jline("response_item", msg("assistant", finalAnswer), Date.now()) + "\n");
+      await waitFor(() => updates().length >= 2, "the grown answer to push its own frame", 8000);
+
+      // Every frame names the row that changed, so a tab refreshes what it
+      // already shows instead of appending a second copy of the turn.
+      const row = readStore((s) => s.getCall(s.searchLiteral(prompt)[0]!.callId)!);
+      expect(new TextDecoder().decode(row.responseBody!)).toBe(`${preamble}\n\n${finalAnswer}`);
+      for (const u of updates()) {
+        expect(u.data.id).toBe(row.id);
+        expect(u.data.sessionId).toBe(row.sessionId);
+      }
+      // The answer never arrived as a "call": only the prompt row is a new row.
+      expect(events.filter((e) => e.ev === "call").length).toBe(1);
+      expect(readStore((s) => listCalls(s, 50).length)).toBe(1);
+
+      // Now the quiet part. Several polls pass inside the retry window with the
+      // answer unchanged: those re-emits are still "handled" by the store (they
+      // must never re-insert) but they wrote nothing, so the frame count must
+      // not move. Without the changed flag this climbs once per poll forever.
+      const settledCount = updates().length;
+      await Bun.sleep(4500); // ~3 polls at the default 1500ms cadence
+      expect(updates().length).toBe(settledCount);
+    } finally {
+      await reader.cancel().catch(() => {});
+      await pump.catch(() => {});
+    }
+  }, 25_000);
 
   test("an answer whose prompt has no turn row is DROPPED, not orphaned", async () => {
     const conv = "conv-drop";
