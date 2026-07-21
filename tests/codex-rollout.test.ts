@@ -4,10 +4,9 @@ import { join } from "node:path";
 import { codexPromptKey, answersFromText, RolloutPairing } from "../src/parsers/codex-rollout";
 
 // A minimal, controlled 2-turn rollout — the exact shape captured in the
-// Phase-0 spike (docs/codex-rollout-response-capture-design.md §8.7): a
-// session_meta, developer base-instructions, one injected <environment_context>
-// user message, then per turn a turn_context, the real user prompt, and the
-// assistant answer.
+// Phase-0 spike against Codex 0.144.6: a session_meta, developer
+// base-instructions, one injected <environment_context> user message, then per
+// turn a turn_context, the real user prompt, and the assistant answer.
 function line(type: string, payload: unknown, ts = "2026-07-20T21:32:45.000Z"): string {
   return JSON.stringify({ timestamp: ts, type, payload });
 }

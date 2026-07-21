@@ -3,7 +3,8 @@
 // tailer polls it, emitting each assistant answer as a response-only OtelCall
 // the daemon stitches onto the turn row (store.attachOtelResponse). Lives in
 // adapters (fs + timers). Pairing/keying is in ../parsers/codex-rollout (pure).
-// See docs/codex-rollout-response-capture-design.md.
+// A file is read ONLY for a conversation Beagle itself launched and observed via
+// its own OTel receiver — never the sessions tree at large.
 import { createHash } from "node:crypto";
 import { closeSync, lstatSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -41,7 +42,9 @@ const REBIND_MAX = 8;
 /** ~/.codex/sessions, honoring CODEX_HOME. The daemon inherits the launching
  *  shell's env (commands.ts spreads process.env into the daemon spawn), so a
  *  per-run CODEX_HOME reaches here in the common `beagle run` path; a service
- *  daemon with a different env falls back to ~/.codex (fail-open — §5.2/§7). */
+ *  daemon with a different env falls back to ~/.codex. Fail-open if that root is
+ *  wrong: no file is located, the answer stays absent, and the turn still
+ *  renders its prompt, tools and tokens — no error to the user. */
 export function codexSessionsRoot(): string {
   return join(process.env.CODEX_HOME || join(homedir(), ".codex"), "sessions");
 }
@@ -239,10 +242,10 @@ export class CodexRolloutTailer {
     // FRESH content key here — so growth emits again with its own retry
     // window, and the store's grow-only extend replaces the shorter view.
     // Attach stays idempotent — a verbatim re-emit compares equal-length and
-    // drops in the store (design §5.1/§6.1a), and one racing a NEWER
-    // identical-prompt turn row (same text re-typed, or any historical answer
-    // a recreated tailer re-reads) is refused by the store's stale-attach
-    // bound and the turn ordinal rather than claiming that turn's row.
+    // drops in the store, and one racing a NEWER identical-prompt turn row
+    // (same text re-typed, or any historical answer a recreated tailer
+    // re-reads) is refused by the store's stale-attach bound and the turn
+    // ordinal rather than claiming that turn's row.
     const window = this.opts.retryWindowMs ?? RETRY_WINDOW_MS;
     const due: OtelCall[] = [];
     for (const { ans, key } of this.answers) {

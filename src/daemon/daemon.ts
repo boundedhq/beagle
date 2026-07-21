@@ -1174,11 +1174,11 @@ export class Daemon {
       // Held-out redaction also falls through: its "[REDACTION INCOMPLETE]"
       // placeholder must not overwrite the turn row's real summary.
       // Rollout-sourced answers (origin='codex-rollout') are inbound-only and
-      // ATTACH-OR-DROP — never a standalone row (design §6.1a): on an attach
-      // miss (race) or held-out scan we drop, avoiding an answer-with-no-question
-      // row and a duplicate on daemon restart. (Keeping the answer out of the
-      // outbound search index — design §6.1b — is now structural: since PR #92,
-      // attachOtelResponse never touches the FTS index for any stitch.)
+      // ATTACH-OR-DROP — never a standalone row: on an attach miss (race) or
+      // held-out scan we drop, avoiding an answer-with-no-question row and a
+      // duplicate on daemon restart. (Keeping the answer out of the outbound
+      // search index is now structural: since PR #92, attachOtelResponse never
+      // touches the FTS index for any stitch.)
       const fromRollout = call.origin === "codex-rollout";
       const responseOnly =
         Boolean(call.promptId) &&
@@ -1296,7 +1296,8 @@ export class Daemon {
       // ensure a rollout tailer for it. Triggered here, AFTER the turn row is
       // written, so the tailer's answer attaches instead of racing the insert.
       // This is both the trigger and the authorization to read that one
-      // session's file (design §5).
+      // session's file: Beagle never enumerates the sessions tree for Codex
+      // conversations it did not launch.
       if (call.agent === "codex" && call.convId && call.origin !== "codex-rollout") {
         this.codexRollout?.onActivity(call.convId);
       }
