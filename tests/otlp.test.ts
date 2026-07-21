@@ -269,6 +269,20 @@ describe("OTLP → Call mapping — Claude Code's real event schema (Mode B)", (
     expect(decode(calls[0]!.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
   });
 
+  test("a NULL logRecord must not suppress scanning of co-batched valid records", () => {
+    // Harder variant of the test above: `rec.attributes` on a null record
+    // throws in isCodexPayload — the schema probe that runs over every record
+    // BEFORE the mapper loops' per-record isolation. Unguarded, that throw
+    // reaches the outer catch and the whole batch degrades to [], every valid
+    // secret-bearing record silently unscanned.
+    const calls = mapOtlpLogsToCalls(logs([
+      null,
+      event("user_prompt", { "session.id": "s", "prompt.id": "p", prompt: "secret AKIAZQ3DRSTUVWXY2345" }),
+    ]), ctx);
+    expect(calls.length).toBe(1);
+    expect(decode(calls[0]!.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
+  });
+
   test("non-array containers (resourceLogs/scopeLogs) degrade to [] without throwing", () => {
     expect(mapOtlpLogsToCalls({ resourceLogs: { bad: 1 } }, ctx)).toEqual([]);
     expect(mapOtlpLogsToCalls({ resourceLogs: [{ scopeLogs: { bad: 1 } }] }, ctx)).toEqual([]);
@@ -442,6 +456,46 @@ describe("Codex OTLP → Call mapping (Codex Mode B, codex.* schema)", () => {
     );
     expect(calls.length).toBe(1);
     expect(calls[0]!.agent).toBe("codex");
+  });
+
+  test("a null logRecord in a codex batch: detection and capture of valid records survive", () => {
+    // The probe that discriminates the schema runs over every record before
+    // either mapper's per-record isolation; a null record must be skipped
+    // there too, and the batch must still route to the codex mapper on the
+    // strength of the valid record.
+    const calls = mapOtlpLogsToCalls(codexLogs([
+      null,
+      codexEvent("codex.user_prompt", { "conversation.id": "c", prompt: "still scanned AKIAZQ3DRSTUVWXY2345" }),
+    ]), ctx);
+    expect(calls.length).toBe(1);
+    expect(calls[0]!.agent).toBe("codex");
+    expect(decode(calls[0]!.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
+  });
+
+  test("a null attributes ENTRY in a co-batched record: valid codex records still map via the shared entry point", () => {
+    // Same probe, different throw site: `attributes: [null]` made attrMap run
+    // `null.key`. The [null] test below reaches the codex mapper directly
+    // (mapCodexOtlpToCalls) and never crossed isCodexPayload — this one goes
+    // through mapOtlpLogsToCalls, where the probe sees the record first.
+    const calls = mapOtlpLogsToCalls(codexLogs([
+      { attributes: [null] },
+      codexEvent("codex.user_prompt", { "conversation.id": "c", prompt: "still scanned AKIAZQ3DRSTUVWXY2345" }),
+    ]), ctx);
+    expect(calls.length).toBe(1);
+    expect(decode(calls[0]!.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
+  });
+
+  test("a null entry among a record's REAL attributes: the record's own content still maps", () => {
+    // Skip the bad ENTRY, not the whole record: a record that is valid except
+    // for one null in its attributes list keeps its prompt scanned — and, when
+    // it is the only codex.* record, still discriminates the schema — rather
+    // than being dropped wholesale by the per-record catch.
+    const rec = codexEvent("codex.user_prompt", { "conversation.id": "c", prompt: "own AKIAZQ3DRSTUVWXY2345" });
+    (rec.attributes as unknown[]).unshift(null);
+    const calls = mapOtlpLogsToCalls(codexLogs([rec]), ctx);
+    expect(calls.length).toBe(1);
+    expect(calls[0]!.agent).toBe("codex");
+    expect(decode(calls[0]!.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
   });
 
   test("a genuinely-throwing record is skipped, co-batched valid records still map", () => {

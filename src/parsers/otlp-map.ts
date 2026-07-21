@@ -52,9 +52,11 @@ export interface OtelCall extends Call {
 
 function attrMap(attrs: Array<{ key: string; value: AttrValue }> | undefined): Map<string, AttrValue> {
   const m = new Map<string, AttrValue>();
-  // Array-safe: a record whose `attributes` is an object (malformed) must not
-  // throw — it would take the whole batch's scanning down with it.
-  for (const a of Array.isArray(attrs) ? attrs : []) m.set(a.key, a.value);
+  // Array- AND entry-safe: a record whose `attributes` is an object, or whose
+  // array holds a null entry (malformed) must not throw — it would take the
+  // whole batch's scanning down with it. A bad entry is skipped; the record's
+  // remaining attributes still map, so its content is still scanned.
+  for (const a of Array.isArray(attrs) ? attrs : []) if (a && typeof a === "object") m.set(a.key, a.value);
   return m;
 }
 
@@ -315,8 +317,15 @@ const CODEX_CONTENT = new Set(["codex.user_prompt", "codex.tool_result"]);
 
 function isCodexPayload(records: OtlpRecord[]): boolean {
   for (const rec of records) {
-    const n = str(attrMap(rec.attributes).get("event.name"));
-    if (n && n.startsWith("codex.")) return true;
+    // Per-record isolation, same as the mapper loops: this probe runs over
+    // every record BEFORE them, so a throwing record (e.g. a null logRecord)
+    // here would hit the OUTER catch and drop the whole batch unscanned (R3).
+    try {
+      const n = str(attrMap(rec.attributes).get("event.name"));
+      if (n && n.startsWith("codex.")) return true;
+    } catch {
+      /* an unreadable record can't vote on the schema; the mappers skip it too */
+    }
   }
   return false;
 }
