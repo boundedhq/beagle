@@ -50,7 +50,10 @@ export class AlertEngine {
         destination: call.provider,
         callId: call.id,
         ts: Date.now(),
-        spanStart: f.start, spanEnd: f.end,
+        // A derived finding's offsets index a text that is not this call's
+        // stored body, so it gets NO span rather than a wrong one (see Finding).
+        spanStart: f.derived ? undefined : f.start,
+        spanEnd: f.derived ? undefined : f.end,
       });
       if (fresh && f.tier === "structured") {
         this.sink({

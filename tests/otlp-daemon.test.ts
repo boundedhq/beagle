@@ -6,6 +6,7 @@ import { Daemon } from "../src/daemon/daemon";
 import { controlRequest } from "../src/daemon/control";
 import { Store } from "../src/core/store/store";
 import { listCalls, listLeakEvents } from "../src/viewer/feed-query";
+import { leakSpansFor } from "../src/viewer/detail";
 import type { AlertEvent } from "../src/core/alert/engine";
 
 // Claude Code's real Mode-B export (event schema, verified in the Phase-0
@@ -178,6 +179,120 @@ describe("Mode B end-to-end through the daemon", () => {
     // …and the search index, which would otherwise hand the key back.
     expect(store.searchLiteral("MIIEowIBAAKCAQEAderivedTextRegression")).toEqual([]);
     expect(store.searchLiteral(pem)).toEqual([]);
+    store.close();
+  });
+
+  test("a secret only the FLATTENED prompt reveals is still detected", async () => {
+    // The gap this closes: a resumed conversation serializes its message list
+    // into the prompt attribute, so the scanned bytes carry
+    // `"},{"role":"user","content":"` between two messages. A rule shaped
+    // `keyword <separator> value` cannot reach across that — generic-api-key's
+    // `["':=\s]{1,5}` has no way through `},{` — so an anchor keyword in one
+    // message and its value in the next scanned CLEAN, while the text the model
+    // actually reads has them adjacent. The user really did send the key.
+    const value = "Xq7-Zt91_Kd4Pv2-Ls8Rn6Jm0-Wb3Yh5"; // synthetic, per the fixture convention
+    const prompt = JSON.stringify([
+      { role: "user", content: "store this api_key" },
+      { role: "user", content: value },
+    ]);
+    await post(otlpBody(token, prompt, "otel-conv-adjacent", null));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    const events = listLeakEvents(store);
+    expect(events.length).toBe(1); // was 0: scanned bytes alone can't see it
+    expect(events[0]!.secretType).toBe("generic-api-key");
+    // QUIET, deliberately: flattening also MANUFACTURES adjacencies, so a
+    // finding that exists only after it must not fire an OS alert. Nothing is
+    // lost here — generic-api-key is quiet-tier anyway, so this is exactly what
+    // the two messages would have produced had they arrived as one.
+    expect(events[0]!.confidenceTier).toBe("possible");
+    expect(alerts).toEqual([]);
+    store.close();
+  });
+
+  test("a flatten-only secret is redacted from the body it never looked like a secret in", async () => {
+    // The finding's offsets index the FLATTENED text, so they cannot splice the
+    // stored body. What bridges the two is the VALUE: only the keyword crossed
+    // a message boundary, so the value itself is one contiguous run the body
+    // does hold, and a value-scrub reaches it.
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    const value = "Kp3-Rt82_Nd5Qv7-Ms4Xn1Jw6-Zb8Yh2";
+    const prompt = JSON.stringify([
+      { role: "user", content: "here is the api_key" },
+      { role: "user", content: value },
+    ]);
+    await post(otlpBody(token, prompt, "otel-conv-adjacent-r", null));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    const hit = store.searchLiteral("here is the")[0]!;
+    const call = store.getCall(hit.callId)!;
+    expect(call.redacted).toBe(true);
+    const body = new TextDecoder().decode(call.requestBody!);
+    expect(body).not.toContain(value); // the stored body, reached by value
+    expect(body).toContain("[REDACTED:generic-api-key:");
+    expect(JSON.stringify(call.displayMessages)).not.toContain(value); // the transcript
+    expect(call.summary).not.toContain(value); // the feed line
+    expect(store.searchLiteral(value)).toEqual([]); // and the index
+    store.close();
+  });
+
+  test("a secret MANUFACTURED by flattening is flagged without a bogus body span", async () => {
+    // flattenPromptText joins a message's content BLOCKS with no separator, so
+    // a value split across two blocks exists only in the rendered text — the
+    // bytes never held that string. It still reaches the model, so it is a real
+    // leak; but there is nothing in the body to splice or highlight, and the
+    // finding's offsets index the flattened text, so recording them as a body
+    // span would mark arbitrary JSON bytes as the secret (viewer detail.ts
+    // slices the body at the span to recover the value).
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    const prompt = JSON.stringify([
+      { role: "user", content: [{ text: "deploy now token: 8fK2mQ9xR" }, { text: "4tL7nW3vB6zY1cH5" }] },
+    ]);
+    await post(otlpBody(token, prompt, "otel-conv-fused", null));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    expect(listLeakEvents(store).length).toBe(1);
+    const hit = store.searchLiteral("deploy now")[0]!;
+    // No span: the halves are in the body, the joined value never was.
+    expect(leakSpansFor(store, hit.callId)).toEqual([]);
+    // …and the surface it DOES appear in is scrubbed.
+    const call = store.getCall(hit.callId)!;
+    expect(JSON.stringify(call.displayMessages)).not.toContain("8fK2mQ9xR4tL7nW3vB6zY1cH5");
+    expect(store.searchLiteral("8fK2mQ9xR4tL7nW3vB6zY1cH5")).toEqual([]);
+    store.close();
+  });
+
+  test("a benign message boundary cannot manufacture an OS alert", async () => {
+    // The cost side of scanning derived text, and the reason flatten-only
+    // findings are capped at the quiet tier. Flattening puts a bare "aws" next
+    // to the following message's 40-char hash, which reads exactly like
+    // aws-secret-access-key — the one LOUD rule shaped `keyword <sep> value`
+    // (tests/precision.test.ts pins that this text really does trip it). Beagle
+    // interrupting a user over "how do I configure aws" + a git hash is the
+    // failure this cap prevents; recording it quietly is the accepted cost.
+    const prompt = JSON.stringify([
+      { role: "user", content: "how do I configure aws" },
+      { role: "user", content: "0123456789abcdef0123456789abcdef01234567" },
+    ]);
+    await post(otlpBody(token, prompt, "otel-conv-benign-join", null));
+    await settled(daemon.socketPath);
+    expect(alerts).toEqual([]); // no notification…
+    const store = Store.openReadOnly(stateDir);
+    const events = listLeakEvents(store);
+    expect(events.length).toBe(1); // …but still visible in `beagle leaks`
+    expect(events[0]!.confidenceTier).toBe("possible");
+    store.close();
+  });
+
+  test("a plain-string prompt is not re-scanned as derived text", async () => {
+    // The second scan exists only where flattening CHANGED the text. A plain
+    // prompt is already in the scanned bytes verbatim, so scanning it again
+    // could only re-file the same secret under a second leak event.
+    await post(otlpBody(token, "the key is AKIAZQ3DRSTUVWXY2345", "otel-conv-plain", null));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    expect(listLeakEvents(store).length).toBe(1);
+    expect(alerts.length).toBe(1); // and it stays LOUD — the bytes proved it
     store.close();
   });
 

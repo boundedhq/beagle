@@ -115,6 +115,28 @@ describe("OTLP → Call mapping — Claude Code's real event schema (Mode B)", (
     expect(decode(c.request.bodyBytes)).toBe('check the tz\n{"cmd":"date"}'); // prompt + tool input
   });
 
+  test("a serialized message list is exposed as derivedText, the second scan surface", () => {
+    // The daemon scans this ALONGSIDE the bytes: flattening drops the
+    // `"},{"role":…` that no rule's separator class can cross, so a keyword and
+    // its value that the bytes keep apart are adjacent here. Carried as its own
+    // field rather than re-derived from messages[0] downstream, so the contract
+    // is explicit about which text is a scan surface and which is display.
+    const prompt = JSON.stringify([
+      { role: "user", content: "store this api_key" },
+      { role: "user", content: "Xq7-Zt91_Kd4Pv2" },
+    ]);
+    const c = mapOtlpLogsToCalls(logs(turnRecords({ prompt })), ctx)[0]!;
+    expect(c.derivedText).toBe("store this api_key\nXq7-Zt91_Kd4Pv2");
+    expect(decode(c.request.bodyBytes)).toContain('"},{"role"'); // bytes keep the structure
+  });
+
+  test("a plain-string prompt exposes no derivedText — nothing was flattened", () => {
+    // The bytes already hold it verbatim, so a second scan could only re-file
+    // the same secret under a second leak event. Absence is the signal.
+    const c = mapOtlpLogsToCalls(logs(turnRecords({ prompt: "check the tz" })), ctx)[0]!;
+    expect(c.derivedText).toBeUndefined();
+  });
+
   test("an internal title-generation side-call (same prompt.id) never folds into the turn", () => {
     // Claude Code emits a `generate_session_title` api_request + assistant_response
     // that REUSE the user turn's session.id + prompt.id (verified live against a
@@ -381,6 +403,28 @@ describe("Codex OTLP → Call mapping (Codex Mode B, codex.* schema)", () => {
     expect(c.convId).toBe("conv-9");
     expect(c.endpoint).toBe("otel:codex:user_prompt");
     expect(decode(c.request.bodyBytes)).toContain("AKIAZQ3DRSTUVWXY2345");
+  });
+
+  test("a codex prompt carrying a message list exposes derivedText too", () => {
+    // Both vendors share flattenPromptText, so both open the same gap and get
+    // the same second scan surface. A tool_result deliberately does NOT: its
+    // display is `${tool}: ${output.slice(0, 4000)}`, a TRUNCATED view of the
+    // bytes, and treating a truncated copy as a scan surface is the false
+    // negative the Mode B search index was widened to avoid.
+    const prompt = JSON.stringify([{ role: "user", content: "rotate the key" }]);
+    const [p, t] = mapCodexOtlpToCalls(
+      codexLogs([
+        codexEvent("codex.user_prompt", { "conversation.id": "conv-d", prompt }),
+        codexEvent("codex.tool_result", {
+          "conversation.id": "conv-d",
+          tool_name: "exec_command",
+          arguments: '{"cmd":"cat key.txt"}',
+          output: "x".repeat(5000),
+        }),
+      ]),
+    );
+    expect(p!.derivedText).toBe("rotate the key");
+    expect(t!.derivedText).toBeUndefined();
   });
 
   test("codex.tool_result → a Call scanning tool name, command, AND output", () => {

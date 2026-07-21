@@ -20,6 +20,13 @@ export interface Finding {
   end: number;
   fingerprint: string;
   destinationOwnKey: boolean;
+  /** Set by a caller that scanned a surface OTHER than the stored request body
+   *  (the daemon's derived-text scan) and could not re-anchor start/end onto
+   *  those bytes. No highlight span is recorded for such a finding: the viewer
+   *  recovers the secret by SLICING the body at the span (detail.ts), so an
+   *  offset into a different string would mark arbitrary bytes as the secret.
+   *  The leak event itself is still recorded — the call reads as leaked. */
+  derived?: boolean;
 }
 
 export interface ScanCtx {

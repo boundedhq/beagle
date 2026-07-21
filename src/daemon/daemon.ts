@@ -14,7 +14,7 @@ import { SessionResolver, type Resolution } from "../core/session/resolver";
 import { Store } from "../core/store/store";
 import { ScanHost, dropIdentityFieldNoise } from "../adapters/scan-host";
 import type { Finding } from "../core/scanner/engine";
-import { applyCaptureRedaction, redactValues, redactValuesInText } from "../transform/redact";
+import { applyCaptureRedaction, redactValues, redactValuesInText, secretForms } from "../transform/redact";
 import { scrubAuthHeaders } from "../core/normalize/normalize";
 import { Notifier, type AlertMessage } from "../notifier/notifier";
 import { buildAlertMessage } from "../notifier/alert-copy";
@@ -499,6 +499,12 @@ export class Daemon {
       const scanResult = await this.scanHost.scan(call.request.bodyBytes, {});
       // Same protocol-identity noise filter as the wire path.
       scanResult.findings = dropIdentityFieldNoise(call.request.bodyBytes, scanResult.findings);
+      // Second surface: the flattened prompt (see OtelCall.derivedText). Only
+      // present when a prompt arrived as a serialized message list, so the
+      // common plain-string turn pays nothing.
+      const derived = await this.scanDerivedText(call, scanResult.findings);
+      const findings = [...scanResult.findings, ...derived.findings];
+      const scanIncomplete = scanResult.state === "incomplete" || derived.state === "incomplete";
       // Keep session chaining state current, same as the wire path — so a
       // Mode B session without an explicit id still chains across turns.
       if (call.request.messages?.length || call.response.text) {
@@ -524,11 +530,12 @@ export class Daemon {
           : null;
       const redaction = this.config.redactOnCapture
         ? applyCaptureRedaction({
-            incomplete: scanResult.state === "incomplete" || respScan?.state === "incomplete",
+            incomplete: scanIncomplete || respScan?.state === "incomplete",
             requestBytes: call.request.bodyBytes,
             requestFindings: scanResult.findings,
             responseBody: call.response.bodyBytes ?? null,
             responseFindings: respScan?.findings,
+            extraValues: derived.values,
           })
         : null;
       // OUTBOUND ONLY, the same invariant buildSearchText holds for the wire
@@ -586,9 +593,13 @@ export class Daemon {
                 call.request.bodyBytes ? new TextDecoder().decode(call.request.bodyBytes) : "",
                 scanResult.findings,
               ),
+              // Derived values carry no body offsets, so findingValues over the
+              // body cannot recover them — and the summary is built from the
+              // DISPLAY messages, the very surface a manufactured secret lives in.
+              ...derived.values,
             ],
           );
-      const scanState = redaction?.heldOut ? "incomplete" : scanResult.state;
+      const scanState = redaction?.heldOut || scanIncomplete ? "incomplete" : "ok";
       // Persist the self-report's structure: Mode B bodies are scan text, not
       // provider JSON, so the viewer can't re-parse them the way it does wire
       // bodies. Scrubbed by value like summary/searchText (same rationale).
@@ -693,11 +704,11 @@ export class Daemon {
           provider: call.provider,
           model: call.model,
         },
-        scanResult.findings,
+        findings,
       );
       // Same silent leak frame as the wire path — possible-tier findings must
       // refresh open dashboards too.
-      if (scanResult.findings.length > 0) this.viewer?.broadcast("leak", { callId: call.id });
+      if (findings.length > 0) this.viewer?.broadcast("leak", { callId: call.id });
       this.viewer?.broadcast("call", {
         id: call.id,
         sessionId: resolution.sessionId,
@@ -714,7 +725,7 @@ export class Daemon {
         captureState: "ok",
         sessionTier: resolution.tier,
         source: "otel",
-        hasLeak: scanResult.findings.length > 0, // scan completed above — final
+        hasLeak: findings.length > 0, // scan completed above — final
       });
       // A real (non-rollout) Codex OTel call means that conversation is live —
       // ensure a rollout tailer for it. Triggered here, AFTER the turn row is
@@ -725,6 +736,76 @@ export class Daemon {
         this.codexRollout?.onActivity(call.convId);
       }
     }
+  }
+
+  // Scan the FLATTENED prompt as a surface in its own right (OtelCall.derivedText).
+  //
+  // WHY a second scan and not more rules: a Claude Code / Codex prompt attribute
+  // can carry a whole serialized message list, and the scanned bytes are that
+  // JSON. A rule shaped `keyword <separator> value` cannot match across it — the
+  // separator class `["':=\s]{1,5}` has no way through the literal
+  // `"},{"role":"user","content":"` — so `store this api_key` in one message and
+  // the key in the next scanned clean, while the text the model actually reads
+  // has them adjacent. That is a DETECTION gap, not a rendering one: the user
+  // did send the secret, and flagging it as it leaves is the product's promise.
+  //
+  // WHY the findings are capped at the QUIET tier. Flattening drops structure,
+  // so it also MANUFACTURES adjacencies that never existed on the wire, and the
+  // manufactured shape is indistinguishable from the real one: "store this
+  // api_key" + a key and "how do I configure aws" + a 40-char hash differ only
+  // in what the value means. On a set of 30 benign multi-turn fixtures, joining
+  // the messages raised a structured-tier hit on 2 — both aws-secret-access-key,
+  // the one loud rule shaped `keyword <separator> value`. Loud is reserved for
+  // what the bytes themselves prove (R5/R6: only the structured tier notifies),
+  // so a finding that exists ONLY after flattening is recorded, redacted and
+  // searchable but never interrupts. This costs the reported case nothing:
+  // generic-api-key is quiet-tier anyway, so the outcome is exactly what those
+  // two messages would have produced had they arrived as one.
+  // tests/precision.test.ts pins the ceiling — lift it only with FP data.
+  //
+  // NOT DONE HERE: the wire path's buildSearchText joins parsed messages the
+  // same way and has the same structural blind spot. Deferred on COST, not on
+  // measured noise — joining a 40-turn history manufactured nothing on the same
+  // fixtures, but a wire request carries the whole conversation, so this would
+  // re-scan every prior turn on every call, where a Mode B prompt is scanned
+  // once. Worth doing with a measurement on real captured traffic behind it.
+  private async scanDerivedText(
+    call: OtelCall,
+    rawFindings: Finding[],
+  ): Promise<{ state: "ok" | "incomplete"; findings: Finding[]; values: Array<{ value: string; type: string }> }> {
+    const text = call.derivedText;
+    if (!text) return { state: "ok", findings: [], values: [] };
+    const result = await this.scanHost.scan(new TextEncoder().encode(text), {});
+    // Dedup against the raw scan: a secret the bytes already proved keeps its
+    // own tier and its own body span, and must not be re-filed here at the
+    // lower one. Matched by VALUE modulo escaping, not by fingerprint — the
+    // same PEM reads with `\n` escapes in the serialized bytes and with real
+    // newlines once flattened, and those two hash differently (secretForms).
+    const body = new TextDecoder("utf-8", { fatal: false }).decode(call.request.bodyBytes);
+    const seen = new Set<string>();
+    for (const f of rawFindings) for (const form of secretForms(body.slice(f.start, f.end))) seen.add(form);
+    const findings: Finding[] = [];
+    const values: Array<{ value: string; type: string }> = [];
+    for (const f of result.findings) {
+      const value = text.slice(f.start, f.end);
+      // Already proven by the bytes, or a repeat within the flattened text.
+      if (!value || secretForms(value).some((form) => seen.has(form))) continue;
+      seen.add(value);
+      // Re-anchor onto the stored body where it genuinely holds the value: in
+      // the keyword-adjacency case only the CONTEXT crossed a message boundary,
+      // so the value itself is one contiguous run present in the bytes, and the
+      // dashboard can highlight the real thing. Where flattening fused two
+      // content blocks into a value the body never contained, there is no
+      // honest offset — mark it derived and record no span.
+      const at = body.indexOf(value);
+      findings.push(
+        at >= 0
+          ? { ...f, tier: "possible", start: at, end: at + value.length }
+          : { ...f, tier: "possible", derived: true },
+      );
+      values.push({ value, type: f.secretType });
+    }
+    return { state: result.state, findings, values };
   }
 
   private emitAlert(a: AlertEvent): void {

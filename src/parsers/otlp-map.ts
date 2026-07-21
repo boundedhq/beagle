@@ -48,6 +48,23 @@ export interface OtelCall extends Call {
    *  treats it as attach-or-DROP (never a standalone row) and keeps the answer
    *  out of the outbound search index. See codex-rollout-tailer.ts / design §6.1. */
   origin?: "codex-rollout";
+  /** flattenPromptText's rendering of a prompt that arrived as a SERIALIZED
+   *  MESSAGE LIST — set ONLY when it differs from the raw prompt inside
+   *  request.bodyBytes, i.e. only when flattening actually dropped structure.
+   *
+   *  A SECOND SCAN SURFACE, not a display convenience: dropping the literal
+   *  `"},{"role":"user","content":"` between two messages makes a rule's anchor
+   *  keyword adjacent to a value the raw bytes kept apart, and no rule's
+   *  separator class (`["':=\s]{1,5}`) can cross that structure. The daemon
+   *  scans this alongside the body — see ingestOtel's derived-text scan, which
+   *  also documents why its findings are capped at the quiet tier.
+   *
+   *  Never set from a display message built by TRUNCATING content (a tool
+   *  result's `${tool}: ${output.slice(0, 4000)}`): a truncated view is a
+   *  strictly smaller surface than the bytes, so scanning it can only waste
+   *  work, and treating it as authoritative is the false-negative the Mode B
+   *  search index was widened to avoid. */
+  derivedText?: string;
 }
 
 function attrMap(attrs: Array<{ key: string; value: AttrValue }> | undefined): Map<string, AttrValue> {
@@ -218,6 +235,9 @@ function buildTurnCall(t: Turn, ctx: OtlpContext): OtelCall {
     meta: { tsRequest: ts, tsResponse: ts, tokensIn: t.tokensIn, tokensOut: t.tokensOut },
     convId: t.sessionId,
     promptId: t.promptId,
+    // Only when flattening CHANGED the text: a plain-string prompt is already
+    // in scanText verbatim, so re-scanning it would buy nothing.
+    derivedText: promptDisplay && promptDisplay !== t.prompt ? promptDisplay : undefined,
   };
 }
 
@@ -331,6 +351,9 @@ function buildCodexCall(o: {
   /** Stitch key — set only on the user_prompt row so the rollout answer has a
    *  target; tool_result rows leave it undefined and are not attach targets. */
   promptId?: string;
+  /** See OtelCall.derivedText. Set only on the user_prompt row: a tool_result's
+   *  display is a truncated view of scanText, never a second scan surface. */
+  derivedText?: string;
 }): OtelCall {
   return {
     id: ulid(o.ts),
@@ -351,6 +374,7 @@ function buildCodexCall(o: {
     meta: { tsRequest: o.ts, tsResponse: o.ts },
     convId: o.convId,
     promptId: o.promptId,
+    derivedText: o.derivedText,
   };
 }
 
@@ -404,13 +428,15 @@ function mapCodexRecords(records: OtlpRecord[]): OtelCall[] {
       if (name === "codex.user_prompt") {
         const prompt = str(a.get("prompt"));
         if (!prompt) continue;
+        const flat = flattenPromptText(prompt);
         const call = buildCodexCall({
           ts,
           convId,
           model,
           endpoint: "otel:codex:user_prompt",
           scanText: prompt,
-          display: { role: "user", content: flattenPromptText(prompt) },
+          display: { role: "user", content: flat },
+          derivedText: flat !== prompt ? flat : undefined,
           // The rollout answer for this turn is keyed by hash(prompt); stamp the
           // same key here so store.attachOtelResponse can find this row.
           promptId: codexPromptKey(prompt),

@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/core/store/store";
-import { applyCaptureRedaction, redactBody, redactValues, redactValuesInText, redactionPlaceholder } from "../src/transform/redact";
+import { applyCaptureRedaction, redactBody, redactValues, redactValuesInText, redactionPlaceholder, secretForms } from "../src/transform/redact";
 import { DEFAULT_CONFIG } from "../src/core/config/config";
 import { quarantineCorruptDb } from "../src/core/store/quarantine";
 import type { Finding } from "../src/core/scanner/engine";
@@ -125,6 +125,69 @@ describe("redact-on-capture (R11)", () => {
       const out = redactValuesInText(`sent ${decoded} onward`, [{ value: escaped, type: "x" }]);
       expect(out).toBe(`sent ${redactionPlaceholder("x", escaped)} onward`);
     }
+  });
+
+  // The mirror direction, opened by the daemon's derived-text scan: a value
+  // matched in the FLATTENED prompt carries a real newline, while the stored
+  // body — the serialized form — holds the two-char escape. Without the escaped
+  // form the scrub no-ops in exactly the way the decoded form fixed above, only
+  // with the surfaces swapped: the transcript masked, the body still readable.
+  test("redactValuesInText scrubs the JSON-ESCAPED form of a decoded value", () => {
+    const decoded = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAflattenedMatch\n-----END RSA PRIVATE KEY-----";
+    const escaped = "-----BEGIN RSA PRIVATE KEY-----\\nMIIEowIBAAKCAQEAflattenedMatch\\n-----END RSA PRIVATE KEY-----";
+    const out = redactValuesInText(`{"prompt":"${escaped}"}`, [{ value: decoded, type: "private-key" }]);
+    expect(out).not.toContain("MIIEowIBAAKCAQEAflattenedMatch");
+    expect(out).toContain(redactionPlaceholder("private-key", decoded));
+  });
+
+  test("secretForms lets the escaped and decoded forms of one secret match", () => {
+    // Why it exists: the scanner's fingerprint strips WHITESPACE so a re-wrapped
+    // PEM dedups, but `\n` as an escape is not whitespace — the two forms hash
+    // differently, and the derived scan would file the same key twice.
+    const decoded = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----";
+    const escaped = "-----BEGIN RSA PRIVATE KEY-----\\nMIIEow\\n-----END RSA PRIVATE KEY-----";
+    expect(secretForms(decoded)).toContain(escaped); // reached from either side
+    expect(secretForms(escaped)).toContain(decoded);
+    // A value needing no re-encoding yields just itself — no empty/null forms,
+    // which as Set members would make unrelated values collide.
+    expect(secretForms("AKIAZQ3DRSTUVWXY2345")).toEqual(["AKIAZQ3DRSTUVWXY2345"]);
+    // Distinct secrets must not merge, or one would silently suppress the other.
+    expect(secretForms("AKIAZQ3DRSTUVWXY2345")).not.toContain("AKIAZQ3DRSTUVWXY6789");
+  });
+
+  test("applyCaptureRedaction scrubs extraValues that have no span in the body", () => {
+    // The derived-text scan's findings index the flattened prompt, so they can
+    // never be spliced into these bytes. The value is the bridge: where the body
+    // holds the same contiguous run it is masked; the caller gets it back in
+    // `values` to scrub the transcript and index either way.
+    const body = '[{"role":"user","content":"here is the api_key"},{"role":"user","content":"Kp3-Rt82_Nd5Qv7-Ms4Xn1"}]';
+    const out = applyCaptureRedaction({
+      incomplete: false,
+      requestBytes: enc(body),
+      requestFindings: [], // the raw bytes proved nothing — that is the gap
+      responseBody: null,
+      extraValues: [{ value: "Kp3-Rt82_Nd5Qv7-Ms4Xn1", type: "generic-api-key" }],
+    });
+    expect(out.redacted).toBe(true);
+    expect(dec(out.requestBody)).not.toContain("Kp3-Rt82_Nd5Qv7-Ms4Xn1");
+    expect(dec(out.requestBody)).toContain("[REDACTED:generic-api-key:");
+    expect(out.values).toHaveLength(1); // handed back for the derived surfaces
+  });
+
+  test("extraValues survive alongside a response-side finding", () => {
+    // Regression: the response branch rebuilds the value list, and rebuilding it
+    // from the request findings alone would drop the derived values silently —
+    // leaving the transcript unscrubbed only when a response also had a finding.
+    const out = applyCaptureRedaction({
+      incomplete: false,
+      requestBytes: enc("prompt holding Kp3-Rt82_Nd5Qv7-Ms4Xn1 inline"),
+      requestFindings: [],
+      responseBody: enc("echo AKIAZQ3DRSTUVWXY2345 back"),
+      responseFindings: [finding(5, 25)],
+      extraValues: [{ value: "Kp3-Rt82_Nd5Qv7-Ms4Xn1", type: "generic-api-key" }],
+    });
+    expect(out.values.map((v) => v.value)).toContain("Kp3-Rt82_Nd5Qv7-Ms4Xn1");
+    expect(dec(out.requestBody)).not.toContain("Kp3-Rt82_Nd5Qv7-Ms4Xn1");
   });
 
   test("applyCaptureRedaction holds all content out on an incomplete scan", () => {

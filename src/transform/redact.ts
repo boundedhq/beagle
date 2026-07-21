@@ -1,6 +1,7 @@
 // redact-on-capture (design §4/R11): drop the raw secret value at capture
 // time, keeping a stable typed placeholder. The single biggest store-liability
-// reducer; off by default in v1 (raw fidelity serves the parity story).
+// reducer, and ON by default — a detection tool must not keep secrets in
+// cleartext (DEFAULT_CONFIG.redactOnCapture, asserted in hardening.test.ts).
 import { createHash } from "node:crypto";
 import type { Finding } from "../core/scanner/engine";
 
@@ -48,20 +49,22 @@ export function redactBody(bytes: Uint8Array, findings: Finding[]): { bytes: Uin
 // yields no variant and behaves exactly as before.
 //
 // BOUNDARY, so the next reader knows what this does NOT cover: it re-encodes a
-// value, it does not re-scan the text. Two cases escape it — both verified
-// reachable, neither fixable by adding more forms here, because in each the
+// value, it does not re-scan the text. Two cases escape it, because in each the
 // display and the scanned bytes disagree about more than escaping:
 //   - A match SPANNING JSON STRUCTURE (a PEM whose BEGIN and END sit in two
 //     messages of a serialized list) carries a literal `"},{"role":…` that the
-//     flattened display drops, so neither form matches. The body is still
-//     offset-redacted and the leak still alerts; only derived text keeps it.
-//   - Worse, and NOT covered by that reassurance: flattenPromptText joins
-//     adjacent content blocks with no separator, so a secret split across two
-//     blocks is MANUFACTURED in the display out of bytes the scanner never saw
-//     as a secret. There is no value to scrub and no alert fires at all.
-// Both need the derived text scanned on its own so its own offsets drive its
-// own redaction; a value-scrub structurally cannot. Filed separately — do not
-// read this function as a guarantee that derived text is secret-free.
+//     flattened display drops, so neither form matches.
+//   - A secret MANUFACTURED by flattening: flattenPromptText joins adjacent
+//     content blocks with no separator, so a value split across two blocks
+//     exists only in the display — the bytes never held that string, and no
+//     value-scrub can find what was never there to scrub.
+// Neither is fixable by adding more forms here; both need the derived text
+// SCANNED on its own so its own findings drive its own redaction. That scan now
+// exists (the daemon's scanDerivedText, Mode B), and its values arrive back
+// here as applyCaptureRedaction's `extraValues`. So the guarantee is a joint
+// one: this function covers re-encodings of a value the bytes already proved,
+// the derived scan covers what only the rendered text shows — and this function
+// alone is still not a guarantee that derived text is secret-free.
 function jsonUnescaped(value: string): string | null {
   if (!value.includes("\\")) return null; // no escapes: decoded form is identical
   try {
@@ -70,6 +73,35 @@ function jsonUnescaped(value: string): string | null {
   } catch {
     return null; // not a JSON string body — nothing was escaped, nothing to add
   }
+}
+
+// The MIRROR of jsonUnescaped, for a value matched in DERIVED text rather than
+// in the bytes: the daemon's derived-text scan finds secrets in the flattened
+// (JSON.parse'd) prompt, so its value carries a REAL newline while the stored
+// body — the serialized form — holds the two-char escape `\n`. Without this
+// form the direction that scrubs body-from-derived silently no-ops, the exact
+// failure jsonUnescaped fixes in the opposite direction.
+function jsonEscaped(value: string): string | null {
+  const out = JSON.stringify(value).slice(1, -1); // drop the wrapping quotes
+  return out === value ? null : out; // nothing needed escaping
+}
+
+/** Every encoding a matched value can appear in: as read from raw serialized
+ *  bytes (a newline is the two-char escape `\n`) and as read from the parsed
+ *  text (a real newline). Two forms of ONE secret, and the scanner's
+ *  fingerprint cannot equate them — it strips WHITESPACE so a re-wrapped PEM
+ *  dedups, but an escape sequence is not whitespace, so the two hash
+ *  differently. The daemon's derived-text scan compares through this to drop a
+ *  finding the raw bytes already proved, rather than filing one secret twice.
+ *
+ *  Returned as a list to intern into a Set, deliberately, so that comparison is
+ *  a lookup: findings are capped per RULE, not in total, so a pairwise
+ *  predicate would be quadratic in a number an adversarial body controls — on
+ *  the daemon thread, outside the scan worker's deadline. */
+export function secretForms(value: string): string[] {
+  const forms = [value];
+  for (const f of [jsonUnescaped(value), jsonEscaped(value)]) if (f !== null) forms.push(f);
+  return forms;
 }
 
 // Scrub known secret values by literal match wherever they appear — used on
@@ -97,7 +129,7 @@ export function redactValuesInText(
     // front would run sha256 O(values x messages) times per captured call to
     // throw nearly all of it away.
     let placeholder: string | null = null;
-    for (const form of [value, jsonUnescaped(value)]) {
+    for (const form of [value, jsonUnescaped(value), jsonEscaped(value)]) {
       if (form !== null && form.length >= 8 && text.includes(form)) {
         placeholder ??= redactionPlaceholder(type, value);
         text = text.split(form).join(placeholder);
@@ -141,6 +173,16 @@ export function applyCaptureRedaction(o: {
   requestFindings: Finding[];
   responseBody: Uint8Array | null;
   responseFindings?: Finding[];
+  /** Secret values detected in a surface OTHER than these bytes — the daemon's
+   *  derived-text scan of a flattened prompt. They carry no offsets into the
+   *  request body (their spans index the flattened text), so they can only be
+   *  value-scrubbed, never spliced. Two outcomes, both correct: where the value
+   *  is a contiguous run the body also holds, the scrub masks it; where the
+   *  flattening MANUFACTURED it by fusing two content blocks, the body never
+   *  contained that string and there is nothing there to mask — but it is
+   *  returned in `values` either way, so the caller scrubs the derived surfaces
+   *  (summary, transcript, search index) where it does appear. */
+  extraValues?: Array<{ value: string; type: string }>;
 }): CaptureRedaction {
   if (o.incomplete) {
     return {
@@ -152,16 +194,19 @@ export function applyCaptureRedaction(o: {
     };
   }
   const respFindings = o.responseFindings ?? [];
-  if (o.requestFindings.length === 0 && respFindings.length === 0) {
+  const extra = o.extraValues ?? [];
+  if (o.requestFindings.length === 0 && respFindings.length === 0 && extra.length === 0) {
     return { redacted: false, heldOut: false, requestBody: o.requestBytes, responseBody: o.responseBody, values: [] };
   }
   const req = redactBody(o.requestBytes, o.requestFindings);
   let responseBody = o.responseBody;
-  let values = req.values;
+  // Ordered spans first, then the offset-less values, so the value-scrub below
+  // runs over a body whose spliced spans are already placeholders.
+  let values = [...req.values, ...extra];
   if (respFindings.length > 0 && responseBody) {
     const resp = redactBody(responseBody, respFindings); // spans first: offsets index the original bytes
     responseBody = resp.bytes;
-    values = [...req.values, ...resp.values];
+    values = [...values, ...resp.values]; // keep `extra` — rebuilding from req.values would drop it
   }
   // Span redaction only masks the ONE occurrence the scanner reported, but a
   // secret can appear more than once in a body (the codex request echoes the
