@@ -80,9 +80,11 @@ const MAX_PROBES = 1 << 16;
 //
 // But the run alone does not say how much of it is escape. The letter escapes
 // (`\n` `\t` `\uXXXX`) at depth d carry 2^(d-1) backslashes — 1, 2, 4, 8,
-// always a power of two — but a nested quote or slash carries 2^d - 1 — 1, 3,
-// 7, always ODD — and a literal backslash the sender typed adds 2^d in front
-// of whatever follows. So `\\\"` is BOTH a pure depth-2 quote and a typed
+// always a power of two — but a nested QUOTE carries 2^d - 1 — 1, 3, 7,
+// always ODD, because every layer must re-escape the quote it wraps (`\/` does
+// not share this: no standard encoder re-escapes a slash, so its runs just
+// double like the letters') — and a literal backslash the sender typed adds
+// 2^d in front of whatever follows. So `\\\"` is BOTH a pure depth-2 quote and a typed
 // backslash before a depth-1 quote; the bytes cannot tell them apart. maskRun
 // resolves every run toward the literal reading: only the trailing 2^k
 // backslashes are treated as escape and blanked with their escape char, and

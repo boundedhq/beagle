@@ -601,7 +601,7 @@ function respLeaks(t) {
 // card header, and a derived-only redaction can leave its placeholder — which
 // is the l.value searched for here — in a detail and nowhere else (the server's
 // storedText makes the same call). Omitting them pointed the user at a raw
-// pane that holds nothing more than the header already shows.
+// pane that shows no more of that value than the header already does.
 function leakNotVisible(t) {
   if (t.leaks.length === 0) return false;
   const text = [

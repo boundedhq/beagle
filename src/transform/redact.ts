@@ -224,7 +224,8 @@ export function derivedScanText(parts: string[]): string {
  *  `rest[0]`'s first character — so the daemon's strict `f.start <
  *  derivedSplitAt(head)` assigns a finding starting exactly there to `rest`.
  *  That is the correct side, not a fail-safe hedge: the character at that
- *  position is rest's first byte, so a finding starting on it IS rest content. */
+ *  position is rest's own first character, so a finding starting on it IS rest
+ *  content. */
 export function derivedSplitAt(head: string[]): number {
   return head.reduce((n, p) => n + p.length + DERIVED_SEP.length, 0);
 }
