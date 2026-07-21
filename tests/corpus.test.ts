@@ -122,6 +122,22 @@ describe("quiet-tier fallbacks", () => {
     }
   });
 
+  test("a real key ABUTTING '-'/'_' is deliberately given up by THIS rule", () => {
+    // Not a benign non-match — a genuine key, missed on purpose. Pinning the
+    // accepted tradeoff so relaxing the delimiter classes back can't pass
+    // silently. It is not a shape keys are written in, and the keyword-bearing
+    // forms are covered elsewhere: the SAME key under an AWS keyword still
+    // alerts, at the higher structured tier, via aws-secret-access-key.
+    const key = "wJa1rXUtnF3MI4K7MDENGbPxRf9CYZ8qLm2Vt0Bn";
+    for (const text of [`KEY_${key}`, `${key}_v2`, `id-${key}`, `${key}-old`]) {
+      expect(scanText(text).some((x) => x.detector === "aws-secret-shape")).toBe(false);
+    }
+    // …but the same bytes in a keyworded context are NOT lost — the structured
+    // rule catches what the anchor-free shape rule steps back from.
+    const kept = scanText(`AWS_SECRET_ACCESS_KEY=${key}`);
+    expect(kept.some((x) => x.detector === "aws-secret-access-key" && x.tier === "structured")).toBe(true);
+  });
+
   test("base64-wrapped AKIA key: decoded and re-scanned", () => {
     const f = scanText("config_blob = 'QUtJQTJFMEE4RjNCOUMxRDdLNFA='");
     const hit = f.find((x) => x.detector === "base64-wrapped-secret");
