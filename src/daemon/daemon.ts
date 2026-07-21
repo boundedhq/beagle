@@ -498,8 +498,11 @@ export class Daemon {
     // Two boundaries that leaves, so nobody reads this as a guarantee:
     //   - Only `content` is a part. A DisplayMessage's `detail` (the
     //     originating call's arguments, parsers.ts) rides `redactedMessages`'
-    //     spread untouched and reaches the stored transcript raw — same class
-    //     of hole, different field, not closed here.
+    //     spread untouched — same class of hole, different field. The one
+    //     surface it reaches, the stored transcript, scrubs it by value at the
+    //     persist site below; that closes everything except the 8-char floor
+    //     this note opens with. Any NEW reader of redactedMessages inherits the
+    //     raw field and must handle it.
     //   - Spans only cover what the scan REPORTED. The engine stops at
     //     MAX_FINDINGS_PER_RULE and still returns "ok", so match 501 of a rule
     //     is invisible to every pass — spans and value scrub alike.
@@ -594,10 +597,34 @@ export class Daemon {
     // (empty when the request had none) — that fixed shape is what lets the
     // viewer lift it back out unambiguously, even from a body whose own
     // messages carry a "system" role.
-    const displayMessages =
-      redaction && !redaction.heldOut && derived.values.length > 0 && parsed
-        ? [{ role: "system", content: derived.outbound[0]! }, ...redactedMessages]
-        : null;
+    //
+    // `detail` is the first of the two boundaries named above, and this is the
+    // surface it actually reaches, so it is scrubbed BY VALUE here rather than
+    // left raw. Not a part, so no span covers it; but nothing manufactures a
+    // detail by joining blocks either — it is a verbatim slice of ONE tool
+    // argument, and that argument also rides the paired function_call's
+    // content, which the derived pass did scan. So the value is always already
+    // known, and redactValuesInText's raw/json-unescaped pair spans the
+    // escaping difference between the body's `arguments` string and the
+    // rendered detail (a PEM's real newlines vs the body's \n).
+    //
+    // What that does NOT reach is the same 8-char floor the note above
+    // describes: a connection-string password of four chars stays raw in a
+    // detail exactly as it would in a value-scrubbed summary. Closing that
+    // needs `detail` promoted to a scanned part, which reshapes outbound and
+    // its index arithmetic — deliberately not done here.
+    let displayMessages: DisplayMessage[] | null = null;
+    if (redaction && !redaction.heldOut && derived.values.length > 0 && parsed) {
+      // Built inside the branch: persisting a projection is the exception, so
+      // the common row must not pay to assemble a value list it never reads.
+      const values = [...derived.values, ...redaction.values, ...bodyValues];
+      displayMessages = [
+        { role: "system", content: derived.outbound[0]! },
+        ...redactedMessages.map((m) =>
+          m.detail ? { ...m, detail: redactValuesInText(m.detail, values) } : m,
+        ),
+      ];
+    }
 
     this.store.insertCall({
       id: call.id,

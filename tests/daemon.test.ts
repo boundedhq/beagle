@@ -525,6 +525,47 @@ describe("Daemon end-to-end", () => {
     expect(alerts[0]!.subtitle).toBe("AWS secret key");
   });
 
+  test("a persisted transcript scrubs a tool result's detail, not just its content", async () => {
+    // The derived pass scans and rewrites `content` only: outboundParts is
+    // built from m.content, and the persist replaces m.content. But a
+    // Responses-API tool RESULT also carries `detail` — the originating call's
+    // command/pattern/query, lifted by responsesItem — which is display text
+    // stored and rendered exactly like content. Nothing scans it and nothing
+    // scrubs it, so a secret in a tool's arguments rides into display_messages
+    // raw, on a row that alerted and whose body redacted.
+    await sendThroughProxy(
+      daemon.proxyPort, "run-e2e",
+      JSON.stringify({
+        model: "gpt-5",
+        input: [
+          {
+            type: "function_call", call_id: "c1", name: "Bash",
+            arguments: JSON.stringify({ command: "deploy --key AKIAZQ3DRSTUVWXY2345" }),
+          },
+          { type: "function_call_output", call_id: "c1", output: "deployed ok" },
+        ],
+      }),
+      "/v1/responses",
+    );
+    await Bun.sleep(200);
+    const store = Store.openReadOnly(stateDir);
+    const call = store.getCall(store.searchLiteral("deployed ok")[0]!.callId)!;
+    // Precondition: this row DID persist a projection (otherwise the assertion
+    // below would pass for the wrong reason — nothing stored to leak).
+    expect(call.displayMessages).not.toBeNull();
+    expect(JSON.stringify(call.displayMessages)).not.toContain("AKIAZQ3DRSTUVWXY2345");
+    const { buildDetail, leakSpansFor } = await import("../src/viewer/detail");
+    const view = buildDetail(call, leakSpansFor(store, call.id));
+    expect(JSON.stringify(view.messages)).not.toContain("AKIAZQ3DRSTUVWXY2345");
+    // Load-bearing: scrubbing is the fix, DROPPING the field is not. Without
+    // this the assertions above pass just as well for a projection that threw
+    // `detail` away, losing the result header's "what was this call" label.
+    const result = view.messages.find((m) => m.kind === "result")!;
+    expect(result.detail).toContain("[REDACTED:aws-access-key-id:");
+    expect(result.detail).toContain("deploy --key");
+    store.close();
+  });
+
   test("protocol identity fields (prompt_cache_key) never create leak events", async () => {
     // The exact false positive from live traffic: opencode's own session id,
     // high-entropy and preceded by "…key", flagged by the generic detector.
