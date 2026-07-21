@@ -48,9 +48,14 @@ describe("CLI commands (headless loop, R12)", () => {
     expect(out).toContain("s1");
   });
 
-  test("search: unambiguous never-sent answer", () => {
-    const out = cmdSearch(stateDir, "never-sent-credential");
-    expect(out.toLowerCase()).toContain("no matches");
+  test("search: a miss is bounded, not a categorical 'never sent'", () => {
+    const out = cmdSearch(stateDir, "never-sent-credential").toLowerCase();
+    expect(out).toContain("no matches");
+    // The honest miss names its bound (retention prunes payloads), so it can't
+    // be read as proof the string was categorically never sent. Pins the
+    // bounded wording: the old "…was never sent through Beagle." carried no
+    // bound and would fail here.
+    expect(out).toMatch(/still in the store|pruned|retention/);
   });
 
   test("search: with no argument, reads the term from stdin (keeps secrets out of shell history)", () => {
@@ -84,6 +89,37 @@ describe("CLI commands (headless loop, R12)", () => {
     });
     expect(run.stdout.toString().toLowerCase()).toContain("no matches");
     expect(run.exitCode).toBe(0);
+  });
+
+  test("leaks: an empty store says nothing was captured, not that it's clean", () => {
+    const empty = mkdtempSync(join(tmpdir(), "beagle-cli-empty-"));
+    const out = cmdLeaks(empty).toLowerCase();
+    // No store = nothing captured or scanned yet. Must not read as a clean
+    // scan ("no leaks recorded."), which would imply Beagle looked and found
+    // nothing. Pins the "nothing captured yet" framing.
+    expect(out).toContain("no captured traffic");
+    expect(out).not.toContain("no leaks recorded");
+  });
+
+  test("leaks: a scanned-clean store scopes the negative to detection + capture", () => {
+    const clean = mkdtempSync(join(tmpdir(), "beagle-cli-clean-"));
+    const store = Store.open(clean);
+    // A captured call with no leak event: scanned, nothing detected.
+    store.insertCall({
+      id: ulid(), sessionId: "s2", runId: "r2", source: "wire",
+      agent: "claude-code", provider: "anthropic", endpoint: "/v1/messages",
+      tsRequest: Date.now(), scanState: "ok", captureState: "ok",
+      sessionTier: "run", requestBody: null, requestHeaders: null,
+      responseBody: null, responseHeaders: null, sseRaw: null,
+      searchText: "nothing secret here",
+    });
+    store.close();
+    const out = cmdLeaks(clean).toLowerCase();
+    // Must not flatly claim "no leaks" (reads as "no secrets present"): the
+    // honest negative is scoped to what the detector found in the captured
+    // surface. Pins that scoping.
+    expect(out).toContain("no detected leaks");
+    expect(out).toContain("captured");
   });
 
   test("leaks: groups by session with a headline and plain-English names", () => {

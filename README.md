@@ -212,7 +212,7 @@ Trust needs numbers, not adjectives:
 | Budget | Design target | CI gate |
 |---|---|---|
 | Core security path | ≤ 2,000 LOC | `bun run loc:check` fails the build over budget |
-| Detection false-positive rate | < 5% | `tests/precision.test.ts` — the ship gate |
+| Structured-alert false positives | < 5% of 22 curated negatives | `tests/precision.test.ts` — a regression gate on hand-written snippets, not a real-world rate |
 | Scan time, 1 MB body | p99 ~10 ms | `tests/budget.test.ts` (median < 50 ms ceiling for CI variance); pathological inputs are bounded separately, by the scan worker's 500 ms fail-safe deadline |
 | Added request latency | p50 ≤ 5 ms | `tests/budget.test.ts` (< 25 ms ceiling for CI variance) |
 | Install size | ≤ 100 MB | CI binary-size check |
@@ -358,10 +358,16 @@ run it with no argument and it reads the term from stdin, keeping it out of
 shell history. The search runs locally against your local store.
 
 **Why should I trust the detector?**
-It's the gitleaks ruleset (vendored as data, sha256-pinned) run through a
-matcher of ~200 lines you can read in one sitting
-([`src/core/scanner/`](src/core/scanner/)), with a published <5%
-false-positive gate in CI. Detection tiers are honest: structured hits
+Its rules are *derived from* the MIT-licensed gitleaks ruleset — a curated
+subset, re-tiered and precision-tuned for agent traffic, then vendored as
+data and sha256-pinned at load (see
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)). The matcher is ~200 lines
+you can read in one sitting ([`src/core/scanner/`](src/core/scanner/)). A CI
+regression gate holds the loud (structured) tier to fewer than 5% false
+positives across 22 hand-written negative snippets
+([`tests/precision.test.ts`](tests/precision.test.ts)) — a guard against
+precision regressions on those snippets, not a measured false-positive rate
+over real traffic. Detection tiers are honest: structured hits
 (AWS/GitHub/Stripe/private keys, Luhn-checked cards) alert loudly;
 entropy-only hits stay a quiet "possible."
 

@@ -953,7 +953,7 @@ function SearchResults({ hits, term, onClear, onOpen }) {
     <div class="searchresults">
       <div>
         ${hits.length === 0
-          ? html`<strong>no matches — never sent.</strong>`
+          ? html`<strong>no matches — not in any call still in the store.</strong>`
           : html`<strong>
               found in ${hits.length} call${hits.length === 1 ? "" : "s"} across
               ${" " + new Set(hits.map((h) => h.sessionId)).size} session(s)
