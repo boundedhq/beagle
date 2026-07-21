@@ -241,6 +241,38 @@ describe("Mode B end-to-end through the daemon", () => {
     store.close();
   });
 
+  test("a derived-only leak that sits verbatim in the scanned bytes keeps a usable highlight", async () => {
+    // The wire path's re-anchor, on Mode B. A derived-only finding is recorded
+    // span-less only when the value is genuinely absent from the scanned bytes;
+    // when it IS there — the flattening merely decoded an escape that had put
+    // the rule's context out of reach — it earns a real span, and without one
+    // the viewer's leak list renders nothing for a row that alerted.
+    // redact-on-capture off: that is the only state in which the viewer
+    // consults spans at all (a redacted row highlights placeholders instead).
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: false } });
+    const prompt = JSON.stringify([
+      { role: "user", content: 'config holds "api_key": "Xk7Qm2Vb9Rt4Ws8Yz1Nc6Pd3aJ5Hf0Lg" today' },
+    ]);
+    await post(otlpBody(token, prompt, "otel-conv-anchor", null));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    const events = listLeakEvents(store);
+    expect(events.length).toBe(1);
+    expect(events[0]!.secretType).toBe("generic-api-key");
+    const call = store.getCall(store.searchLiteral("config holds")[0]!.callId)!;
+    const { buildDetail, leakSpansFor } = await import("../src/viewer/detail");
+    const spans = leakSpansFor(store, call.id);
+    expect(spans.length).toBe(1);
+    // The span indexes the STORED body, so slicing it back must return the
+    // secret itself rather than neighbouring text.
+    const raw = new TextDecoder().decode(call.requestBody!);
+    expect(raw.slice(spans[0]!.start, spans[0]!.end)).toBe("Xk7Qm2Vb9Rt4Ws8Yz1Nc6Pd3aJ5Hf0Lg");
+    expect(buildDetail(call, spans).leaks.map((l) => l.value)).toContain(
+      "Xk7Qm2Vb9Rt4Ws8Yz1Nc6Pd3aJ5Hf0Lg",
+    );
+    store.close();
+  });
+
   test("a PEM spanning two messages of a serialized list is scrubbed from the transcript", async () => {
     // The matched value in the raw bytes runs BEGIN…END straight through the
     // structural `"},{"role":"user","content":"` between the two messages —

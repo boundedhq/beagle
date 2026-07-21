@@ -93,6 +93,25 @@ function sendThroughProxy(port: number, runId: string, body: string, path = "/v1
   });
 }
 
+// Wait until the daemon has finished capturing everything sent so far. Capture
+// is a tracked pipeline promise, so inflight===0 means the call is scanned,
+// stored and alerted and nothing more is coming. A fixed sleep cannot say that,
+// and a NEGATIVE assertion ("no alert fired") is exactly the shape that passes
+// against a sleep for the wrong reason — because the work had not happened yet.
+// Timeout stays under bun's 5s per-test default so the diagnostic surfaces.
+async function captured(socketPath: string, minCalls = 1, timeoutMs = 4_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const status = await controlRequest(socketPath, { cmd: "status" });
+    const d = status.data as { calls: number; inflight: number };
+    if (d.calls >= minCalls && d.inflight === 0) return;
+    if (Date.now() > deadline) {
+      throw new Error(`timed out waiting for the daemon to capture ${minCalls} call(s)`);
+    }
+    await Bun.sleep(10);
+  }
+}
+
 describe("Daemon end-to-end", () => {
   let stateDir: string;
   let daemon: Daemon;
@@ -786,7 +805,7 @@ describe("Daemon end-to-end", () => {
         ],
       }),
     );
-    await Bun.sleep(150);
+    await captured(daemon.socketPath);
     const store = Store.openReadOnly(stateDir);
     // The body scan sees a PEM too — its value carries the `"},{"role":…` the
     // display drops, so the two are different strings that nothing can key
@@ -821,7 +840,9 @@ describe("Daemon end-to-end", () => {
         ],
       }),
     );
-    await Bun.sleep(150);
+    // Quiesce, not a sleep: this asserts an ABSENCE, so it has to be able to
+    // tell "nothing fired" from "nothing has run yet".
+    await captured(daemon.socketPath);
     expect(alerts.length).toBe(0);
     const store = Store.openReadOnly(stateDir);
     expect(listLeakEvents(store).length).toBe(0);
@@ -851,7 +872,7 @@ describe("Daemon end-to-end", () => {
         messages: [{ role: "user", content: 'config has "api_key": "Xk7Qm2Vb9Rt4Ws8Yz1Nc6Pd3aJ5Hf0Lg" in it' }],
       }),
     );
-    await Bun.sleep(150);
+    await captured(daemon.socketPath);
     const store = Store.openReadOnly(stateDir);
     const events = listLeakEvents(store);
     expect(events.length).toBe(1);
