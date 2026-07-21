@@ -138,13 +138,29 @@ export function secretKeys(value: string): string[] {
 // The parts are scanned JOINED, one per line, because a rule must see a secret
 // whole and the transcript renders these strings adjacently — a PEM whose BEGIN
 // and END sit in two messages is readable to whoever opens the call, so it is
-// found here even though neither message alone holds it. The newline can't
-// fuse two parts into a single-line secret shape; a multi-line one it
-// deliberately does not stop.
-const DERIVED_SEP = "\n";
+// found here even though neither message alone holds it.
+//
+// What the join must NOT do is INVENT one, and a bare "\n" did: the quiet
+// rules' delimiter classes accept whitespace — generic-api-key is
+// `(?:…|key|secret|token|…)["':=\s]{1,5}(value)` — so a message ending "…needs
+// an API token" followed by one starting with a base64-ish word matched ACROSS
+// the newline. Nothing like it was ever sent; the two are adjacent only in this
+// rendering. The cost was paid twice: a bogus leak event, and the genuinely
+// sent text replaced by a placeholder in the search index — a false negative on
+// the one question `beagle search` answers definitively.
+//
+// The NUL fixes that structurally, which is the only way it can be fixed here:
+// a finding's span is its capture GROUP (engine.scan), i.e. the value alone, so
+// it sits wholly inside one part even when the delimiter that matched it
+// crossed the join — a filter on the span cannot even see the fusion. No rule's
+// delimiter or value class contains NUL, so nothing matches across it, while
+// `[\s\S]`-style rules (the PEM) still span it exactly as before, because that
+// class is every character.
+const DERIVED_SEP = "\n\u0000\n";
 
 /** The exact text `redactDerivedParts` assumes its findings were scanned over.
- *  Also the wire path's search text verbatim (see buildSearchText). */
+ *  NOT the search text: the NUL has no business in fts5 content, and the index
+ *  needs no offset agreement because masking already happened per part. */
 export function derivedScanText(parts: string[]): string {
   return parts.join(DERIVED_SEP);
 }

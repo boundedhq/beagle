@@ -10,7 +10,7 @@ export type Format = "anthropic-messages" | "openai-chat" | "openai-responses" |
  *  history diffing, search text, and summaries are untouched. */
 export interface DisplayMessage extends Message {
   tool?: string; // sanitized tool name, or undefined when unknown/hostile
-  kind?: "call" | "result";
+  kind?: "call" | "result" | "response"; // "response": the wire transcript's stored reply
   callId?: string;
   detail?: string; // the originating call's short detail, shown in result headers
 }

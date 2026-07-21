@@ -133,7 +133,9 @@ describe("redact-on-capture (R11)", () => {
   test("redactDerivedParts splices a finding out of the one part that holds it", () => {
     const secret = "AKIAZQ3DRSTUVWXY2345";
     const parts = ["hello", `key ${secret} here`, "bye"];
-    const joined = parts.join("\n");
+    // Ask for the joined text rather than restating the separator: it is a
+    // NUL barrier now, so no rule can match across the join.
+    const joined = derivedScanText(parts);
     const at = joined.indexOf(secret);
     const out = redactDerivedParts(parts, [finding(at, at + secret.length, "aws-access-key-id")]);
     expect(out.parts[0]).toBe("hello"); // untouched
@@ -152,7 +154,9 @@ describe("redact-on-capture (R11)", () => {
       "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAspanning",
       "tail\n-----END RSA PRIVATE KEY-----",
     ];
-    const joined = parts.join("\n");
+    // Ask for the joined text rather than restating the separator: it is a
+    // NUL barrier now, so no rule can match across the join.
+    const joined = derivedScanText(parts);
     const out = redactDerivedParts(parts, [finding(0, joined.length, "private-key")]);
     expect(out.parts[0]).not.toContain("MIIEowIBAAKCAQEAspanning");
     expect(out.parts[0]).not.toContain("BEGIN RSA PRIVATE KEY");

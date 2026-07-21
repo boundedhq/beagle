@@ -132,8 +132,13 @@ export function buildDetail(call: CallRecord, spans: LeakSpan[]): CallDetail {
     // WINS over the re-parse: see storedProjection for why re-deriving would be
     // wrong wherever one exists.
     messages: stored?.messages ?? parsedReq?.messages ?? [],
+    // Stored reply first, for the same reason `messages` prefers its stored
+    // copy: the re-parse below REASSEMBLES a streamed answer, rebuilding a key
+    // the provider split across frames that no single frame of the body holds.
     responseText:
-      parsedResp?.text ?? (call.source === "otel" && responseRaw ? responseRaw : null),
+      stored?.responseText ??
+      parsedResp?.text ??
+      (call.source === "otel" && responseRaw ? responseRaw : null),
     // Mode B bodies are plain text — extractActions parses nothing there and
     // returns [], so the section simply doesn't render for self-reports.
     // The tool name becomes a card HEADER label — sanitize at this boundary
@@ -166,13 +171,24 @@ export function buildDetail(call: CallRecord, spans: LeakSpan[]): CallDetail {
 // the request had none — so lifting it back is unambiguous even for a body
 // whose own messages carry a "system" role. Mode B rows never write one, and
 // their roles are user/tool, so they fall through with system undefined.
+// A wire row's REPLY rides the same array as a trailing kind:"response" entry —
+// the writer's own marker, never a value the parsers produce — because the
+// re-derive is wrong for it too: parseResponse REASSEMBLES a streamed answer,
+// so a key the provider split across two text_delta frames is in no single
+// frame of the stored body and re-parsing rebuilds it whole.
 function storedProjection(
   call: CallRecord,
-): { system?: string; messages: DisplayMessage[] } | null {
-  const stored = call.displayMessages;
+): { system?: string; messages: DisplayMessage[]; responseText?: string } | null {
+  let stored = call.displayMessages as DisplayMessage[] | undefined | null;
   if (!stored?.length) return null;
-  if (stored[0]!.role !== "system") return { messages: stored };
-  return { system: stored[0]!.content || undefined, messages: stored.slice(1) };
+  let responseText: string | undefined;
+  if (stored[stored.length - 1]!.kind === "response") {
+    responseText = stored[stored.length - 1]!.content;
+    stored = stored.slice(0, -1);
+    if (!stored.length) return { messages: [], responseText };
+  }
+  if (stored[0]!.role !== "system") return { messages: stored, responseText };
+  return { system: stored[0]!.content || undefined, messages: stored.slice(1), responseText };
 }
 
 // Every string a row stores as its own transcript, for placeholder discovery
