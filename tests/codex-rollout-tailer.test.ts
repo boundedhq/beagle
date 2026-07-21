@@ -95,6 +95,48 @@ describe("CodexRolloutTailer", () => {
     expect(retired).toBe(true);
   });
 
+  test("re-emits an answer that GREW (later message, same turn), even past the retry window", () => {
+    // Codex narrates: the turn's answer accretes messages. The merged whole
+    // hashes to a fresh content key, so growth gets its own emit + retry
+    // window; the earlier, shorter view stays settled under its old key.
+    const dir = tmp();
+    const file = join(dir, "rollout-x-conv1.jsonl");
+    writeFileSync(file, turn(PA, "I’m checking the docs first.") + "\n");
+    let clock = 1000;
+    const out: OtelCall[][] = [];
+    const t = new CodexRolloutTailer({ convId: "conv1", filePath: file, emit: (c) => out.push(c), now: () => clock, retryWindowMs: 5000 });
+    t.poll(); // preamble emitted (and, in the daemon, attached)
+    clock = 8000; // past the preamble's retry window
+    appendFileSync(file, jline("response_item", msg("assistant", "The real answer, at last.")) + "\n");
+    t.poll();
+    const grown = "I’m checking the docs first.\n\nThe real answer, at last.";
+    expect(out.at(-1)!.map((c) => c.response.text)).toEqual([grown]);
+    // Growth restarts the retry window: the grown answer's own attach can race.
+    clock = 11000;
+    t.poll();
+    expect(out.at(-1)!.map((c) => c.response.text)).toEqual([grown]);
+    // …and it settles once the window passes with no further growth.
+    clock = 15000;
+    t.poll();
+    const emitsBefore = out.length;
+    clock = 16000;
+    t.poll();
+    expect(out.length).toBe(emitsBefore);
+  });
+
+  test("answers carry their turn ordinal (repeated identical prompts stay routable)", () => {
+    const dir = tmp();
+    const file = join(dir, "rollout-x-conv1.jsonl");
+    writeFileSync(file, turn(PA, "part one") + "\n" + turn(PA, "part two") + "\n");
+    const out: OtelCall[] = [];
+    const t = new CodexRolloutTailer({ convId: "conv1", filePath: file, emit: (c) => out.push(...c), now: () => 1000 });
+    t.poll();
+    expect(out.map((c) => [c.response.text, c.promptOrdinal])).toEqual([
+      ["part one", 0],
+      ["part two", 1],
+    ]);
+  });
+
   test("an emitted answer carries its rollout line's own timestamp", () => {
     const dir = tmp();
     const file = join(dir, "rollout-x-conv1.jsonl");

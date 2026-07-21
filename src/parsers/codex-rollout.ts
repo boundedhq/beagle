@@ -24,6 +24,10 @@ export interface RolloutAnswer {
   answer: string;
   /** Rollout line timestamp in ms, or undefined if absent/unparseable. */
   tsMs?: number;
+  /** Which same-key turn this is (0-based): hash(prompt) is the only join key,
+   *  so two turns asking the identical thing share it — the ordinal routes each
+   *  answer to its own row (store.attachOtelResponse extend.ordinal). */
+  ordinal: number;
 }
 
 interface RolloutItem {
@@ -71,28 +75,59 @@ function parseRollout(text: string): RolloutItem[] {
   return out;
 }
 
-// Walk the rollout in order; pair each assistant answer with the nearest
-// preceding real user prompt (validated 2/2 in the spike). An answer with no
-// preceding prompt, or with no text (a tool-only turn), yields nothing.
+// Walk the rollout in order; pair assistant text with the nearest preceding
+// real user prompt (validated 2/2 in the spike). ONE answer per turn: codex
+// narrates, so a tool-using turn carries several assistant messages (preambles
+// between tools, then the real reply) — merged in order, because emitting each
+// separately let the first preamble claim the turn row and the double-attach
+// guard then dropped the actual final answer (live session
+// 01KY1F0V56X9B64ZQEPC9CPPZB lost its real reply this way). A turn's answer
+// therefore GROWS: each new message yields the turn's merged-so-far answer
+// again, every earlier view a strict PREFIX of a later one — the invariant
+// behind the store's replace-if-longer extend rule, and what makes the grown
+// content hash differently in the tailer (a fresh content key → a fresh emit).
+// An answer with no preceding prompt, or a tool-only turn, yields nothing.
 //
 // Stateful so the tailer can feed the file incrementally (only the new bytes
-// each poll): the nearest-preceding-prompt state must survive across chunks —
-// a prompt in one read keys an answer that arrives in a later one. push()
-// takes whole lines only; the caller carries any partial trailing line.
+// each poll): the nearest-preceding-prompt state — and the open turn's
+// accumulated answer — must survive across chunks. push() takes whole lines
+// only; the caller carries any partial trailing line.
 export class RolloutPairing {
   private currentKey: string | null = null;
+  private open: RolloutAnswer | null = null; // the current turn's merged answer so far
+  private readonly turns = new Map<string, number>(); // promptKey → same-key turns seen
   push(text: string): RolloutAnswer[] {
     const out: RolloutAnswer[] = [];
     for (const item of parseRollout(text)) {
       const prompt = realPromptText(item);
       if (prompt !== null) {
         this.currentKey = codexPromptKey(prompt);
+        this.open = null; // a new turn — never merge across prompts
         continue;
       }
       const answer = assistantText(item);
       if (answer && this.currentKey) {
         const ms = item.timestamp ? Date.parse(item.timestamp) : NaN;
-        out.push({ promptKey: this.currentKey, answer, tsMs: Number.isFinite(ms) ? ms : undefined });
+        const tsMs = Number.isFinite(ms) ? ms : undefined;
+        if (this.open) {
+          // Copy, never mutate: the tailer keeps earlier snapshots (keyed by
+          // their content hash), so growing one in place would corrupt them.
+          const grown: RolloutAnswer = {
+            ...this.open,
+            answer: this.open.answer + "\n\n" + answer,
+            tsMs: tsMs ?? this.open.tsMs, // completion time = last message's
+          };
+          // Within one push, supersede the same turn's earlier snapshot rather
+          // than returning both — answersFromText stays one answer per turn.
+          if (out.length && out[out.length - 1] === this.open) out[out.length - 1] = grown;
+          else out.push(grown);
+          this.open = grown;
+        } else {
+          const ordinal = this.turns.get(this.currentKey) ?? 0;
+          this.turns.set(this.currentKey, ordinal + 1);
+          this.open = { promptKey: this.currentKey, answer, tsMs, ordinal };
+          out.push(this.open);
+        }
       }
     }
     return out;

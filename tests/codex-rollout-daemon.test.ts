@@ -155,6 +155,46 @@ describe("Codex rollout response capture end-to-end", () => {
     });
   });
 
+  test("a turn's later messages still land: preamble attaches, final answer replaces it", async () => {
+    // The live-session bug: codex narrates (preamble → tools → real answer) and
+    // only the preamble survived — the final answer hit the double-attach guard
+    // and, being attach-or-drop, vanished. The grown merged answer must replace
+    // the shorter view on the same turn row.
+    const conv = "conv-grow";
+    const prompt = "how does codex memory work?";
+    const preamble = "I’m using the docs skill; checking guidance first.";
+    const finalAnswer = "Codex has three memory-like layers: context, local memories, AGENTS.md.";
+    writeRollout(codexRoot, conv, rolloutTurn(prompt, preamble));
+    await post(codexPrompt(conv, prompt));
+
+    // Wait for the preamble to attach (the first, short view of the answer)…
+    await waitFor(
+      () => readStore((s) => {
+        const hit = s.searchLiteral(prompt)[0];
+        const call = hit && s.getCall(hit.callId);
+        return !!call?.responseBody && new TextDecoder().decode(call.responseBody).includes("docs skill");
+      }),
+      "the preamble to attach",
+    );
+    // …then the real answer flushes to the SAME turn in the rollout.
+    appendFileSync(rolloutPath(codexRoot, conv), jline("response_item", msg("assistant", finalAnswer), Date.now()) + "\n");
+
+    await waitFor(
+      () => readStore((s) => {
+        const call = s.getCall(s.searchLiteral(prompt)[0]!.callId);
+        return !!call?.responseBody && new TextDecoder().decode(call.responseBody).includes("three memory-like layers");
+      }),
+      "the final answer to replace the preamble view",
+    );
+
+    readStore((s) => {
+      const call = s.getCall(s.searchLiteral(prompt)[0]!.callId)!;
+      expect(new TextDecoder().decode(call.responseBody!)).toBe(`${preamble}\n\n${finalAnswer}`);
+      expect(listCalls(s, 50).length).toBe(1); // still one row — grown, not duplicated
+      expect(s.searchLiteral("memory-like layers").length).toBe(0); // inbound stays out of search
+    });
+  });
+
   test("an answer whose prompt has no turn row is DROPPED, not orphaned", async () => {
     const conv = "conv-drop";
     // The rollout's prompt differs from the OTel prompt, so the answer's key

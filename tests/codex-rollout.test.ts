@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { codexPromptKey, answersFromText } from "../src/parsers/codex-rollout";
+import { codexPromptKey, answersFromText, RolloutPairing } from "../src/parsers/codex-rollout";
 
 // A minimal, controlled 2-turn rollout — the exact shape captured in the
 // Phase-0 spike (docs/codex-rollout-response-capture-design.md §8.7): a
@@ -105,5 +105,82 @@ describe("answersFromText", () => {
       ["ALPHA111", "7959d7bb7b5c2ac5"],
       ["BRAVO222", "64bb53f6acd066f0"],
     ]);
+  });
+
+  // Codex narrates: a turn with tool calls carries SEVERAL assistant messages —
+  // short "what I'm about to do" preambles between tools, then the real answer.
+  // Emitting them separately let the first preamble claim the turn row and the
+  // double-attach guard dropped the final answer (live session
+  // 01KY1F0V56X9B64ZQEPC9CPPZB lost its actual reply this way).
+  describe("multi-message turns", () => {
+    const PROMPT = "how does codex memory work?";
+    const MULTI = [
+      line("response_item", msg("user", PROMPT)),
+      line("response_item", msg("assistant", "I’m checking the docs first."), "2026-07-20T21:30:24.000Z"),
+      line("response_item", { type: "function_call", name: "shell" }),
+      line("response_item", msg("assistant", "The site is unreachable, trying the mirror."), "2026-07-20T21:30:40.000Z"),
+      line("response_item", msg("assistant", "Codex has three memory-like layers: …the real answer…"), "2026-07-20T21:30:58.000Z"),
+    ].join("\n");
+    const MERGED =
+      "I’m checking the docs first.\n\n" +
+      "The site is unreachable, trying the mirror.\n\n" +
+      "Codex has three memory-like layers: …the real answer…";
+
+    test("merges a turn's preambles and final answer into ONE answer, in order", () => {
+      const answers = answersFromText(MULTI);
+      expect(answers).toHaveLength(1);
+      expect(answers[0]!.promptKey).toBe(codexPromptKey(PROMPT));
+      expect(answers[0]!.answer).toBe(MERGED);
+    });
+
+    test("tsMs is the LAST message's timestamp (when the answer completed)", () => {
+      expect(answersFromText(MULTI)[0]!.tsMs).toBe(Date.parse("2026-07-20T21:30:58.000Z"));
+    });
+
+    test("fed incrementally, each push yields the merged-so-far answer — a prefix chain", () => {
+      // The tailer feeds only NEW lines each poll; the pairing must re-yield
+      // the turn's merged whole so the grown answer replaces the shorter view.
+      // Earlier snapshots must stay intact (the tailer keys them by content).
+      const pairing = new RolloutPairing();
+      const lines = MULTI.split("\n");
+      const first = pairing.push(lines.slice(0, 2).join("\n") + "\n");
+      expect(first.map((a) => a.answer)).toEqual(["I’m checking the docs first."]);
+      const rest = pairing.push(lines.slice(2).join("\n") + "\n");
+      expect(rest.map((a) => a.answer)).toEqual([MERGED]);
+      expect(first[0]!.answer).toBe("I’m checking the docs first."); // snapshot not mutated
+      expect(MERGED.startsWith(first[0]!.answer)).toBe(true); // grow-only prefix invariant
+      expect(rest[0]!.ordinal).toBe(first[0]!.ordinal); // same turn, same routing
+    });
+
+    test("messages merge per turn, never across turns", () => {
+      const twoTurns = [
+        line("response_item", msg("user", "first question")),
+        line("response_item", msg("assistant", "preamble one")),
+        line("response_item", msg("assistant", "answer one")),
+        line("response_item", msg("user", "second question")),
+        line("response_item", msg("assistant", "answer two")),
+      ].join("\n");
+      const answers = answersFromText(twoTurns);
+      expect(answers.map((a) => a.answer)).toEqual(["preamble one\n\nanswer one", "answer two"]);
+    });
+
+    test("REPEATED identical prompts stay separate turns with rising ordinals", () => {
+      // hash(prompt) is the only join key, so two turns asking the same thing
+      // share it — the ordinal is what lets each answer find its own row.
+      const repeated = [
+        line("response_item", msg("user", "continue")),
+        line("response_item", msg("assistant", "part one")),
+        line("response_item", msg("user", "continue")),
+        line("response_item", msg("assistant", "part two")),
+        line("response_item", msg("user", "something else")),
+        line("response_item", msg("assistant", "done")),
+      ].join("\n");
+      const answers = answersFromText(repeated);
+      expect(answers.map((a) => [a.answer, a.ordinal])).toEqual([
+        ["part one", 0],
+        ["part two", 1],
+        ["done", 0],
+      ]);
+    });
   });
 });
