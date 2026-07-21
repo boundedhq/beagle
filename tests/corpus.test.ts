@@ -96,6 +96,32 @@ describe("quiet-tier fallbacks", () => {
     expect(f.some((x) => x.detector === "aws-secret-shape")).toBe(false);
   });
 
+  // The exact-length defense above holds only for STANDARD base64. In base64url
+  // '-' and '_' are VALUE characters, but they are not in the rule's
+  // [A-Za-z0-9/+] class, so they used to read as delimiters and cut one long
+  // blob into a stream of 40-char candidates. Found in live traffic: an OpenAI
+  // `encrypted_content` reasoning payload — provider ciphertext the client
+  // resends every turn — reported 7 "AWS secrets" across 165 request bodies,
+  // each a mid-blob slice bounded by '-' or '_'.
+  test("a 40-char window inside a base64url blob does NOT match (the encrypted_content FP)", () => {
+    // 40 valid base64 chars with a base64url value char on each side: the exact
+    // shape a long `-`/`_`-bearing blob presents over and over.
+    const window = "wJa1rXUtnF3MI4K7MDENGbPxRf9CYZ8qLm2Vt0Bn";
+    for (const [before, after] of [["-", "_"], ["_", "_"], ["-", "-"], ["_", "-"]]) {
+      const f = scanText(`eyJhbGc${before}${window}${after}Qk1FRA`);
+      expect(f.some((x) => x.detector === "aws-secret-shape")).toBe(false);
+    }
+  });
+
+  test("a real key is still found when a normal delimiter bounds it", () => {
+    // The counterpart the fix must not break: quote, '=', whitespace and line
+    // end all still delimit. Guards against over-tightening into silence.
+    const key = "wJa1rXUtnF3MI4K7MDENGbPxRf9CYZ8qLm2Vt0Bn";
+    for (const text of [`secret is ${key} ok`, `S3_SAK=${key}`, `"${key}"`, `${key}`, `sig=${key}&t=1`]) {
+      expect(scanText(text).some((x) => x.detector === "aws-secret-shape")).toBe(true);
+    }
+  });
+
   test("base64-wrapped AKIA key: decoded and re-scanned", () => {
     const f = scanText("config_blob = 'QUtJQTJFMEE4RjNCOUMxRDdLNFA='");
     const hit = f.find((x) => x.detector === "base64-wrapped-secret");
