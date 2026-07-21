@@ -148,11 +148,12 @@ export function maskJsonEscapes(text: string): string {
     // Most strings in a JSON body hold no escape at all. `bs` is the first
     // backslash at or after `q` and only ever moves forward, so locating them
     // costs one pass across the whole loop rather than one per string, and an
-    // escape-free string is never copied. Once it is -1 no string can contain
-    // one, and the guard stops it rescanning to EOF for a backslash that is
-    // not there.
-    if (bs >= 0 && bs < q) bs = text.indexOf("\\", q);
-    if (bs >= 0 && bs < end) {
+    // escape-free string is never copied.
+    if (bs < q) {
+      bs = text.indexOf("\\", q);
+      if (bs < 0) break; // no backslash left: no later string can need masking
+    }
+    if (bs < end) {
       out += text.slice(pos, q + 1) + text.slice(q + 1, end).replace(JSON_ESCAPE, maskEscape);
       pos = end;
     }
