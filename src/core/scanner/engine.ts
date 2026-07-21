@@ -179,7 +179,7 @@ function matchAll(raw: string, view: string, ctx: ScanCtx, compiled: CompiledRul
         tier: spec.tier,
         start,
         end: start + secretRaw.length,
-        fingerprint: fingerprint(secret, compiled.hmacKey),
+        fingerprint: fingerprint(secretRaw, compiled.hmacKey),
         destinationOwnKey:
           authNorm !== undefined && (authNorm === secret || authNorm.includes(secret)),
       });
@@ -212,11 +212,17 @@ export function normalize(s: string): string {
 // other three JSON_ESCAPE admits — decode to themselves and fall through below.
 const ESCAPE_CHARS: Record<string, string> = { b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" };
 
-// Transport noise dropped before hashing: JSON string escapes decoded, then all
-// whitespace stripped. The same PEM must fingerprint identically re-wrapped AND
-// carried in a JSON body, or R6 dedup re-alerts on the one key — matchAll() hands
-// us the RAW slice on purpose (every gate judges what really shipped), so there
-// the newlines are still the two characters \ + n and /\s+/ alone keeps both.
+// Transport noise dropped before hashing: JSON string escapes decoded, THEN
+// surrounding quotes and all whitespace stripped. The same PEM must fingerprint
+// identically re-wrapped AND carried in a JSON body, or R6 dedup re-alerts on
+// the one key — matchAll() hands us its RAW capture (the gates judge the
+// normalize()d value; the hash canonicalizes from what really shipped), so the
+// newlines arrive as the two characters \ + n.
+// The decode runs BEFORE normalize()'s quote-strip because the decoration
+// itself can arrive encoded: a password ending in `"` ships JSON-encoded as
+// `pass\"`, and stripping the bare quote first left the dangling `pass\` — one
+// secret, a fingerprint per encoding (`\u0022` split a third way). Decoded
+// first, every arrival reaches the strip in its raw spelling and converges.
 // Decoding, not maskJsonEscapes(): the mask leaves `\/` `\"` `\\` in place, right
 // for its boundary job, wrong here, where a slash-escaping encoder would still
 // split a base64 body's fingerprint. ONE left-to-right pass, so `\\n` stays a
@@ -226,10 +232,12 @@ const ESCAPE_CHARS: Record<string, string> = { b: "\b", f: "\f", n: "\n", r: "\r
 // Stored fingerprints are NOT migrated. Only a capture containing a backslash
 // hashes differently than before; every other rule's alphabet excludes one, so
 // those rows keep the value they were written with. (Today that is just
-// private-key and connection-string, but rules are data on their own cadence —
-// the invariant is the guarantee, not that census.) Re-deriving the rest would
-// mean re-scanning stored bodies, which redact-on-capture masks by default;
-// not re-deriving costs one re-alert per secret still in flight.
+// private-key and connection-string — and private-key cannot rotate: its
+// captures are anchored by `-----` at both ends, so the quote-strip never
+// fires and decode order is invisible to it. Rules are data on their own
+// cadence — the invariant is the guarantee, not that census.) Re-deriving the
+// rest would mean re-scanning stored bodies, which redact-on-capture masks by
+// default; not re-deriving costs one re-alert per secret still in flight.
 //
 // Undecidable residue, in both directions, for a secret holding a REAL backslash:
 // `hun\ter2secret` sent raw decodes to a tab that /\s+/ then eats, but sent
@@ -237,8 +245,8 @@ const ESCAPE_CHARS: Record<string, string> = { b: "\b", f: "\f", n: "\n", r: "\r
 // equally MERGE with a different password whose literal spelling matches the
 // decoded one. Both are far narrower than the systematic split fixed here, which
 // hits every JSON-encoded PEM.
-export function fingerprint(normalizedSecret: string, hmacKey: Uint8Array): string {
-  const decoded = normalizedSecret.replace(JSON_ESCAPE, (esc) => {
+export function fingerprint(secretRaw: string, hmacKey: Uint8Array): string {
+  const decoded = secretRaw.replace(JSON_ESCAPE, (esc) => {
     if (esc.length !== 6) return ESCAPE_CHARS[esc[1]!] ?? esc[1]!; // \X, not \uXXXX
     const cp = parseInt(esc.slice(2), 16);
     // Surrogates stay as written. Decoded, every lone one UTF-8-encodes to the
@@ -248,7 +256,7 @@ export function fingerprint(normalizedSecret: string, hmacKey: Uint8Array): stri
     // secret sent both escaped and raw, and secrets in scope are ASCII.
     return cp >= 0xd800 && cp <= 0xdfff ? esc : String.fromCharCode(cp);
   });
-  return createHmac("sha256", hmacKey).update(decoded.replace(/\s+/g, "")).digest("hex");
+  return createHmac("sha256", hmacKey).update(normalize(decoded).replace(/\s+/g, "")).digest("hex");
 }
 
 export function shannonEntropy(s: string): number {

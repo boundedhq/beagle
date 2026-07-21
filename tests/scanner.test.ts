@@ -149,6 +149,8 @@ describe("fingerprint stability across wrapping and wire encoding", () => {
     `-----BEGIN RSA PRIVATE KEY-----\n${body}\n-----END RSA PRIVATE KEY-----`;
   const fpOf = (text: string) =>
     scanText(text).find((x) => x.secretType === "private-key")!.fingerprint;
+  const fpConn = (text: string) =>
+    scanText(text).find((x) => x.secretType === "connection-string")!.fingerprint;
 
   test("re-wrapped PEM block fingerprints identically", () => {
     expect(fpOf(pem(BODY))).toBe(fpOf(pem(`${BODY.slice(0, 16)}\n${BODY.slice(16)}`)));
@@ -178,6 +180,50 @@ describe("fingerprint stability across wrapping and wire encoding", () => {
 
   test("distinct PEM bodies stay distinct", () => {
     expect(fpOf(JSON.stringify({ c: pem(BODY) }))).not.toBe(fpOf(pem(BODY.replace("0Z3", "0Z4"))));
+  });
+
+  test("a password ending in a quote fingerprints identically JSON-encoded and raw", () => {
+    // JSON-encoded, the password's closing quote ships as the two characters
+    // \ + ". Stripping the bare quote before decoding ate the " out of the
+    // escape and hashed the dangling `hunterpw\`, while the raw arrival hashed
+    // `hunterpw` — one secret, two fingerprints, and R6 dedup re-alerted.
+    const url = 'mongodb://app:hunterpw"@db.internal/prod';
+    expect(fpConn(JSON.stringify({ url }))).toBe(fpConn(`URL=${url}`));
+    // Both arrivals converge on the undecorated password itself.
+    expect(fpConn(`URL=${url}`)).toBe(fingerprint("hunterpw", HMAC_KEY));
+  });
+
+  test("a password starting with a quote agrees across encodings too", () => {
+    // The mirror image: `\"hunterpw` has no BARE leading quote, so the strip
+    // used to skip it and the decoded `"hunterpw` hashed with its quote on.
+    const url = 'mongodb://app:"hunterpw@db.internal/prod';
+    expect(fpConn(JSON.stringify({ url }))).toBe(fpConn(`URL=${url}`));
+  });
+
+  test("a \\u0022-escaping encoder agrees as well", () => {
+    // Same closing quote, third spelling. An escape-aware quote-strip taught
+    // the two-character `\"` would still split this one — the reason the fix
+    // is decode order, not a smarter strip.
+    const url = 'mongodb://app:hunterpw"@db.internal/prod';
+    const body = JSON.stringify({ url }).replace(/\\"/g, "\\u0022");
+    expect(fpConn(body)).toBe(fpConn(`URL=${url}`));
+  });
+
+  test("distinct quote-bearing passwords stay distinct", () => {
+    expect(fpConn(JSON.stringify({ url: 'mongodb://app:alpha9z"@db.internal/prod' }))).not.toBe(
+      fpConn(JSON.stringify({ url: 'mongodb://app:alpha9x"@db.internal/prod' })),
+    );
+  });
+
+  test("escape-free fingerprints are pinned — no silent rotation", () => {
+    // The ux_leak_fp index keys on these values with no migration path, and
+    // every rule except connection-string and private-key has an alphabet
+    // excluding backslash and quote, so its stored rows must NEVER rotate.
+    // This golden value has survived both fingerprint reworks; a diff here
+    // means orphaning every stored row, not a harmless refactor.
+    expect(fingerprint("AKIAZQ3DRSTUVWXY2345", HMAC_KEY)).toBe(
+      "226a219ccad33f919765e314dd7ec13d3135b37dc8ce19ac99c68bf97e575381",
+    );
   });
 
   test("an escaped backslash does not decode into the escape after it", () => {
