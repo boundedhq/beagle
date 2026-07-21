@@ -124,17 +124,26 @@ export class Store {
     const v = pragmaNumber(db, "user_version");
     if (v > SCHEMA_VERSION) throw versionError(v); // a newer store: upgrade beagle
     // Files initialized before that ordering fix have NONE baked into the
-    // header, and the pragma above cannot change an existing file — only a
-    // full VACUUM can (outside any transaction; it rebuilds the db with the
-    // connection's pending INCREMENTAL). Probe the header, not user_version:
-    // the fix shipped inside the v6 commit, so migrated v6 stores carry NONE
-    // too. One-time per store — converted files read INCREMENTAL and skip
-    // this — but it rewrites the whole db, so a multi-GB store makes this
-    // open slow, once. Best-effort: on failure (disk too full to rebuild,
-    // say) reclaim() stays the no-op it already was and the next open
-    // retries; never brick capture over a housekeeping step.
+    // header, and a pragma cannot change an existing file — only a full
+    // VACUUM can (outside any transaction; it rebuilds the db with the
+    // connection's PENDING auto_vacuum, pinned inside the block so this
+    // can't decay into an every-open full rebuild if the pragma up top ever
+    // moves). Probe the header, not user_version: the fix shipped inside
+    // the v6 commit, so migrated v6 stores carry NONE too. One-time per
+    // store — converted files read INCREMENTAL and skip this — but it
+    // rewrites the whole db, so a multi-GB store makes this open slow,
+    // once. The rebuild rides through the WAL, which keeps its high-water
+    // size until close; checkpoint so conversion doesn't park a db-sized
+    // -wal next to the file it just shrank (panicPurge does the same).
+    // Best-effort: on failure (disk too full to rebuild, say) reclaim()
+    // stays the no-op it already was and the next open retries; never
+    // brick capture over a housekeeping step.
     if (pragmaNumber(db, "auto_vacuum") === 0) {
-      try { db.exec("VACUUM"); } catch { /* still NONE; retry next open */ }
+      try {
+        db.exec("PRAGMA auto_vacuum=INCREMENTAL");
+        db.exec("VACUUM");
+        db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+      } catch { /* still NONE; retry next open */ }
     }
     db.exec(SCHEMA_SQL); // fresh DBs get every column
     if (v > 0 && v < SCHEMA_VERSION) migrate(db, v); // bring old stores forward, data intact

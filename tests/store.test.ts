@@ -546,6 +546,7 @@ describe("Retention & purge", () => {
     // header — not just this connection's pending setting — reads INCREMENTAL.
     const store = Store.open(dir);
     expect(store.pragma("auto_vacuum")).toBe(2);
+    expect(store.pragma("freelist_count")).toBe(0); // the stranded pages went with it
     // And reclaim must now actually work on this file: fill, evict to a cap,
     // and the bytes on disk — not an internal tally — have to come down.
     const filler = (i: number) =>
