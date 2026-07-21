@@ -1,6 +1,6 @@
 // CLI command surface (design §6.9): the whole product headless. Reads open
 // the store read-only (work daemon-down); live actions ride the socket.
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmdirSync, rmSync, statSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve as resolvePath } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -18,6 +18,7 @@ import { sessionHeadlines } from "../viewer/session-view";
 import { buildDetail, leakSpansFor, leakTypesFor } from "../viewer/detail";
 import { secretName } from "../notifier/alert-copy";
 import { buildCodexOtelArgs, buildCodexOtelEnv, buildHookSettings, buildOtelEnv, mergeHookIntoSettings } from "../parsers/otlp-map";
+import { codexSessionsRoot } from "../adapters/codex-rollout-tailer";
 import { buildExtensionRedirect, buildRedirectConfig, readFirstConfig, writeRedirectConfig, writeRedirectExtension } from "../install/config-redirect";
 import { AGENTS, buildRunEnv, runBaseUrl } from "./agents";
 import { BEAGLE_VERSION } from "../core/version";
@@ -198,12 +199,26 @@ function daemonWhy(d: DaemonInfo): string | null {
     : "idle — winds down within a few minutes";
 }
 
+// True if codex has written any session logs under `dir` — the source Beagle
+// reads codex's assistant replies from (its OTel self-report omits them). A lone
+// dotfile (e.g. a macOS .DS_Store) doesn't count as a real session log.
+function hasCodexSessionLogs(dir: string): boolean {
+  try {
+    return existsSync(dir) && readdirSync(dir).some((name) => !name.startsWith("."));
+  } catch {
+    return false;
+  }
+}
+
 export function cmdStatus(
   stateDir: string,
   daemonUp: DaemonInfo | null = null,
   // Injectable so tests don't shell out to launchctl/systemctl.
   isServiceActive: (kind: ServiceKind, path: string) => boolean = (kind, path) =>
     osServiceRunner.isActive?.({ kind, path }) ?? true,
+  // codex's rollout-log root (the source of codex replies); injectable for tests.
+  // Single source of truth is the tailer, so status looks where the daemon reads.
+  codexSessions: string = codexSessionsRoot(),
 ): string {
   const row = (label: string, text: string) => label.padEnd(STATUS_GUTTER) + text;
   const cont = (text: string) => " ".repeat(STATUS_GUTTER) + text;
@@ -255,9 +270,17 @@ export function cmdStatus(
   const leaks = store?.countLeakEvents() ?? 0;
   // Agent-reported (Mode B) calls carry a known content gap — disclose it here
   // (R2, spike criterion #2) whenever any exist, not just in the docs.
-  const otelCalls = store?.queryAll<{ n: number }>(
-    "SELECT COUNT(*) AS n FROM exchanges WHERE source='otel'",
-  )[0]?.n ?? 0;
+  // One pass over exchanges: total agent-reported (Mode B) rows, and the codex
+  // subset — codex's answer is recovered from the rollout log, so a missing log
+  // is a codex-only capture gap worth surfacing below. (SUM over a bool expr is
+  // SQLite's conditional count; NULL only when the table is empty.)
+  const otelCounts = store?.queryAll<{ otel: number | null; codex: number | null }>(
+    `SELECT SUM(source='otel') AS otel,
+            SUM(source='otel' AND agent='codex') AS codex
+     FROM exchanges`,
+  )[0];
+  const otelCalls = otelCounts?.otel ?? 0;
+  const codexOtelCalls = otelCounts?.codex ?? 0;
   store?.close();
   const dbPath = join(stateDir, "beagle.db");
   const sizeMb = existsSync(dbPath) ? (statSync(dbPath).size / (1 << 20)).toFixed(1) : "0.0";
@@ -277,6 +300,13 @@ export function cmdStatus(
       // thought, so the indented block reads as two statements, not a broken one.
       lines.push(cont(`${otelCalls} agent-reported (Mode B): captured from the agent's self-report`));
       lines.push(cont("prompts and tool data still scanned · alerts can lag a few seconds"));
+    }
+    // Codex's self-report omits the model's reply; Beagle recovers it from the
+    // rollout log. If that log is absent, the reply can't be captured — flag it
+    // (with the path, so a wrong CODEX_HOME is self-diagnosing) rather than
+    // leave the turn silently answer-less.
+    if (codexOtelCalls > 0 && !hasCodexSessionLogs(codexSessions)) {
+      lines.push(cont(`▲ codex replies unavailable — no session logs in ${codexSessions} (is codex history logging on?)`));
     }
   }
   lines.push(
