@@ -321,6 +321,32 @@ function isCodexPayload(records: OtlpRecord[]): boolean {
   return false;
 }
 
+// A tool RESULT is the one display message with unbounded content — the output
+// of `cat` on a big file, a whole HTTP response — so its stored copy is capped
+// where a prompt's is not. The content here is UNTRUNCATED and the cap rides
+// along as a request: the ingest path redacts first and cuts second, because
+// cutting first can strand the head of a secret in the transcript that neither
+// redaction pass can then reach (capDisplay carries the full argument). The
+// cap counts from the output, so the `tool: ` label never eats into it and the
+// non-secret case is cut exactly where it was before the order changed.
+//
+// The memory this carries is bounded and mostly not new: scanText already
+// holds this output (plus every other chunk of the call), and the receiver
+// caps a payload at 32 MiB. So the untruncated display adds one transient copy
+// of the last chunk, freed once the row is stored — nothing retains it, as the
+// session resolver only hashes messages and the store gets the capped string.
+const TOOL_OUTPUT_DISPLAY_MAX = 4000;
+
+function toolResultDisplay(tool: string, output: string): DisplayMessage {
+  return {
+    role: "tool",
+    content: `${tool}: ${output}`,
+    displayMax: `${tool}: `.length + TOOL_OUTPUT_DISPLAY_MAX,
+    tool: sanitizeTool(tool),
+    kind: "result",
+  };
+}
+
 function buildCodexCall(o: {
   ts: number;
   convId?: string;
@@ -452,10 +478,7 @@ function mapCodexRecords(records: OtlpRecord[]): OtelCall[] {
         model: g.model,
         endpoint: `otel:codex:tool_result:${g.tool}`,
         scanText: `${g.tool}\n${g.parts.join("\n")}`,
-        display: {
-          role: "tool", content: `${g.tool}: ${g.lastOutput.slice(0, 4000)}`,
-          tool: sanitizeTool(g.tool), kind: "result",
-        },
+        display: toolResultDisplay(g.tool, g.lastOutput),
       }),
     });
   }
@@ -559,10 +582,7 @@ export function mapHookToCall(payload: unknown, ctx: OtlpContext): OtelCall | nu
       endpoint: `otel:tool_output:${toolName}`,
       request: {
         bodyBytes: new TextEncoder().encode(scanText),
-        messages: [{
-          role: "tool", content: `${toolName}: ${toolResponse.slice(0, 4000)}`,
-          tool: sanitizeTool(toolName), kind: "result",
-        }] as DisplayMessage[],
+        messages: [toolResultDisplay(toolName, toolResponse)],
       },
       response: { text: "", bodyBytes: new Uint8Array() },
       meta: { tsRequest: ts, tsResponse: ts },

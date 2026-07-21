@@ -13,6 +13,25 @@ export interface DisplayMessage extends Message {
   kind?: "call" | "result";
   callId?: string;
   detail?: string; // the originating call's short detail, shown in result headers
+  /** Cap for the STORED content, in characters — set by a mapper whose content
+   *  is unbounded (a tool result can be megabytes). Requested, not applied: the
+   *  ingest path applies it only after redaction has run, so a secret is never
+   *  cut in half before the scrub gets to look for it (see capDisplay). Absent
+   *  means uncapped, which is every other message kind today. */
+  displayMax?: number;
+}
+
+/** Apply a DisplayMessage's requested cap. MUST run after redaction, never
+ *  before: cutting first can leave the head of a secret with its closing
+ *  marker gone, and then neither pass can reach it — the rule no longer
+ *  matches the truncated text, and the value scrub is looking for a whole
+ *  value the cut destroyed. Running last is also what bounds the size: a
+ *  placeholder is not always shorter than the value it replaces (a short value
+ *  with a long type name grows), so it is the cap that guarantees the length,
+ *  not the arithmetic of the substitution. Content holding no secret is cut
+ *  exactly where it was before the order changed. */
+export function capDisplay(content: string, max?: number): string {
+  return max !== undefined && content.length > max ? content.slice(0, max) : content;
 }
 
 // A tool name is display-critical (it becomes a card header): accept only

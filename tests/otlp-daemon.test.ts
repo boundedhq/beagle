@@ -40,6 +40,24 @@ function otlpBody(_token: string, prompt: string | null, sessionId = "otel-conv-
   };
 }
 
+// Codex speaks its own codex.* schema on the same receiver (scope
+// codex_otel.log_only) — mirrors the builders in otlp.test.ts.
+function codexEvent(name: string, attrs: Record<string, string | number>) {
+  return {
+    timeUnixNano: "0",
+    observedTimeUnixNano: String(Date.now() * 1e6),
+    attributes: [
+      { key: "event.name", value: { stringValue: name } },
+      ...Object.entries(attrs).map(([key, value]) =>
+        typeof value === "number" ? { key, value: { intValue: value } } : { key, value: { stringValue: value } },
+      ),
+    ],
+  };
+}
+function codexLogs(records: unknown[]) {
+  return { resourceLogs: [{ scopeLogs: [{ scope: { name: "codex_otel.log_only" }, logRecords: records }] }] };
+}
+
 // The receiver 200s before the ingest pipeline (scan → insert → alert) runs,
 // so a fixed sleep races it under CI load.
 // Default stays under bun's 5s per-test timeout, so a real regression surfaces
@@ -178,6 +196,73 @@ describe("Mode B end-to-end through the daemon", () => {
     // …and the search index, which would otherwise hand the key back.
     expect(store.searchLiteral("MIIEowIBAAKCAQEAderivedTextRegression")).toEqual([]);
     expect(store.searchLiteral(pem)).toEqual([]);
+    store.close();
+  });
+
+  test("redact-on-capture scrubs a secret that STRADDLES the tool-output display cap", async () => {
+    // A tool result's display copy is capped (the output can be megabytes).
+    // Cutting BEFORE redacting is a hole neither pass can close: the cut lands
+    // mid-key, so the head of the key survives in the display text with no
+    // -----END----- for the private-key rule to re-match and no whole value for
+    // the literal scrub to find. The body scanned the untruncated output, so it
+    // redacts and alerts correctly — the transcript was the only leaking copy.
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    // Sized so the cap falls INSIDE the key: filler pushes the BEGIN marker
+    // close to the cut, and the key body is long enough that END lands past it.
+    const filler = "reading configuration file...\n".repeat(105); // 3150 chars
+    const keyBody = Array.from({ length: 20 }, (_, i) => `MIIEowIBAAKCAQEAstraddle${i}${"K".repeat(40)}`).join("\n");
+    const pem = `-----BEGIN RSA PRIVATE KEY-----\n${keyBody}\n-----END RSA PRIVATE KEY-----`;
+    const output = filler + pem;
+    expect(output.slice(0, 4000)).toContain("MIIEowIBAAKCAQEAstraddle"); // key material inside the cap…
+    expect(output.slice(0, 4000)).not.toContain("-----END RSA PRIVATE KEY-----"); // …its closing marker outside
+    await post(codexLogs([
+      codexEvent("codex.tool_result", {
+        "conversation.id": "otel-conv-straddle",
+        tool_name: "exec_command",
+        arguments: '{"cmd":"cat deploy/id_rsa"}',
+        output,
+      }),
+    ]));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    expect(listLeakEvents(store).length).toBe(1); // the leak still alerts
+    const call = store.getCall(store.searchLiteral("cat deploy/id_rsa")[0]!.callId)!;
+    expect(call.redacted).toBe(true);
+    // The body was always fine — it scanned the untruncated output.
+    const body = new TextDecoder().decode(call.requestBody!);
+    expect(body).not.toContain("MIIEowIBAAKCAQEAstraddle");
+    expect(body).toContain("[REDACTED:private-key:");
+    // The transcript is what the cut-then-redact order leaked.
+    const dm = JSON.stringify(call.displayMessages);
+    expect(dm).not.toContain("MIIEowIBAAKCAQEAstraddle");
+    expect(dm).toContain("[REDACTED:private-key:");
+    // …and the cap still holds, so redacting first did not grow the transcript.
+    const content = call.displayMessages![0]!.content;
+    expect(content.length).toBeLessThanOrEqual("exec_command: ".length + 4000);
+    store.close();
+  });
+
+  test("a long tool output is still capped — moving the cut must not grow transcripts", async () => {
+    // The other half of the fix above: the cap moved from the mapper to the
+    // store step, so nothing else asserts it still happens. Without this, the
+    // cap could be dropped entirely and every other test would still pass while
+    // megabytes of tool output landed in display_messages. No secret here — the
+    // point is the ordinary path, where redaction changes nothing.
+    const output = "log line that says nothing secret\n".repeat(1000); // 34k chars
+    await post(codexLogs([
+      codexEvent("codex.tool_result", {
+        "conversation.id": "otel-conv-cap",
+        tool_name: "exec_command",
+        arguments: '{"cmd":"cat build.log"}',
+        output,
+      }),
+    ]));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    const call = store.getCall(store.searchLiteral("cat build.log")[0]!.callId)!;
+    // Exactly the pre-fix length: the `tool: ` label plus 4000 chars of output.
+    expect(call.displayMessages![0]!.content.length).toBe("exec_command: ".length + 4000);
+    expect(call.displayMessages![0]!.content).toBe(`exec_command: ${output.slice(0, 4000)}`);
     store.close();
   });
 

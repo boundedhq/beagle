@@ -18,7 +18,7 @@ import { applyCaptureRedaction, redactValues, redactValuesInText } from "../tran
 import { scrubAuthHeaders } from "../core/normalize/normalize";
 import { Notifier, type AlertMessage } from "../notifier/notifier";
 import { buildAlertMessage } from "../notifier/alert-copy";
-import { detectFormat, extractActions, parseRequest, parseResponse, type DisplayMessage, type Format, type ParsedRequest, type ToolAction } from "../parsers/parsers";
+import { capDisplay, detectFormat, extractActions, parseRequest, parseResponse, type DisplayMessage, type Format, type ParsedRequest, type ToolAction } from "../parsers/parsers";
 import { startControlServer, type ControlRequest, type ControlResponse } from "./control";
 import { ViewerServer } from "../viewer/server";
 import { OtlpReceiver } from "../core/otlp/receiver";
@@ -539,8 +539,8 @@ export class Daemon {
       // and the stored response body.
       //
       // That outbound surface is the SCANNED BYTES, not the display messages.
-      // A display message is a TRUNCATED view of it: a tool result is built as
-      // `${tool}: ${output.slice(0, 4000)}` and drops the tool INPUT entirely
+      // A display message is a PARTIAL view of it: a tool result drops the tool
+      // INPUT entirely and its stored copy is capped at TOOL_OUTPUT_DISPLAY_MAX
       // (otlp-map's buildCodexCall / mapHookToCall). Indexing that copy meant a
       // secret past the cap — or one that only ever appeared in a command's
       // arguments — was scanned, alerted and redacted, while `beagle search`
@@ -556,8 +556,10 @@ export class Daemon {
       // buildSearchText documents for the wire path, paid only when the two
       // differ. And the tool NAME, which a Claude Code turn reports as its own
       // attribute (buildTurnCall's scanned body is inputs-only) though it rode
-      // the real outbound request. Never a tool message's CONTENT: that is the
-      // truncated prefix the bytes above already cover in full.
+      // the real outbound request. Never a tool message's CONTENT: it is the
+      // tool's OUTPUT, which the bytes above already cover in full — and it is
+      // uncapped here (the cap is applied at store time, below), so appending
+      // it would also bloat the index with a second copy of every tool result.
       for (const m of call.request.messages ?? []) {
         const flat = String(m.content);
         const tool = (m as DisplayMessage).tool; // a parser label; core's Message carries none
@@ -592,12 +594,29 @@ export class Daemon {
       // Persist the self-report's structure: Mode B bodies are scan text, not
       // provider JSON, so the viewer can't re-parse them the way it does wire
       // bodies. Scrubbed by value like summary/searchText (same rationale).
+      //
+      // SCRUB THEN CAP, in that order, and it is a redaction boundary rather
+      // than a formatting detail. A tool result arrives here untruncated and
+      // carrying its own displayMax; capping first is what the mapper used to
+      // do, and it left a hole neither pass could close — a secret straddling
+      // the cut lost the tail that its rule keys on (a PEM without its END
+      // line stops matching), so a re-scan of the cut text finds nothing, and
+      // the value scrub is searching for a whole value the cut destroyed. The
+      // body redacted and the leak alerted; only the transcript kept the key.
+      // Capping after means the value is always whole when the scrub runs, and
+      // the cap still bounds what is stored because it runs last — not because
+      // a placeholder is shorter than the secret (capDisplay: it need not be).
+      // Uncapped messages (prompts, tool CALLS) pass through as before —
+      // displayMax is absent on them.
       const displayMessages = redaction?.heldOut
         ? null
-        : (call.request.messages ?? []).map((m) => ({
+        : (call.request.messages ?? []).map(({ displayMax, ...m }: DisplayMessage) => ({
             ...m, // keep display labels (tool/kind) — only the content is scrubbed
             role: m.role,
-            content: redaction ? redactValuesInText(String(m.content), redaction.values) : String(m.content),
+            content: capDisplay(
+              redaction ? redactValuesInText(String(m.content), redaction.values) : String(m.content),
+              displayMax,
+            ),
           }));
       // Cross-batch turn stitching: Claude Code flushes the prompt in one OTLP
       // batch and the response seconds later in another. A response-only
