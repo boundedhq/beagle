@@ -9,6 +9,7 @@ import { Store } from "../src/core/store/store";
 import { listCalls, listLeakEvents } from "../src/viewer/feed-query";
 import { listSessions } from "../src/viewer/session-view";
 import { buildDetail } from "../src/viewer/detail";
+import { parseRequest } from "../src/parsers/parsers";
 import { compileRules, scan } from "../src/core/scanner/engine";
 import { loadRuleFile } from "../src/core/scanner/rules";
 import { createServer, type Server } from "node:net";
@@ -247,8 +248,10 @@ describe("Daemon end-to-end", () => {
   // Drives a streamed reply through the proxy and returns the stored row. The
   // frames go out as one chunk; what matters here is the framing the capture
   // path keeps, not how many TCP writes carried it. `extraHeaders` must end
-  // with its own CRLF when given.
-  async function streamedCall(runId: string, marker: string, frames: string, extraHeaders = "") {
+  // with its own CRLF when given. `body` overrides the default well-formed
+  // request for tests about the REQUEST side being broken — the marker must
+  // then appear in the override, since it is what the poll searches for.
+  async function streamedCall(runId: string, marker: string, frames: string, extraHeaders = "", body = requestBody(marker)) {
     let replied = false;
     const server = createServer((sock) => {
       sock.on("data", () => {
@@ -269,7 +272,7 @@ describe("Daemon end-to-end", () => {
     // than leaking a listening socket and an open store handle behind it.
     let store: Store | undefined;
     try {
-      await sendThroughProxy(daemon.proxyPort, runId, requestBody(marker));
+      await sendThroughProxy(daemon.proxyPort, runId, body);
       let hit: { callId: string } | undefined;
       for (let i = 0; i < 40 && !hit; i++) {
         await Bun.sleep(50); // stays under bun's 5s default so a miss reports, not hangs
@@ -914,6 +917,43 @@ describe("Daemon end-to-end", () => {
     } finally {
       await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
     }
+  });
+
+  test("a reply-split secret is masked in the view even when the REQUEST doesn't parse", async () => {
+    // The projection gate used to require `parsed`, but the reply parses on its
+    // own: a truncated or malformed request body still ships with a streamed
+    // answer whose reassembly is exactly the re-derive the projection exists to
+    // preempt. Before the fix this row stored NO transcript, so the viewer
+    // rebuilt the split key whole from the stored frames — under a header that
+    // read "secrets masked in storage" (redacted=1 via the derived OR), with no
+    // placeholder anywhere for extractLeaks to highlight. The value scrub can't
+    // reach it either: the whole key never sits contiguously in any stored byte.
+    const key = "AKIAZQ3DRSTUVWXY2345";
+    // Cut mid-string, the shape a captureState "truncated" body actually has.
+    const reqBody = '{"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "unparseable request, reply splits a key';
+    expect(parseRequest("anthropic-messages", new TextEncoder().encode(reqBody))).toBeNull();
+    const frames = deltaFrame("key AKIAZQ3DRSTUV") + deltaFrame("WXY2345 done");
+    // Premise: whole in no frame and absent from the request, so no body scan
+    // matches anything — the row's redacted flag comes from the derived pass alone.
+    expect(scanRaw(frames)).toEqual([]);
+    expect(scanRaw(reqBody)).toEqual([]);
+    const call = await streamedCall("run-unparseable-req", "unparseable request", frames, "", reqBody);
+    // The header line this row prints is only honest if the reply really is masked.
+    expect(call.redacted).toBe(true);
+    expect(call.displayMessages).not.toBeNull();
+    expect(JSON.stringify(call.displayMessages)).not.toContain(key);
+    const d = buildDetail(call, []);
+    expect(d.responseText).not.toContain(key);
+    expect(d.responseText).toContain("[REDACTED:aws-access-key-id:");
+    // …and the placeholder is discoverable, so the masked reply is highlighted.
+    expect(d.leaks.some((l) => l.secretType === "aws-access-key-id")).toBe(true);
+    // The request half stays honestly absent — the empty system head must not
+    // surface as a phantom prompt or message.
+    expect(d.system).toBeNull();
+    expect(d.messages).toEqual([]);
+    // From the provider, not the agent: a reply-side secret still never alerts.
+    await captured(daemon.socketPath);
+    expect(alerts.length).toBe(0);
   });
 
   test("a pasted QUOTED .env line alerts, end to end", async () => {
