@@ -70,4 +70,13 @@ describe("detection precision (ship gate)", () => {
     if (misses.length > 0) console.error("missed:", misses);
     expect(misses).toEqual([]);
   });
+
+  test("corpus size matches the count the README cites", () => {
+    // README.md states this gate as "< 5% of 22 curated negatives" (budgets
+    // table + the detector FAQ). The bare percentage would overclaim without
+    // the denominator — < 5% of 22 is "at most one snippet" — so the number is
+    // load-bearing copy. If this corpus grows or shrinks, update the README in
+    // the same change; this pins the two together.
+    expect(NEGATIVES.length).toBe(22);
+  });
 });
