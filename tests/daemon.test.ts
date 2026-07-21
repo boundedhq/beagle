@@ -1110,6 +1110,9 @@ describe("Daemon end-to-end", () => {
     const store = Store.openReadOnly(stateDir);
     const ex = listCalls(store, 10).find((e) => e.hasLeak)!;
     expect(ex.summary).not.toContain("AKIA");
+    // ...and the cap lands past the placeholder, not through it: a `[RED…`
+    // stump reads as a corrupted line and names no secret type.
+    expect(ex.summary).toMatch(/\[REDACTED:aws-access-key-id:[0-9a-f]{6}\]/);
     store.close();
     silent.server.close();
   });

@@ -121,6 +121,33 @@ describe("CLI commands (headless loop, R12)", () => {
     expect(out).toContain("AWS access key"); // structured tier: no "(possible)" marker
   });
 
+  test("leaks: the headline cap lands past a redaction placeholder, never through it", () => {
+    // The leak log is where naming the secret TYPE matters most, and its 64-char
+    // headline cap is tighter than any summary cap — so a placeholder straddling
+    // it is ordinary, not exotic. A bare slice left `[REDACTED:aws-access-k…`:
+    // unreadable as a mask, and silent about which secret it stands for.
+    const store = Store.open(stateDir);
+    const id = ulid();
+    const placeholder = "[REDACTED:aws-access-key-id:6cc699]";
+    store.insertCall({
+      id, sessionId: "s3", runId: "r3", source: "wire", agent: "claude",
+      provider: "anthropic", endpoint: "/v1/messages", tsRequest: Date.now(),
+      summary: `${"x".repeat(50)}${placeholder} and a tail past the cap`,
+      scanState: "ok", captureState: "ok", sessionTier: "prefix",
+      requestBody: null, requestHeaders: null, responseBody: null,
+      responseHeaders: null, sseRaw: null, searchText: "",
+    });
+    store.upsertLeakEvent({
+      fingerprint: "fp3", sessionId: "s3", detector: "aws-access-key-id",
+      secretType: "aws-access-key-id", severity: "high", confidenceTier: "structured",
+      destination: "anthropic", callId: id, ts: Date.now(),
+    });
+    store.close();
+    const out = cmdLeaks(stateDir);
+    expect(out).toContain(`${placeholder}…`); // whole, then the honest ellipsis
+    expect(out).not.toMatch(/\[REDACTED:[^\]\n]*…/); // no bisected stump anywhere
+  });
+
   test("show: speaks the dashboard's language and drops internals", () => {
     const out = cmdShow(stateDir, callId.slice(0, 8));
     expect(out).toContain("claude-sonnet-5");           // model

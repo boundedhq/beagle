@@ -1321,7 +1321,7 @@ export function buildSummary(
         ? firstLine(responseText, sent ? 80 : 100)
         : null;
   if (got !== null) {
-    return sent ? `${sent} → ${got}` : got;
+    return clampLine(sent ? `${sent} → ${got}` : got, SUMMARY_CAP);
   }
   if (!parsed) return "unparsed call (raw view available)";
   if (parsed.messages.length === 0) return "(no message content)";
@@ -1329,8 +1329,24 @@ export function buildSummary(
   // Mode B records are often tool-output-only (role "tool") or assistant-only —
   // their content should show ("ToolSearch: …"), not a bare "N messages" count.
   const pick = [...parsed.messages].reverse().find((m) => m.role === "user") ?? parsed.messages.at(-1)!;
-  return firstLine(pick.content, 100);
+  return clampLine(firstLine(pick.content, 100), SUMMARY_CAP);
 }
+
+// The assembled line's own bound. Each half already clamps, but the halves
+// COMPOSE — an ask plus three tool details is four independent run-pasts, which
+// stacked to 274 chars of real placeholder (541 for one forged in captured
+// content) and quietly walked back the "summary became unbounded" fix. Clamping
+// once here keeps that invariant statable again: SUMMARY_CAP, plus at most a
+// SINGLE placeholder run-past.
+//
+// 200 sits above the ~162 a summary of recognized verbs reaches, so ordinary
+// rows pass through untouched — but NOT every placeholder-free row does, and
+// the claim is worth stating honestly: verb() returns an unrecognized tool's
+// name verbatim and `tool` arrives unbounded, so a turn full of long MCP names
+// can cross 200 on name length alone and lose the trailing `+N` inside the cut.
+// That is the cap doing its job rather than a silent one — the ellipsis it
+// leaves is the same "there was more" signal `+N` carries.
+const SUMMARY_CAP = 200;
 
 // The request's newest content, judged from its trailing messages only (the
 // daemon has no previous-call diff): a trailing user message, or a trailing
@@ -1401,9 +1417,31 @@ function summarizeActions(actions: ToolAction[], compact = false): string {
   return extra > 0 ? `${shown} +${extra}` : shown;
 }
 
+// Bound a single line to `max` for display. Every caller clamps text
+// buildSummary already redacted (the scrub runs before EVERY truncation,
+// above), so on a leak row a placeholder straddling `max` is the NORMAL case —
+// and a bare slice leaves `my key [RED…`, which reads as a corrupted
+// transcript and drops the secret TYPE the placeholder exists to name.
+// clampRedacted runs past the closing bracket instead; the ellipsis stays for
+// the genuinely-truncated case.
+//
+// The overshoot is bounded by clampRedacted's own ceiling: 39 chars for a real
+// placeholder (the longest rule id is 21), 128 for one a captured tool result
+// forged in its content. That is why the quoted-ask regexes in
+// commands.ts/app.js bound that half at 200 rather than 40 — see the note
+// there — and why the assembled line clamps once more at SUMMARY_CAP.
+function clampLine(line: string, max: number): string {
+  if (line.length <= max) return line;
+  const clamped = clampRedacted(line, max - 1);
+  // Running past to the end dropped nothing — an ellipsis would be a lie.
+  if (clamped.length >= line.length) return line;
+  // The outer SUMMARY_CAP pass can land right after a half's own ellipsis;
+  // one mark already says "truncated", and `……` just reads as a typo.
+  return clamped.endsWith("…") ? clamped : clamped + "…";
+}
+
 function firstLine(s: string, max: number): string {
-  const line = s.split("\n")[0] ?? "";
-  return line.length > max ? line.slice(0, max - 1) + "…" : line;
+  return clampLine(s.split("\n")[0] ?? "", max);
 }
 
 function buildSearchText(parsed: ParsedRequest | null, call: CapturedCall, outboundParts: string[]): string {
