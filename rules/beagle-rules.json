@@ -13,8 +13,8 @@
     },
     {
       "id": "aws-secret-access-key",
-      "description": "AWS secret access key",
-      "regex": "(?:aws|secret[_-]?access)[a-zA-Z_ ]{0,20}[\"':=\\s]{1,5}([A-Za-z0-9/+=]{40})\\b",
+      "description": "AWS secret access key. Each separator may carry a leading backslash because the scanner reads the wire body, not the decoded chat message: a pasted KEY=\"value\" .env line arrives JSON-encoded as KEY=\\\"value\\\", so the quote's escape sits between the keyword and the secret. Without it the quoted form fell to the quiet tier and never alerted while the unquoted form did. The backslash is only accepted when it ESCAPES a separator (\\\\?[\"':=\\s], not a bare \\\\ in the class) — a bare one would make Windows and UNC paths like aws\\<40-hex-digest> fire, and this rule is a known FP source.",
+      "regex": "(?:aws|secret[_-]?access)[a-zA-Z_ ]{0,20}(?:\\\\?[\"':=\\s]){1,5}([A-Za-z0-9/+=]{40})\\b",
       "flags": "gi",
       "keywords": ["aws", "secret_access", "secret-access"],
       "secretGroup": 1,

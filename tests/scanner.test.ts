@@ -143,6 +143,63 @@ describe("case sensitivity (precision)", () => {
   });
 });
 
+describe("pasted .env lines, JSON-encoded as they arrive on the wire", () => {
+  // The scanner sees the request body, not the chat message: a pasted .env line
+  // reaches it JSON-encoded, so the quotes around a quoted assignment arrive as
+  // \" — a backslash sits between the key name and the value. The separator
+  // class must absorb that escape, or the quoted form silently drops to the
+  // quiet tier while the unquoted form alerts. Tier matters because
+  // AlertEngine.process only fires the loud alert on tier === "structured":
+  // a "possible" finding is recorded but the user is never told.
+  const SECRET = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYZZZZZKEY42";
+  const wireBody = (line: string) =>
+    JSON.stringify({ messages: [{ role: "user", content: `here is my env:\n${line}\nplease use it` }] });
+
+  const SHAPES: Array<[string, string]> = [
+    ["unquoted", `AWS_SECRET_ACCESS_KEY=${SECRET}`],
+    ["double-quoted", `AWS_SECRET_ACCESS_KEY="${SECRET}"`],
+    ["single-quoted", `AWS_SECRET_ACCESS_KEY='${SECRET}'`],
+    ["spaced and quoted", `aws_secret_access_key = "${SECRET}"`],
+    ["json field", `{"aws_secret_access_key": "${SECRET}"}`],
+  ];
+
+  for (const [shape, line] of SHAPES) {
+    test(`${shape} assignment alerts at the structured tier`, () => {
+      const body = wireBody(line);
+      const hit = scanText(body).find((x) => x.secretType === "aws-secret-access-key");
+      expect(hit).toBeDefined();
+      expect(hit?.tier).toBe("structured");
+      expect(hit?.severity).toBe("high");
+      // Span covers the secret alone: redact-on-capture splices these offsets
+      // out of the stored body, so a span that ate the \" would corrupt the JSON.
+      expect(body.slice(hit!.start, hit!.end)).toBe(SECRET);
+    });
+  }
+
+  test("every shape fingerprints identically (one secret, not five)", () => {
+    const fps = new Set(
+      SHAPES.map(([, line]) =>
+        scanText(wireBody(line)).find((x) => x.secretType === "aws-secret-access-key")!.fingerprint),
+    );
+    expect(fps.size).toBe(1);
+  });
+
+  // The escape is only a separator when it ESCAPES one. A backslash accepted
+  // on its own would turn every Windows path under an aws-ish directory into a
+  // loud alert, because a 40-char digest is an ordinary path segment.
+  const PATHS: Array<[string, string]> = [
+    ["windows path", "C:\\aws\\3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5e\\cache"],
+    ["unc share", "\\\\server\\aws\\share\\3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5e"],
+    ["home dir listing", "ls ~/.aws\\3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5e"],
+    ["path to a key-shaped segment", `the path is C:\\aws\\${SECRET}`],
+  ];
+  for (const [shape, text] of PATHS) {
+    test(`a backslash as a PATH separator stays silent: ${shape}`, () => {
+      expect(scanText(wireBody(text)).some((x) => x.secretType === "aws-secret-access-key")).toBe(false);
+    });
+  }
+});
+
 describe("fingerprint stability across wrapping and wire encoding", () => {
   const BODY = "MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn";
   const pem = (body: string) =>
