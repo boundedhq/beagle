@@ -1449,6 +1449,11 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
   // pi extension, or the Mode-B hook settings). Named per RUN so concurrent
   // runs of one agent don't collide.
   let cleanupFile: string | null = null;
+  // Cleared only by a fail-open branch that runs the agent WITHOUT capture (the
+  // codex no-key case below) — gates the early "capture active" confirmation
+  // off for a run that captures nothing by design, alongside that branch's own
+  // "running WITHOUT capture" notice.
+  let captureEnabled = true;
   if (telemetry) {
     // Nothing goes on the wire: point the agent's own OTel exporter at the
     // daemon's loopback receiver, authed by the per-session run token.
@@ -1547,6 +1552,7 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
         // No key to authenticate the redirect — leave codex untouched.
         finalArgs = agentArgs;
         modeEnv = {};
+        captureEnabled = false;
         process.stderr.write(
           `beagle ▲ ${agentName} has no OPENAI_API_KEY (env or ~/.codex/auth.json) — running WITHOUT capture.\n` +
             `  Export OPENAI_API_KEY (or 'codex login --api-key') to enable proxy capture.\n`,
@@ -1561,8 +1567,27 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
   // "this run captured nothing" back-to-back would be contradictory advice.
   const grad = new GraduationTracker(stateDir);
   const shouldNudge = grad.recordRunAndCheck(agentName);
+  // An agent the user deliberately excluded from capture gets no capture-health
+  // signals at all — neither the early "capture active" confirmation nor the
+  // end-of-run zero-capture warning (zero rows there is configured behavior, not
+  // a failure). Read once, reused by both.
+  const excluded = loadConfig(stateDir).excludedAgents.includes(agentName);
   const t0 = Date.now();
+  // Positive mid-session feedback: the moment the FIRST call is actually
+  // captured, print a one-time "capture active" line — so a long session isn't
+  // left believing it's watched only to discover at the very end that it
+  // wasn't. Polls the SAME arrival predicate the end-of-run tripwire uses (a
+  // deadline of 0 makes each poll one cheap store check); armed only in a
+  // capture-enabled, non-excluded mode. stopWatch() clears the interval at exit
+  // — and since it fires only when a call arrived, the end-of-run "NOT captured"
+  // path (which then sees that same call) can't contradict it.
+  const stopWatch = watchForFirstCapture(
+    captureEnabled && !excluded,
+    () => (telemetry ? otelCallsArrivedSince(stateDir, t0, 0) : runCallsArrived(stateDir, runId, 0)),
+    () => process.stderr.write(`beagle ● capture active — ${agentName} traffic is being watched.\n`),
+  );
   const exitCode = await execAgent(daemon.socketPath, realBinary, finalArgs, modeEnv, cleanupFile);
+  stopWatch();
   // Both modes have silent zero-capture failure modes the agent itself never
   // surfaces — say so loudly rather than let the user believe the run was
   // watched. Gated the same way for both: near-instant runs (--help, version
@@ -1571,7 +1596,6 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
   // excluded from capture (zero rows there is configured behavior, not a
   // failure). A rare false positive remains (e.g. `codex login`, which sends
   // no model traffic) — the right trade against silently unwatched runs.
-  const excluded = loadConfig(stateDir).excludedAgents.includes(agentName);
   let warned = false;
   if (Date.now() - t0 >= 3_000 && !excluded) {
     if (telemetry) {
@@ -1686,6 +1710,48 @@ export async function runCallsArrived(stateDir: string, runId: string, deadlineM
     if (Date.now() - t0 >= deadlineMs) return false;
     await Bun.sleep(250);
   }
+}
+
+// The positive counterpart to the zero-capture tripwires above: while the agent
+// runs, poll `check` (an arrival predicate) and the FIRST time it returns true,
+// fire `onActive` exactly once — Beagle is a trust tool, so a long session needs
+// mid-run proof it's watched, not only an end-of-run warning when it ISN'T.
+// Returns a stop() the caller MUST invoke when the agent exits: the interval is
+// unref'd (it can never keep the process alive past the agent) and a poll still
+// in flight when stop() lands can't fire after the fact. `enabled` false — an
+// excluded agent, or a fail-open no-capture run — arms nothing at all. Errors
+// from `check` are swallowed: a transient store hiccup must never disrupt the
+// run. Exported for tests.
+export function watchForFirstCapture(
+  enabled: boolean,
+  check: () => Promise<boolean>,
+  onActive: () => void,
+  intervalMs = 500,
+): () => void {
+  if (!enabled) return () => {};
+  let done = false;
+  let busy = false; // one poll at a time — a slow check must not stack
+  const timer = setInterval(() => {
+    if (done || busy) return;
+    busy = true;
+    check()
+      .then((arrived) => {
+        if (arrived && !done) {
+          done = true;
+          clearInterval(timer);
+          onActive();
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        busy = false;
+      });
+  }, intervalMs);
+  timer.unref?.();
+  return () => {
+    done = true; // block a late in-flight poll from firing post-exit
+    clearInterval(timer);
+  };
 }
 
 // Count quiet-tier ("possible") leak events recorded since `sinceTs` — the

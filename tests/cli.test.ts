@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, cmdUninstall, countPossibleLeaksSince, detectLine, interpretAskAnswer, isLoopbackHookEndpoint, otelCallsArrivedSince, parseRunArgs, readCodexApiKey, resolveRunMode, runCallsArrived } from "../src/cli/commands";
+import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, cmdUninstall, countPossibleLeaksSince, detectLine, interpretAskAnswer, isLoopbackHookEndpoint, otelCallsArrivedSince, parseRunArgs, readCodexApiKey, resolveRunMode, runCallsArrived, watchForFirstCapture } from "../src/cli/commands";
 import { buildRunEnv, AGENTS } from "../src/cli/agents";
 import { Store, type CallRecord } from "../src/core/store/store";
 import { ulid } from "../src/core/store/ulid";
@@ -915,6 +915,52 @@ describe("runCallsArrived (the wire zero-capture tripwire's predicate)", () => {
     });
     store2.close();
     expect(await otelCallsArrivedSince(stateDir, Date.now() - 1000, 400)).toBe(true);
+  });
+});
+
+describe("watchForFirstCapture (the early 'capture active' confirmation)", () => {
+  test("fires exactly once the first time a call is captured — never per-call", async () => {
+    // Faithful wiring: poll the SAME wire predicate the run path uses against a
+    // store that gains a row mid-run. Materialize the store first so a missing
+    // row reads as "not captured yet" (an ABSENT store deliberately returns
+    // true — don't cry wolf — which would fire the confirmation immediately).
+    const stateDir = mkdtempSync(join(tmpdir(), "beagle-cap-"));
+    Store.open(stateDir).close();
+    let fires = 0;
+    const stop = watchForFirstCapture(true, () => runCallsArrived(stateDir, "run-live", 0), () => { fires++; }, 20);
+    await Bun.sleep(80);
+    expect(fires).toBe(0); // nothing captured yet → silence
+    const store = Store.open(stateDir);
+    store.insertCall({
+      id: ulid(), sessionId: "s1", runId: "run-live", source: "wire", agent: "codex",
+      provider: "openai", endpoint: "/v1/responses", tsRequest: Date.now(),
+      scanState: "ok", captureState: "ok", sessionTier: "run",
+      requestBody: null, requestHeaders: null, responseBody: null,
+      responseHeaders: null, sseRaw: null, searchText: "x",
+    });
+    store.close();
+    await Bun.sleep(120); // several more polls — the predicate stays true
+    stop();
+    expect(fires).toBe(1); // once, not once-per-poll
+  });
+
+  test("an excluded / no-capture run (enabled=false) never fires — it arms no poll at all", async () => {
+    let fires = 0;
+    // The predicate WOULD say captured, but a disabled watcher polls nothing.
+    const stop = watchForFirstCapture(false, () => Promise.resolve(true), () => { fires++; }, 20);
+    await Bun.sleep(80);
+    stop();
+    expect(fires).toBe(0);
+  });
+
+  test("stop() blocks a confirmation that would otherwise land after the agent exits", async () => {
+    let fires = 0;
+    let captured = false;
+    const stop = watchForFirstCapture(true, () => Promise.resolve(captured), () => { fires++; }, 20);
+    stop(); // agent exited before anything was captured
+    captured = true; // a call would now satisfy the predicate…
+    await Bun.sleep(80);
+    expect(fires).toBe(0); // …but the watcher is already stopped
   });
 });
 
