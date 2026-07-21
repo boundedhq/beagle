@@ -626,11 +626,14 @@ describe("JSON-escape-prefixed secrets (leading-boundary regression)", () => {
     expect(maskJsonEscapes(`x${"\\".repeat(40)}ny`)).toBe(`x${"\\".repeat(8)}${" ".repeat(33)}y`);
   });
 
-  // The split is what keeps a literal backslash from being erased. An odd run
-  // longer than one is never a pure nested escape: a newline at depth d takes
-  // 2^(d-1) backslashes, so 1, 2, 4, 8 are escapes and 3 is a typed backslash
-  // followed by a depth-1 one. Blanking all of 3 erased the backslash that
-  // stops `C:\aws\` + newline + digest reading as an aws-keyed secret.
+  // The split is what keeps a literal backslash from being erased. A LETTER
+  // escape's pure nested run is a power of two — a newline at depth d takes
+  // 2^(d-1) backslashes, so 1, 2, 4, 8 — which makes a 3-run before `n` a
+  // typed backslash followed by a depth-1 escape. (Not so before a quote: a
+  // depth-2 `\"` is a pure 3-run, still read the literal way — the engine.ts
+  // ESCAPE_RUN comment weighs that trade.) Blanking all of 3 erased the
+  // backslash that stops `C:\aws\` + newline + digest reading as an aws-keyed
+  // secret.
   test("a run splits into kept literals and a blanked 2^k escape", () => {
     expect(maskJsonEscapes(String.raw`a\nb`)).toBe("a  b"); // depth 1
     expect(maskJsonEscapes(String.raw`a\\nb`)).toBe("a   b"); // depth 2
@@ -942,6 +945,69 @@ describe("secrets nested in tool-call arguments (R5)", () => {
     expect(fp(pem)).toBe(fp(nest(pem, 1))); // depth 1 matches plaintext
     expect(fp(nest(pem, 2))).toBeDefined(); // still detected...
     expect(fp(nest(pem, 2))).not.toBe(fp(pem)); // ...but under a second fingerprint
+  });
+});
+
+// The engine's caps are deadline backstops and both are deliberately SILENT —
+// nothing in a Finding[] says one was hit (the daemon documents the trade:
+// match 501 of a rule is invisible to every downstream pass, on a row that
+// still reads "ok"). Silent means the SEMANTICS only live here: a cap that
+// quietly became per view, or a probe budget that quietly stopped binding,
+// would pass every other test in this file.
+describe("scan caps (silent deadline backstops)", () => {
+  const NPM = "npm_Zx9Yw8Vu7Tt6Ss5Rr4Qq3Pp2Oo1Nn0MmLl2K";
+  const BS = String.fromCharCode(92);
+
+  test("the per-rule finding cap is shared across the masked and raw views", () => {
+    // `\` + npm_… : the mask reads the token's own leading `n` as a \n escape
+    // and blanks it, so ONLY the raw view can match this occurrence — the shape
+    // from "a literal backslash cannot hide a secret…" above, reused here
+    // because it is what tells the two views apart. Control first: alone, the
+    // raw view does find it, so the zero below is the budget's doing.
+    const rawOnly = `${BS}${NPM}`;
+    expect(scanText(`path ${rawOnly} end`).some((f) => f.secretType === "npm-token")).toBe(true);
+    // Raw-only occurrences FIRST: the raw pass walks left to right, so a
+    // fresh per-view budget would report all three before span-dedup drops its
+    // re-matches of the plain region. After them, 501 plain occurrences (both
+    // views can see those) saturate the masked view's budget on their own.
+    const body = [rawOnly, rawOnly, rawOnly, ...Array.from({ length: 501 }, () => NPM)].join("\n");
+    const findings = scanText(body);
+    // budget.perRule carries between the two matchAll calls: the masked view
+    // consumed all 500, so the raw view adds NOTHING — not the 501st plain
+    // occurrence, and not the raw-only three. The cap is per rule PER BODY;
+    // a second view re-funding it would double what a crafted body can push
+    // into suppressOverlaps, which is quadratic in exactly that count.
+    expect(findings.length).toBe(500);
+    expect(findings.every((f) => f.secretType === "npm-token")).toBe(true);
+    const plainFrom = body.indexOf(`\n${NPM}`) + 1;
+    expect(findings.every((f) => f.start >= plainFrom)).toBe(true);
+    // 500 DISTINCT plain occurrences (duplicate spans would pass the lines
+    // above), and the one past the cap is exactly the 501st — the last.
+    expect(new Set(findings.map((f) => f.start)).size).toBe(500);
+    expect(findings.some((f) => f.start === body.lastIndexOf(NPM))).toBe(false);
+  });
+
+  test("the base64 decode probe stops at its budget: last funded candidate decodes, the next is skipped", () => {
+    // Rejected candidates never count toward the finding cap, so the probe
+    // budget (1<<16 per body) is the only thing bounding decode work — and
+    // exhausting it SKIPS the candidate, silently: a wrapped key behind a wall
+    // of benign base64 is a miss, not an "incomplete". That is the documented
+    // trade (the budget sits far above any realistic blob count; the worker
+    // deadline is the real bound) — pinned at the exact boundary so an
+    // off-by-one in the check, or the budget quietly ceasing to decrement,
+    // fails here and nowhere else.
+    const benign = Buffer.from("fillerdata12").toString("base64"); // 16 chars, entropy 3.63: clears the 3.3 pre-gate, decodes to nothing any rule knows
+    const real = Buffer.from("AKIAZQ3DRSTUVWXY2345\n").toString("base64");
+    const found = (benignCount: number) =>
+      scanText([...Array.from({ length: benignCount }, () => benign), real].join("\n"))
+        .some((f) => f.secretType === "base64-wrapped-secret");
+    // Control: the wrapped key is exactly what the probe exists to report, and
+    // the benign blobs around it stay silent.
+    expect(
+      scanText([benign, benign, benign, real].join("\n")).map((f) => f.secretType),
+    ).toEqual(["base64-wrapped-secret"]);
+    expect(found((1 << 16) - 1)).toBe(true); // the real key is candidate 65536: the LAST funded probe
+    expect(found(1 << 16)).toBe(false); // candidate 65537: budget exhausted, silently skipped
   });
 });
 

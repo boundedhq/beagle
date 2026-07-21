@@ -219,9 +219,13 @@ export function derivedScanText(parts: string[]): string {
 
 /** Where `rest` begins in `derivedScanText([...head, ...rest])`, so a caller can
  *  split findings between the two halves without joining `head` a second time
- *  just to measure it — on a long conversation that join is megabytes. Lands one
- *  past the last head part, on the separator: a finding starting exactly there
- *  counts as head, which is the fail-safe side for the outbound/inbound split. */
+ *  just to measure it — on a long conversation that join is megabytes. The
+ *  offset is one past the separator FOLLOWING the last head part — the index of
+ *  `rest[0]`'s first character — so the daemon's strict `f.start <
+ *  derivedSplitAt(head)` assigns a finding starting exactly there to `rest`.
+ *  That is the correct side, not a fail-safe hedge: the character at that
+ *  position is rest's own first character, so a finding starting on it IS rest
+ *  content. */
 export function derivedSplitAt(head: string[]): number {
   return head.reduce((n, p) => n + p.length + DERIVED_SEP.length, 0);
 }

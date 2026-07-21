@@ -10,7 +10,11 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// R9/R5 budget harness — asserts the numbers the README publishes.
+// R9/R5 budget harness — the gates behind the README's performance table. The
+// published numbers (R5 p99, R9 p50) are design targets; what each gate proves
+// is a median-based bound (R5: the median itself, R9: a difference of medians)
+// under a CI-generous ceiling — see the comments inside for why no wall-clock
+// gate on a shared runner can prove a tail.
 
 // Both budgets below assert a median. These are wall-clock samples taken on a
 // shared CI runner, so the tail is that runner's scheduling noise (a GC pause,
@@ -19,7 +23,7 @@ import { join } from "node:path";
 // don't reuse the sample order.
 const median = (xs: number[]) => xs.sort((a, b) => a - b)[Math.floor(xs.length / 2)]!;
 
-describe("scan-time budget (R5: p99 ≤ ~10ms on 1 MB)", () => {
+describe("scan-time budget (median 1 MB scan under CI ceilings; R5's p99 ≤ ~10ms is the design target, not what this proves)", () => {
   const rules = compileRules(
     loadRuleFile(readFileSync("rules/beagle-rules.json", "utf8")),
     new Uint8Array(32).fill(1),

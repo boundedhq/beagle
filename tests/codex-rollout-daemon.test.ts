@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Daemon } from "../src/daemon/daemon";
@@ -10,12 +10,14 @@ import { codexPromptKey } from "../src/parsers/codex-rollout";
 
 // A codex.user_prompt OTLP body — the shape the mapper self-labels as codex
 // (event.name starts with "codex."). timeUnixNano=0 with the real time in
-// observedTimeUnixNano mirrors codex 0.144.x (otlp-map recordNano).
-function codexPrompt(convId: string, prompt: string) {
+// observedTimeUnixNano mirrors codex 0.144.x (otlp-map recordNano). `tsMs`
+// backdates the record where a test needs the turn row to predate its answer
+// by a realistic gap (the store refuses attaching an answer to a NEWER row).
+function codexPrompt(convId: string, prompt: string, tsMs = Date.now()) {
   return {
     resourceLogs: [{ scopeLogs: [{ scope: { name: "codex_otel.log_only" }, logRecords: [{
       timeUnixNano: "0",
-      observedTimeUnixNano: String(Date.now() * 1e6),
+      observedTimeUnixNano: String(tsMs * 1e6),
       attributes: [
         { key: "event.name", value: { stringValue: "codex.user_prompt" } },
         { key: "conversation.id", value: { stringValue: convId } },
@@ -27,21 +29,26 @@ function codexPrompt(convId: string, prompt: string) {
 }
 
 const msg = (role: string, text: string) => ({ type: "message", role, content: [{ type: "output_text", text }] });
-const jline = (type: string, payload: unknown) => JSON.stringify({ timestamp: "2026-07-20T21:32:45.500Z", type, payload });
-function rolloutTurn(prompt: string, answer: string): string {
+// Line timestamps default to NOW, as in a live session: the stale-attach bound
+// compares them to the turn rows' OTel record times, so a fixed date here would
+// make every stitch look stale once the wall clock passed it.
+const jline = (type: string, payload: unknown, tsMs: number) => JSON.stringify({ timestamp: new Date(tsMs).toISOString(), type, payload });
+function rolloutTurn(prompt: string, answer: string, tsMs = Date.now()): string {
   return [
-    jline("turn_context", { turn_id: "t", model: "gpt-5.6-sol" }),
-    jline("response_item", msg("user", prompt)),
-    jline("response_item", msg("assistant", answer)),
+    jline("turn_context", { turn_id: "t", model: "gpt-5.6-sol" }, tsMs),
+    jline("response_item", msg("user", prompt), tsMs),
+    jline("response_item", msg("assistant", answer), tsMs),
   ].join("\n") + "\n";
 }
 
 // Write a session's rollout file where locateRollout will find it (filename ends
 // -<convId>.jsonl, under a date-partitioned dir).
+function rolloutPath(root: string, convId: string): string {
+  return join(root, "2026", "07", "20", `rollout-2026-07-20T21-32-34-${convId}.jsonl`);
+}
 function writeRollout(root: string, convId: string, content: string): void {
-  const dir = join(root, "2026", "07", "20");
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, `rollout-2026-07-20T21-32-34-${convId}.jsonl`), content);
+  mkdirSync(join(root, "2026", "07", "20"), { recursive: true });
+  writeFileSync(rolloutPath(root, convId), content);
 }
 
 async function waitFor(cond: () => boolean | Promise<boolean>, what: string, timeoutMs = 4000): Promise<void> {
@@ -166,4 +173,137 @@ describe("Codex rollout response capture end-to-end", () => {
       expect(call.responseBody === null || call.responseBody.byteLength === 0).toBe(true);
     });
   });
+});
+
+// The stale-attach bound, end to end: the same prompt text submitted twice
+// yields two rows with ONE prompt_key, and the tailer re-emits answers (retry
+// window; whole-file re-read on a recreated tailer). Without the bound, a
+// re-emitted turn-1 answer claimed turn 2's fresh response-less row, and the
+// real turn-2 answer then hit the bytes_resp guard and was dropped forever.
+describe("Codex rollout duplicate-prompt staleness", () => {
+  let stateDir: string;
+  let codexRoot: string;
+  let daemon: Daemon | null = null;
+  let otlpPort = 0;
+  let token = "";
+
+  beforeEach(() => {
+    stateDir = mkdtempSync(join(tmpdir(), "beagle-codexdup-"));
+    codexRoot = mkdtempSync(join(tmpdir(), "beagle-codexdup-home-"));
+  });
+  afterEach(async () => {
+    await daemon?.stop();
+    daemon = null;
+  });
+
+  // Per-test timing: these tests compress the tailer clocks differently (fast
+  // polls everywhere; a short retire only where retirement is the subject).
+  async function startDaemon(timing: { pollMs?: number; retryWindowMs?: number; retireMs?: number }) {
+    daemon = await Daemon.start({ stateDir, persistent: true, codexRolloutRootForTest: codexRoot, codexRolloutTimingForTest: timing });
+    const status = await controlRequest(daemon.socketPath, { cmd: "status" });
+    const data = status.data as { otlpPort: number; otlpToken: string };
+    otlpPort = data.otlpPort;
+    token = data.otlpToken;
+  }
+  async function post(body: unknown) {
+    return fetch(`http://127.0.0.1:${otlpPort}/v1/logs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-beagle-run": token },
+      body: JSON.stringify(body),
+    });
+  }
+  function readStore<T>(fn: (s: Store) => T): T {
+    const s = Store.openReadOnly(stateDir);
+    try {
+      return fn(s);
+    } finally {
+      s.close();
+    }
+  }
+  // Every row in ts order with its decoded answer — identical-prompt rows are
+  // indistinguishable by search, so assertions here go by position.
+  function turnRows(): Array<{ id: string; ts: number; text: string }> {
+    return readStore((s) =>
+      s.queryAll<{ id: string; ts: number; resp: Uint8Array | null }>(
+        `SELECT e.id AS id, e.ts_request AS ts, p.response_body AS resp
+         FROM exchanges e LEFT JOIN payloads p ON p.exchange_id = e.id
+         ORDER BY e.ts_request ASC, e.id ASC`,
+      ).map((r) => ({ id: r.id, ts: r.ts, text: r.resp ? new TextDecoder().decode(r.resp) : "" })),
+    );
+  }
+
+  test("a re-emitted answer never claims a newer identical-prompt row; the real answer still lands", async () => {
+    await startDaemon({ pollMs: 100 });
+    const conv = "conv-dup";
+    const prompt = "continue";
+    const t0 = Date.now();
+    // Turn 1 as production writes it: the OTel prompt row predates its rollout
+    // answer (the answer line lands when the turn completes, seconds later).
+    writeRollout(codexRoot, conv, rolloutTurn(prompt, "ANSWER_ONE", t0 - 8000));
+    await post(codexPrompt(conv, prompt, t0 - 10_000));
+    await waitFor(() => turnRows().some((r) => r.text === "ANSWER_ONE"), "turn 1 to stitch");
+
+    // The user re-types the same prompt while turn 1's answer is still inside
+    // the tailer's retry window — a fresh response-less row, same prompt_key.
+    await post(codexPrompt(conv, prompt));
+    await settled(daemon!.socketPath, 2);
+    await Bun.sleep(400); // several polls: ANSWER_ONE re-emits fire, and must refuse the new row
+    expect(turnRows()[1]!.text).toBe(""); // turn 2 still awaits ITS answer
+
+    // Turn 2 completes: the real answer must land on turn 2's row (before the
+    // fix it was dropped — the row already held the stale ANSWER_ONE).
+    appendFileSync(rolloutPath(codexRoot, conv), rolloutTurn(prompt, "ANSWER_TWO"));
+    await waitFor(() => turnRows()[1]?.text === "ANSWER_TWO", "turn 2's real answer to stitch");
+    expect(turnRows().map((r) => r.text)).toEqual(["ANSWER_ONE", "ANSWER_TWO"]);
+    expect(readStore((s) => listCalls(s, 50).length)).toBe(2); // re-emits inserted nothing
+  }, 15_000);
+
+  test("a recreated tailer's historical re-emits attach nowhere; the new turn still stitches", async () => {
+    // retryWindowMs FAR below the retirement sleep is load-bearing: turn 1's
+    // retry re-emits are long expired by the time the duplicate prompt lands,
+    // so any ANSWER_ONE re-emit after it can only come from a RECREATED tailer
+    // re-reading the file — the flavor this test exists to pin. Relaxing the
+    // window quietly turns this back into the retry-window test above.
+    await startDaemon({ pollMs: 100, retryWindowMs: 300, retireMs: 2000 });
+    const conv = "conv-retire";
+    const prompt = "continue";
+    const t0 = Date.now();
+    writeRollout(codexRoot, conv, rolloutTurn(prompt, "ANSWER_ONE", t0 - 8000));
+    await post(codexPrompt(conv, prompt, t0 - 10_000));
+    await waitFor(() => turnRows().some((r) => r.text === "ANSWER_ONE"), "turn 1 to stitch");
+
+    // No rollout growth and no OTel activity past the grace period: retired.
+    await Bun.sleep(3000);
+
+    // The same prompt text again. Its OTel activity recreates the tailer, which
+    // re-reads the WHOLE file and re-emits every historical answer with a fresh
+    // first-seen — the new turn's row must survive that.
+    await post(codexPrompt(conv, prompt));
+    await settled(daemon!.socketPath, 2);
+    await Bun.sleep(400);
+    expect(turnRows()[1]!.text).toBe(""); // the historical ANSWER_ONE re-emit dropped
+
+    appendFileSync(rolloutPath(codexRoot, conv), rolloutTurn(prompt, "ANSWER_TWO"));
+    await waitFor(() => turnRows()[1]?.text === "ANSWER_TWO", "turn 2's answer to stitch");
+    expect(turnRows().map((r) => r.text)).toEqual(["ANSWER_ONE", "ANSWER_TWO"]);
+    expect(readStore((s) => listCalls(s, 50).length)).toBe(2); // dedup left no orphan rows
+  }, 15_000);
+
+  test("a recreated tailer still back-fills a turn whose answer landed after retirement", async () => {
+    await startDaemon({ pollMs: 100, retryWindowMs: 300, retireMs: 2000 });
+    const conv = "conv-backfill";
+    const q1 = "what is the plan?";
+    await post(codexPrompt(conv, q1));
+    await settled(daemon!.socketPath, 1);
+    await Bun.sleep(3000); // no rollout file at all: the tailer locates nothing and retires
+
+    // The answer reaches disk only after retirement (a generation that outlived
+    // the idle window). It postdates its turn row, so the bound allows it.
+    writeRollout(codexRoot, conv, rolloutTurn(q1, "LATE_ANSWER"));
+    // Fresh activity on the conversation recreates the tailer, which reads the
+    // file and back-fills the older turn's row.
+    await post(codexPrompt(conv, "and now?"));
+    await waitFor(() => turnRows()[0]?.text === "LATE_ANSWER", "the late answer to back-fill");
+    expect(readStore((s) => listCalls(s, 50).length)).toBe(2);
+  }, 15_000);
 });

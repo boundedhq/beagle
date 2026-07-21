@@ -90,10 +90,20 @@ describe("answersFromText", () => {
     expect(answers.map((a) => a.answer)).toEqual(["ALPHA111", "BRAVO222"]);
   });
 
-  test("does not crash on the real captured session, extracts ≥1 answer", () => {
+  test("extracts both turns of the real captured session, keyed to their own prompts", () => {
+    // What makes this fixture worth pinning exactly: its turn 2 sits past a
+    // thread_rolled_back event, behind a RE-INJECTED developer + env-context
+    // preamble — the one shape none of the synthetic cases above cover. A
+    // regression that drops that turn, or keys it to anything but the real
+    // BRAVO222 prompt, passed the old "≥1 answer, keys look like keys" form of
+    // this test. The expected keys are the Phase-0 spike hashes of the
+    // fixture's own prompt texts (pinned as such above), re-verified by
+    // running the extractor over the fixture before writing them here.
     const real = readFileSync(join(import.meta.dir, "fixtures/codex-rollout-clean.jsonl"), "utf8");
     const answers = answersFromText(real);
-    expect(answers.length).toBeGreaterThanOrEqual(1);
-    expect(answers.every((a) => a.promptKey.length === 16 && a.answer.length > 0)).toBe(true);
+    expect(answers.map((a) => [a.answer, a.promptKey])).toEqual([
+      ["ALPHA111", "7959d7bb7b5c2ac5"],
+      ["BRAVO222", "64bb53f6acd066f0"],
+    ]);
   });
 });

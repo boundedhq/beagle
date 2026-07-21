@@ -325,6 +325,65 @@ describe("attachOtelResponse (Mode B cross-batch turn stitching)", () => {
     store.close();
   });
 
+  test("a stale answer never claims a NEWER identical-prompt row (rollout re-emit race)", () => {
+    // Same prompt text twice ("continue", "continue") → two rows, one
+    // prompt_key. A re-emitted turn-1 answer arriving after turn 2's row
+    // exists must NOT attach to it: the answer predates that row, so the row
+    // belongs to a later turn. Before the ts_request bound it did attach, and
+    // the real turn-2 answer then hit the bytes_resp guard and was lost.
+    const store = Store.open(dir);
+    const t0 = Date.now();
+    const turn1 = promptRow({ id: ulid(t0), tsRequest: t0 });
+    store.insertCall(turn1);
+    const ans1Ts = t0 + 5_000;
+    expect(store.attachOtelResponse({
+      sessionId: "sess-1", promptKey: "prompt-1", tsResponse: ans1Ts,
+      responseBody: new TextEncoder().encode("ANSWER ONE"),
+    })).toBe(true);
+    const turn2 = promptRow({ id: ulid(t0 + 20_000), tsRequest: t0 + 20_000 });
+    store.insertCall(turn2);
+    // The re-emit: same answer, same production time — turn 2's row postdates it.
+    expect(store.attachOtelResponse({
+      sessionId: "sess-1", promptKey: "prompt-1", tsResponse: ans1Ts,
+      responseBody: new TextEncoder().encode("ANSWER ONE"),
+    })).toBe(false);
+    expect(store.getCall(turn2.id)!.responseBody).toBe(null);
+    // The real turn-2 answer still lands on turn 2's row.
+    expect(store.attachOtelResponse({
+      sessionId: "sess-1", promptKey: "prompt-1", tsResponse: t0 + 25_000,
+      responseBody: new TextEncoder().encode("ANSWER TWO"),
+    })).toBe(true);
+    expect(new TextDecoder().decode(store.getCall(turn1.id)!.responseBody!)).toBe("ANSWER ONE");
+    expect(new TextDecoder().decode(store.getCall(turn2.id)!.responseBody!)).toBe("ANSWER TWO");
+    store.close();
+  });
+
+  test("the staleness bound keeps a skew margin, and old rows still take late answers", () => {
+    const store = Store.open(dir);
+    const t0 = Date.now();
+    // An answer predating the row by more than the margin is refused; one a
+    // beat "early" (cross-source stamp imprecision) still attaches.
+    const turn = promptRow({ id: ulid(t0), tsRequest: t0 });
+    store.insertCall(turn);
+    expect(store.attachOtelResponse({
+      sessionId: "sess-1", promptKey: "prompt-1", tsResponse: t0 - 5_000,
+      responseBody: new TextEncoder().encode("stale"),
+    })).toBe(false);
+    expect(store.attachOtelResponse({
+      sessionId: "sess-1", promptKey: "prompt-1", tsResponse: t0 - 1_000,
+      responseBody: new TextEncoder().encode("close enough"),
+    })).toBe(true);
+    // The bound is one-sided: an answer long AFTER its row (post-retirement
+    // back-fill) attaches — only answer-before-row is stale.
+    const old = promptRow({ id: ulid(t0 - 3_600_000), tsRequest: t0 - 3_600_000, sessionId: "sess-old" });
+    store.insertCall(old);
+    expect(store.attachOtelResponse({
+      sessionId: "sess-old", promptKey: "prompt-1", tsResponse: t0,
+      responseBody: new TextEncoder().encode("late back-fill"),
+    })).toBe(true);
+    store.close();
+  });
+
   test("a wire row is never a stitch target, even with a colliding prompt_key", () => {
     // Defense in depth: stitching is a Mode B concept; the source='otel' guard
     // keeps a hypothetical wire row with the same session/key untouched.
