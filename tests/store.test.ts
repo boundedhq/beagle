@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store, SCHEMA_VERSION, StoreVersionError } from "../src/core/store/store";
+import { SCHEMA_SQL } from "../src/core/store/schema";
 import { listLeakEvents } from "../src/viewer/feed-query";
 import type { CallRecord } from "../src/core/store/store";
 import { ulid } from "../src/core/store/ulid";
@@ -511,6 +512,62 @@ describe("Retention & purge", () => {
     // incremental_vacuum strands the freed pages on the freelist (~5 MB), and
     // skipping the fts5 merge leaves dead trigram postings behind (~4 MB).
     expect(onDisk).toBeLessThan(cap * 2);
+  });
+
+  test("a store created before the auto_vacuum ordering fix converts and shrinks", () => {
+    // The shrink test above only covers stores born with INCREMENTAL baked
+    // in. Older binaries opened with journal_mode=WAL first, which
+    // initializes the file header with auto_vacuum=NONE — the INCREMENTAL
+    // pragma after it is silently ignored, and NONE cannot be changed on an
+    // existing file by pragma alone. On such a store every PRAGMA
+    // incremental_vacuum is a permanent no-op: swept pages pile up on the
+    // freelist and the file never shrinks. Byte-for-byte the pre-fix open
+    // sequence:
+    const path = join(dir, "beagle.db");
+    const legacy = new Database(path, { readwrite: true, create: true });
+    legacy.exec("PRAGMA journal_mode=WAL");
+    legacy.exec("PRAGMA secure_delete=ON");
+    legacy.exec("PRAGMA auto_vacuum=INCREMENTAL"); // too late: header already written
+    legacy.exec("PRAGMA foreign_keys=ON");
+    legacy.exec(SCHEMA_SQL);
+    legacy.exec(`PRAGMA user_version=${SCHEMA_VERSION}`);
+    // Legacy bloat: a dropped table's pages land on the freelist, where NONE
+    // strands them forever. The pragma probe pins the fixture — if it ever
+    // reads 2, this test is silently exercising a fresh store instead.
+    legacy.exec("CREATE TABLE junk (x BLOB)");
+    legacy.exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 400)
+                 INSERT INTO junk SELECT zeroblob(16384) FROM n`);
+    legacy.exec("DROP TABLE junk");
+    expect((legacy.query("PRAGMA auto_vacuum").get() as { auto_vacuum: number }).auto_vacuum).toBe(0);
+    legacy.close(); // folds the WAL into the main file
+    const before = statSync(path).size;
+
+    // Reopening must detect NONE and convert with a one-time VACUUM, so the
+    // header — not just this connection's pending setting — reads INCREMENTAL.
+    const store = Store.open(dir);
+    expect(store.pragma("auto_vacuum")).toBe(2);
+    expect(store.pragma("freelist_count")).toBe(0); // the stranded pages went with it
+    // And reclaim must now actually work on this file: fill, evict to a cap,
+    // and the bytes on disk — not an internal tally — have to come down.
+    const filler = (i: number) =>
+      `row ${i} ` + "the quick brown fox jumps over the lazy dog ".repeat(1500);
+    for (let i = 0; i < 12; i++) {
+      store.insertCall(fakeCall({
+        tsRequest: Date.now() - (12 - i) * 1000,
+        requestBody: new TextEncoder().encode("{}"),
+        responseBody: null,
+        searchText: filler(i),
+      }));
+    }
+    const cap = 1_000_000;
+    store.sweep({ payloadWindowMs: Infinity, eventWindowMs: Infinity, sizeCapBytes: cap });
+    expect(store.countCalls()).toBeGreaterThan(0); // a cap evicts, it does not wipe
+    store.close();
+    const onDisk = statSync(path).size +
+      (existsSync(`${path}-wal`) ? statSync(`${path}-wal`).size : 0);
+    // Unconverted, the ~6.5 MB of stranded junk pages alone blows this bound.
+    expect(onDisk).toBeLessThan(cap * 2);
+    expect(onDisk).toBeLessThan(before); // the pre-existing bloat itself was released
   });
 
   test("a mass eviction survives SQLite's bound-parameter ceiling", () => {
