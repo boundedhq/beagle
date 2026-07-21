@@ -171,11 +171,48 @@ const isBoundary = (c: number) => c <= 32 || Number.isNaN(c);
 // and reusing it here would corrupt the walk in progress.
 const RUNS = /\\+(?:u[0-9a-fA-F]{4}|[bfnrt"/])?/g;
 
+// One run is exempt from the tell: the one the CUT ITSELF writes. The proxy
+// keeps at most captureBufferCap bytes of a body and drops the rest, and the
+// cut lands wherever the chunk boundary fell — including between a backslash
+// and its escape char. A body ending `…\` with the `n` dropped, or `…\u00`
+// with the last hex digits dropped, ends in a bare odd run that no sender
+// typed. Reading it as the raw-text tell un-masks the run's whole token, and a
+// minified body is ONE token, so a cut inside any escape near the tail
+// silently unmasked every escape-nested secret BEFORE the cut — unalerted,
+// stored in cleartext, on a row whose scanState still read "ok". Measured with
+// the real rules before this exemption: {"content":"key:\nAKIA…"} detected,
+// and the same token with a trailing backslash detected nothing.
+//
+// So a bare odd run does not poison when nothing follows it but the end of the
+// input — or `u` plus at most three hex digits there, the head of a \uXXXX the
+// cut beheaded (RUNS consumes a whole uXXXX, so a bare run wearing a u+hex
+// tail can only be a partial one). Forgiving it is safe on both sides:
+//   - The stub itself is never blanked either way — maskRun already leaves any
+//     run ending in a backslash untouched — so forgiveness only re-enables
+//     masking of the token BEFORE the cut, the part still holding data.
+//   - Only the input-terminal run is forgiven. A Windows path carries its tell
+//     mid-token (`C:\aws\n…` poisons at `\a`), so the FP the parity rule
+//     exists for stays silent even when the path is what the cap cut.
+// The residue is a raw body whose final token's only lone backslash is its
+// very last byte (`…aws\n<digest>\` ending the capture): bytewise identical to
+// truncated JSON, and on the ambiguity this file trades toward the miss being
+// the costlier failure.
+const CUT_ESCAPE_TAIL = /^u[0-9a-fA-F]{0,3}$/;
+// The length guard is not redundant with the regex's anchors: this runs for
+// EVERY bare odd run in a raw body, mid-token ones included, and without the
+// bound each call would slice the body's whole remainder — quadratic on
+// backslash-dense raw text wherever substrings copy. Bound first, slice ≤4.
+const cutMidEscape = (text: string, after: number): boolean =>
+  after === text.length ||
+  (text.length - after <= 4 && CUT_ESCAPE_TAIL.test(text.slice(after)));
+
 function tokenPoisoned(text: string, start: number, end: number): boolean {
   RUNS.lastIndex = start;
   for (let m = RUNS.exec(text); m !== null && m.index < end; m = RUNS.exec(text)) {
     const run = m[0];
-    if (run.charCodeAt(run.length - 1) === BACKSLASH && run.length % 2 === 1) return true;
+    if (run.charCodeAt(run.length - 1) !== BACKSLASH || run.length % 2 === 0) continue;
+    if (cutMidEscape(text, m.index + run.length)) continue; // truncation stub, not a tell
+    return true;
   }
   return false;
 }
