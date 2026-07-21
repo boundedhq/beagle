@@ -180,8 +180,8 @@ const RUNS = /\\+(?:u[0-9a-fA-F]{4}|[bfnrt"/])?/g;
 // minified body is ONE token, so a cut inside any escape near the tail
 // silently unmasked every escape-nested secret BEFORE the cut — unalerted,
 // stored in cleartext, on a row whose scanState still read "ok". Measured with
-// the real rules: {"content":"key:\nAKIA…"} detects, and the same token with a
-// trailing backslash does not.
+// the real rules before this exemption: {"content":"key:\nAKIA…"} detected,
+// and the same token with a trailing backslash detected nothing.
 //
 // So a bare odd run does not poison when nothing follows it but the end of the
 // input — or `u` plus at most three hex digits there, the head of a \uXXXX the
@@ -198,6 +198,10 @@ const RUNS = /\\+(?:u[0-9a-fA-F]{4}|[bfnrt"/])?/g;
 // truncated JSON, and on the ambiguity this file trades toward the miss being
 // the costlier failure.
 const CUT_ESCAPE_TAIL = /^u[0-9a-fA-F]{0,3}$/;
+// The length guard is not redundant with the regex's anchors: this runs for
+// EVERY bare odd run in a raw body, mid-token ones included, and without the
+// bound each call would slice the body's whole remainder — quadratic on
+// backslash-dense raw text wherever substrings copy. Bound first, slice ≤4.
 const cutMidEscape = (text: string, after: number): boolean =>
   after === text.length ||
   (text.length - after <= 4 && CUT_ESCAPE_TAIL.test(text.slice(after)));

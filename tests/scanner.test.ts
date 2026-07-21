@@ -760,6 +760,15 @@ describe("JSON-escape-prefixed secrets (leading-boundary regression)", () => {
     for (let cut = long.indexOf(K) + K.length; cut <= long.length; cut++) {
       expect(found(long.slice(0, cut))).toBe(true);
     }
+    // Nesting composes with truncation: the same body inside a tool-call
+    // arguments string doubles every backslash, so the cut writes the doubled
+    // stubs too (`\\n` beheaded to `\\`, `\\\\` to `\\\`). Ten of these cut
+    // points missed before the exemption — more than at depth 1, because the
+    // longer runs offer more mid-run bytes for the cut to land on.
+    const d2 = `{"arguments":${JSON.stringify(long)}}`;
+    for (let cut = d2.indexOf(K) + K.length; cut <= d2.length; cut++) {
+      expect(found(d2.slice(0, cut))).toBe(true);
+    }
   });
 
   test("the truncation exemption does not reopen the Windows-path FP", () => {
