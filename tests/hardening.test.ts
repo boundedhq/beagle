@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/core/store/store";
-import { applyCaptureRedaction, clampRedacted, redactBody, redactDerivedParts, redactRawStream, redactValues, redactValuesInText, redactionPlaceholder, secretKeys } from "../src/transform/redact";
+import { applyCaptureRedaction, clampRedacted, derivedScanText, derivedSplitAt, redactBody, redactDerivedParts, redactRawStream, redactValues, redactValuesInText, redactionPlaceholder, secretKeys } from "../src/transform/redact";
 import { DEFAULT_CONFIG } from "../src/core/config/config";
 import { quarantineCorruptDb } from "../src/core/store/quarantine";
 import type { Finding } from "../src/core/scanner/engine";
@@ -173,6 +173,52 @@ describe("redact-on-capture (R11)", () => {
     expect(out.values.length).toBe(2);
   });
 
+  test("redactDerivedParts handles many findings scattered over many parts", () => {
+    // The part walk carries a cursor that only moves downward, relying on the
+    // findings being applied in descending order. A cursor that advanced too
+    // far would silently skip a part — leaving a secret in the transcript with
+    // every other assertion still green — so sweep a whole grid: one secret in
+    // every part, plus untouched filler either side of each to catch an
+    // off-by-one splice.
+    const parts: string[] = [];
+    const secrets: string[] = [];
+    for (let i = 0; i < 40; i++) {
+      const s = `SECRET${String(i).padStart(2, "0")}${"v".repeat(12)}`;
+      secrets.push(s);
+      parts.push(`head${i}-${s}-tail${i}`);
+    }
+    const joined = derivedScanText(parts);
+    const findings = secrets.map((s) => {
+      const at = joined.indexOf(s);
+      return finding(at, at + s.length, "generic");
+    });
+    // Shuffled deterministically: redactDerivedParts sorts internally, and a
+    // caller is not required to hand them over in order.
+    const shuffled = findings.filter((_, i) => i % 2 === 0).concat(findings.filter((_, i) => i % 2 === 1));
+    const out = redactDerivedParts(parts, shuffled);
+    for (let i = 0; i < parts.length; i++) {
+      expect(out.parts[i]).toBe(`head${i}-${redactionPlaceholder("generic", secrets[i]!)}-tail${i}`);
+    }
+    expect(out.values.length).toBe(secrets.length);
+  });
+
+  test("derivedSplitAt agrees with derivedScanText about where the halves meet", () => {
+    // The outbound/inbound split is what keeps an inbound secret from being
+    // reported as a leak, and it is computed WITHOUT joining the outbound half
+    // (too expensive on a long conversation). If the two ever disagreed about
+    // the separator, findings would be attributed to the wrong direction and
+    // nothing else would notice — so pin their agreement directly.
+    for (const head of [[], [""], ["ab"], ["ab", "cde"], ["", "x", ""]]) {
+      const tail = ["INBOUND"];
+      const joined = derivedScanText([...head, ...tail]);
+      const at = derivedSplitAt(head);
+      expect(joined.slice(at)).toBe(derivedScanText(tail));
+      // …and it lands one past the last head part, on the separator, so a
+      // finding starting exactly there counts as head — the fail-safe side.
+      if (head.length > 0) expect(joined[at - 1]).toBe("\n");
+    }
+  });
+
   test("clampRedacted cuts past a straddling placeholder, never through it", () => {
     const ph = redactionPlaceholder("aws-access-key-id", "AKIAZQ3DRSTUVWXY2345");
     // The cap lands 4 characters into the placeholder: a plain slice would
@@ -183,6 +229,24 @@ describe("redact-on-capture (R11)", () => {
     // Nothing to protect: a cut in ordinary text is exact.
     expect(clampRedacted("f".repeat(50), 14)).toBe("f".repeat(14));
     expect(clampRedacted("short", 14)).toBe("short");
+  });
+
+  test("clampRedacted is not defeated by a literal [REDACTED: in captured content", () => {
+    // The cap bounds what a tool RESULT persists, and a tool result is content
+    // the agent's environment chose — including, say, a log line another
+    // scrubber wrote. Running to the next `]` after any `[REDACTED:` let that
+    // content opt itself out of the cap entirely: a 500 KB result stored whole
+    // where the cap says 4000. Only a well-formed placeholder earns the
+    // overshoot.
+    const hostile = "x".repeat(3990) + "auth=[REDACTED: by ci-scrubber " + "y".repeat(500_000) + "]";
+    expect(clampRedacted(hostile, 4000).length).toBe(4000);
+    // A truncated-looking opener with no bracket at all is also just cut.
+    expect(clampRedacted("z".repeat(3995) + "[REDACTED:" + "z".repeat(9000), 4000).length).toBe(4000);
+    // …while a real placeholder still survives whole.
+    const real = "z".repeat(3995) + redactionPlaceholder("aws-access-key-id", "AKIAZQ3DRSTUVWXY2345");
+    const out = clampRedacted(real, 4000);
+    expect(out.endsWith("]")).toBe(true);
+    expect(out.length).toBeLessThan(4040);
   });
 
   test("secretKeys matches an escaped body value against its decoded rendering", () => {

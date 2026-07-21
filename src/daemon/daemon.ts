@@ -14,7 +14,7 @@ import { SessionResolver, type Resolution } from "../core/session/resolver";
 import { Store } from "../core/store/store";
 import { ScanHost, dropIdentityFieldNoise } from "../adapters/scan-host";
 import type { Finding } from "../core/scanner/engine";
-import { applyCaptureRedaction, clampRedacted, derivedScanText, redactDerivedParts, redactRawStream, redactValuesInText, secretKeys } from "../transform/redact";
+import { applyCaptureRedaction, clampRedacted, derivedScanText, derivedSplitAt, redactDerivedParts, redactRawStream, redactValuesInText, secretKeys } from "../transform/redact";
 import { scrubAuthHeaders } from "../core/normalize/normalize";
 import { Notifier, type AlertMessage } from "../notifier/notifier";
 import { buildAlertMessage } from "../notifier/alert-copy";
@@ -63,8 +63,10 @@ export interface DaemonOptions {
 // the DERIVED form, for scrubbing text built from these parts that is not one
 // of them — the summary's quoted ask, a truncated transcript copy.
 interface DerivedRedaction {
+  /** The request-derived parts, redacted. The response-derived half is scanned
+   *  too but never handed back: nothing stores it directly, and the summary —
+   *  the one surface that quotes the answer — scrubs it by `values`. */
   outbound: string[];
-  inbound: string[];
   values: Array<{ value: string; type: string }>;
   /** Outbound-half findings only — what may alert. */
   leakFindings: Finding[];
@@ -361,7 +363,7 @@ export class Daemon {
     inbound: string[],
     bodyValues: Array<{ value: string; type: string }>,
   ): Promise<DerivedRedaction> {
-    const clean: DerivedRedaction = { outbound, inbound, values: [], leakFindings: [], incomplete: false };
+    const clean: DerivedRedaction = { outbound, values: [], leakFindings: [], incomplete: false };
     const parts = [...outbound, ...inbound];
     const text = derivedScanText(parts);
     if (text.trim() === "") return clean;
@@ -373,11 +375,10 @@ export class Daemon {
     const findings = dropIdentityFieldNoise(bytes, result.findings);
     if (findings.length === 0) return clean;
     const red = redactDerivedParts(parts, findings);
-    const outboundEnd = derivedScanText(outbound).length;
+    const outboundEnd = derivedSplitAt(outbound);
     const known = new Set(bodyValues.flatMap((v) => secretKeys(v.value)));
     return {
       outbound: red.parts.slice(0, outbound.length),
-      inbound: red.parts.slice(outbound.length),
       values: red.values,
       leakFindings: findings.filter(
         (f) =>
@@ -468,7 +469,12 @@ export class Daemon {
       bodyValues,
     );
     // An unverified transcript is an unverified call: the row must not read
-    // "ok" for text no scan checked, and its content is withheld below.
+    // "ok" for text no scan checked. It rides the same `incomplete` flag as the
+    // body halves, so the whole call is held out rather than only the derived
+    // surfaces — that discards a body the pre-forward scan DID verify, and it
+    // is the trade taken deliberately: one fail-safe rule beats a second,
+    // subtly different withholding path. Reachable only if the transcript scan
+    // breaches its deadline where the (larger) body scan did not.
     if (derived.incomplete) scanState = "incomplete";
     const redaction = this.config.redactOnCapture
       ? applyCaptureRedaction({
@@ -530,6 +536,26 @@ export class Daemon {
           // any of them to begin with.
           ...derived.values,
         ]);
+    // A wire row normally persists NO transcript: the viewer re-parses the
+    // stored body, which is byte-exact, so re-deriving is faithful and free.
+    // Derived redaction breaks that. A secret the display MANUFACTURES by
+    // joining content blocks is not in the body at all, so nothing the body
+    // redaction could do would stop the viewer rebuilding it at read time —
+    // masked in the summary and the index, and rendered whole in the transcript
+    // beside them. Persist the redacted projection for those rows and let it
+    // win over the re-parse (viewer/detail.ts).
+    //
+    // Layout is [system, ...messages], with index 0 ALWAYS the system prompt
+    // (empty when the request had none) — that fixed shape is what lets the
+    // viewer lift it back out unambiguously, even from a body whose own
+    // messages carry a "system" role.
+    const displayMessages =
+      redaction && !redaction.heldOut && derived.values.length > 0 && parsed
+        ? [
+            { role: "system", content: derived.outbound[0]! },
+            ...parsed.messages.map((m, i) => ({ ...m, content: derived.outbound[i + 1]! })),
+          ]
+        : null;
 
     this.store.insertCall({
       id: call.id,
@@ -568,6 +594,7 @@ export class Daemon {
         ? scrubAuthHeaders(call.response.headers, undefined, call.provider)
         : null,
       sseRaw,
+      displayMessages,
       searchText,
     });
     // A leak the body scan structurally could not see (the display joined two
@@ -742,6 +769,15 @@ export class Daemon {
           );
       const scanState =
         redaction?.heldOut || derived.incomplete ? "incomplete" : scanResult.state;
+      // One answer for the row, shared by both writers below (the stitch and
+      // the insert) so they cannot drift. Derived findings count: the summary,
+      // the transcript and the search index ARE stored content, and a
+      // manufactured secret rewrites them while leaving the body untouched — a
+      // row reading "not redacted" would deny a rewrite that happened. Gated on
+      // redact-on-capture: with it off those surfaces keep their raw text (only
+      // the always-visible summary scrubs), so claiming otherwise would
+      // mislabel the row.
+      const redacted = redaction ? redaction.redacted || derived.values.length > 0 : false;
       // Persist the self-report's structure: Mode B bodies are scan text, not
       // provider JSON, so the viewer can't re-parse them the way it does wire
       // bodies. Content comes back OFFSET-redacted from the derived scan, which
@@ -812,7 +848,7 @@ export class Daemon {
           // raw call.response.text here, which would undo the redaction.
           composeSummary: (existing) =>
             existing ? `"${firstLine(existing, 40)}" → ${firstLine(summary, 80)}` : summary,
-          redacted: redaction?.redacted ?? false,
+          redacted,
           responseBody: redaction ? redaction.responseBody : (call.response.bodyBytes ?? null),
         })
       ) {
@@ -841,11 +877,7 @@ export class Daemon {
         scanState,
         captureState: "ok",
         sessionTier: resolution.tier,
-        // Derived findings count too — display_messages and the search index
-        // are stored content, and a manufactured secret rewrites them while
-        // leaving the body untouched. Same redact-on-capture gate as the wire
-        // path: with it off those surfaces stay raw, so the flag stays false.
-        redacted: redaction ? redaction.redacted || derived.values.length > 0 : false,
+        redacted,
         requestBody: redaction ? redaction.requestBody : call.request.bodyBytes,
         requestHeaders: null,
         responseBody: redaction ? redaction.responseBody : (call.response.bodyBytes ?? null),
@@ -1213,15 +1245,19 @@ function summarizeActions(actions: ToolAction[], compact = false): string {
   const files: string[] = [];
   for (const a of actions) {
     const v = verb(a.tool);
+    // EVERY branch goes through firstLine: `detail` arrives unclamped from the
+    // parser (deliberately — a parse-time clamp cut secrets in half before the
+    // scrub could match them, see toolAction), so this is the only thing
+    // bounding what lands in the stored summary and rides every feed frame. A
+    // basename or a bare path is not self-limiting: one 500 KB tool argument
+    // put 500 KB — newlines and all — into a column meant for one line.
     if (v === "ran" && a.detail) parts.push(`ran \`${firstLine(a.detail, 40)}\``);
-    else if (v === "read" && a.detail) files.push(a.detail.split("/").pop() ?? a.detail);
+    else if (v === "read" && a.detail) files.push(firstLine(a.detail.split("/").pop() ?? a.detail, 40));
     else if (a.detail) {
       // URLs keep their head (host says more than a trailing path segment);
       // paths keep their tail (the filename).
-      const label = a.detail.includes("://")
-        ? firstLine(a.detail, 40)
-        : (a.detail.split("/").pop() || a.detail);
-      parts.push(`${v} \`${label}\``);
+      const label = a.detail.includes("://") ? a.detail : (a.detail.split("/").pop() || a.detail);
+      parts.push(`${v} \`${firstLine(label, 40)}\``);
     }
     else parts.push(v);
   }
