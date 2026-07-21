@@ -362,10 +362,21 @@ export class Daemon {
   // genuinely different strings, so such a call alerts twice. Over-alerting on
   // a leak that already alerts — see the spanning-PEM case in
   // tests/otlp-daemon.test.ts.
+  //
+  // `echoAt` is the offset in the joined text where outbound parts that merely
+  // RE-RENDER an earlier part begin (a tool result's `detail` restates its own
+  // call's arguments). Such a part is redacted like any other — that is the
+  // point of listing it — but a finding in it is dropped from the alert set
+  // when an earlier part already reported the same value, by the same
+  // one-value-one-occurrence rule as `bodyValues` above. Only findings AT or
+  // after it dedup this way: an echo can decode one escaping level further than
+  // the part it echoes, so a secret readable only there is genuinely reachable
+  // only there, and still alerts.
   private async redactDerived(
     outbound: string[],
     inbound: string[],
     bodyValues: Array<{ value: string; type: string }>,
+    echoAt = Infinity,
   ): Promise<DerivedRedaction> {
     const clean: DerivedRedaction = { outbound, inbound, values: [], leakFindings: [], incomplete: false };
     const parts = [...outbound, ...inbound];
@@ -381,15 +392,34 @@ export class Daemon {
     const red = redactDerivedParts(parts, findings);
     const outboundEnd = derivedSplitAt(outbound);
     const known = new Set(bodyValues.flatMap((v) => secretKeys(v.value)));
+    // Keyed ONCE per outbound finding, because both checks below want the same
+    // keys and secretKeys JSON-parses: the shape this module budgets for is a
+    // conversation saturating every rule's finding cap (see redactDerivedParts),
+    // where keying twice is thousands of redundant parses on the single writer.
+    // Inbound findings are dropped first — they can never alert, so they are
+    // never keyed at all.
+    const keyed = findings
+      .filter((f) => f.start < outboundEnd)
+      .map((f) => ({ f, keys: secretKeys(text.slice(f.start, f.end)) }));
+    // What the pre-echo parts report, so the echo half can't re-report it.
+    // Built BEFORE the `known` test, not after: when a body value and its
+    // rendering are two escaping levels apart, the pre-echo finding is dropped
+    // as already-known while the echo's further-decoded form is NOT in `known`
+    // — so it is exactly the dropped finding that has to suppress it.
+    const reported = new Set(
+      echoAt === Infinity ? [] : keyed.filter((k) => k.f.start < echoAt).flatMap((k) => k.keys),
+    );
     return {
       outbound: red.parts.slice(0, outbound.length),
       inbound: red.parts.slice(outbound.length),
       values: red.values,
-      leakFindings: findings.filter(
-        (f) =>
-          f.start < outboundEnd &&
-          !secretKeys(text.slice(f.start, f.end)).some((k) => known.has(k)),
-      ),
+      leakFindings: keyed
+        .filter(
+          ({ f, keys }) =>
+            !keys.some((k) => known.has(k)) &&
+            (f.start < echoAt || !keys.some((k) => reported.has(k))),
+        )
+        .map(({ f }) => f),
       incomplete: false,
     };
   }
@@ -460,31 +490,76 @@ export class Daemon {
     // prompt_cache_key) — same noise filter before redaction masks them.
     if (respScan) respScan.findings = dropIdentityFieldNoise(call.response.bodyBytes!, respScan.findings);
     // The readable projection of this call, scanned on its own (see
-    // redactDerived). The outbound half is exactly what buildSearchText joins;
-    // the inbound half is what the summary quotes back from the response, whose
-    // parsers flatten and re-serialize just as freely.
-    const outboundParts = [parsed?.system ?? "", ...(parsed?.messages ?? []).map((m) => m.content)];
+    // redactDerived). The outbound half's CONTENTS are exactly what
+    // buildSearchText joins; the inbound half is what the summary quotes back
+    // from the response, whose parsers flatten and re-serialize just as freely.
+    const contentParts = [parsed?.system ?? "", ...(parsed?.messages ?? []).map((m) => m.content)];
+    // A result card labels itself with its ORIGINATING call's detail — the shell
+    // command, the path — so `detail` is stored display text as surely as
+    // `content` is, and it is its own part here for the same reason every other
+    // one is: only offsets into the text a finding was actually scanned over can
+    // redact it. A value scrub is not a substitute — the floor is 8 chars and
+    // connection-string captures the bare password — which is why the transcript
+    // used to render a command in cleartext beside a body and a sibling content
+    // that both read [REDACTED:…]. Appended AFTER the contents, so every content
+    // offset (and the search text built from them) is byte-identical to before.
+    //
+    // That append order also decides who loses MAX_FINDINGS_PER_RULE, and it is
+    // always this half: the rule scans left to right, so the contents claim the
+    // budget first and the details get what is left. 300 tool calls each
+    // carrying a sub-floor password = 300 content matches + 200 detail matches,
+    // and the last 100 details render in cleartext beside a fully-redacted
+    // content, body and index, on a row that reads scanState "ok". Strictly
+    // better than the value scrub this replaced (which floored out ALL 300),
+    // but do not read "it is a part now" as "it is always covered". Interleaving
+    // the runs would spread the starvation instead of concentrating it — at the
+    // cost of the byte-identical content offsets the line above depends on.
+    const detailParts = (parsed?.messages ?? []).map((m) => m.detail ?? "");
     const bodyValues = findingValues(
       call.request.bodyBytes ? new TextDecoder().decode(call.request.bodyBytes) : "",
       stash?.findings,
     );
     const derived = await this.redactDerived(
-      outboundParts,
-      [respParsed?.text ?? "", ...respActions.map((a) => a.detail ?? "")],
+      [...contentParts, ...detailParts],
+      // [reply, then detail+args PER ACTION in order]. `args` is a scanned part
+      // and not merely value-scrubbed because it is not a verbatim slice of the
+      // bytes: for anthropic-messages it is JSON.stringify(b.input), a
+      // RE-SERIALIZATION, so `AKIA…` in the scanned body renders as
+      // `AKIA…` here. No rule matched the escaped bytes, so no span covers it
+      // and no matched value exists to scrub by — only scanning this string
+      // reaches it. It is also the tool card's BODY (app.js draws
+      // `args ?? detail`), so an unmasked args wins over a masked detail.
+      [
+        respParsed?.text ?? "",
+        ...respActions.flatMap((a) => [a.detail ?? "", a.args ?? ""]),
+      ],
       bodyValues,
+      derivedSplitAt(contentParts), // details echo their own call's arguments
     );
-    // Positional, mirroring what redactDerived was handed just above: outbound
-    // is [system, ...one per message] and inbound is [reply, ...one per
-    // action], so both message and action sit at i + 1. Lifted out ONCE here
-    // for the two readers that need the redacted messages — the summary below
-    // and the persisted transcript after it — so the offset is stated in one
-    // place. (Mode B builds its outbound half with NO system part, so there a
-    // message is at i; check the construction, not this comment, before
-    // copying either offset.)
-    const redactedMessages = (parsed?.messages ?? []).map((m, i) => ({
-      ...m,
-      content: derived.outbound[i + 1]!,
-    }));
+    // The outbound half splits back into the two runs it was built from, so
+    // each is indexed by its own arithmetic rather than one shared offset.
+    const outContents = derived.outbound.slice(0, contentParts.length);
+    const outDetails = derived.outbound.slice(contentParts.length);
+    // Positional, mirroring what redactDerived was handed just above. Each half
+    // now carries two runs and they are indexed DIFFERENTLY, so read the
+    // construction rather than pattern-matching one offset onto the other:
+    //   outbound = [system, ...content per message, ...detail per message]
+    //              → content at i + 1, detail at i of the second run
+    //   inbound  = [reply, ...detail+args INTERLEAVED per action]
+    //              → detail at 1 + 2i, args at 2 + 2i
+    // Outbound appends its runs (so content offsets stay byte-identical);
+    // inbound interleaves its pair. Lifted out ONCE here for the two readers
+    // that need the redacted messages — the summary below and the persisted
+    // transcript after it — so the offsets are stated in one place. (Mode B
+    // builds its outbound half with NO system part and no details, so there a
+    // message is at i.)
+    const redactedMessages = (parsed?.messages ?? []).map((m, i) => {
+      const out: DisplayMessage = { ...m, content: outContents[i + 1]! };
+      // Absent stays absent: assigning "" would add a field the parser never
+      // set, and a result card renders its label on presence.
+      if (out.detail !== undefined) out.detail = outDetails[i]!;
+      return out;
+    });
     // The summary QUOTES these strings into the feed line, so it is handed the
     // span-redacted copies rather than left to re-scrub the raw ones by value.
     // A value scrub cannot close this on its own: redactValuesInText floors at
@@ -495,19 +570,23 @@ export class Daemon {
     // surfaces BUILT FROM THESE PARTS, the summary was the last one still
     // scrubbing by value.
     //
-    // Two boundaries that leaves, so nobody reads this as a guarantee:
-    //   - Only `content` is a part. A DisplayMessage's `detail` (the
-    //     originating call's arguments, parsers.ts) rides `redactedMessages`'
-    //     spread untouched — same class of hole, different field. The one
-    //     surface it reaches, the stored transcript, scrubs it by value at the
-    //     persist site below; that closes everything except the 8-char floor
-    //     this note opens with. Any NEW reader of redactedMessages inherits the
-    //     raw field and must handle it.
-    //   - Spans only cover what the scan REPORTED. The engine stops at
-    //     MAX_FINDINGS_PER_RULE and still returns "ok", so match 501 of a rule
-    //     is invisible to every pass — spans and value scrub alike.
+    // One boundary that leaves, so nobody reads this as a guarantee: spans only
+    // cover what the scan REPORTED. The engine stops at MAX_FINDINGS_PER_RULE
+    // and still returns "ok", so match 501 of a rule is invisible to every pass
+    // — spans and value scrub alike.
+    //
+    // `detail` used to be a second one: not a part, so no span reached it, and
+    // the value scrub standing in for one left everything under the 8-char
+    // floor above raw in the stored transcript — the same four-char password,
+    // in the field right beside the content it was masked out of. It is a part
+    // now (see detailParts above), so a span reaches it wherever the scan
+    // reported one — which makes it a SHARER of the cap boundary above rather
+    // than an exception to it, and the half that hits it first. A NEW display
+    // field would inherit the original hole verbatim: the spread carries it and
+    // nothing scans it. Add it to the parts, not to a scrub.
     const summaryParsed = parsed && { ...parsed, messages: redactedMessages };
-    const summaryActions = respActions.map((a, i) => ({ ...a, detail: derived.inbound[i + 1]! }));
+    // Pairs, so the detail for action i sits at 1 + 2i (its args follows).
+    const summaryActions = respActions.map((a, i) => ({ ...a, detail: derived.inbound[1 + 2 * i]! }));
     // An unverified transcript is an unverified call: the row must not read
     // "ok" for text no scan checked. It rides the same `incomplete` flag as the
     // body halves, so the whole call is held out rather than only the derived
@@ -531,7 +610,9 @@ export class Daemon {
     // Redacted parts when redact-on-capture is on, raw ones otherwise — the
     // same line the other stored surfaces hold (only the always-visible summary
     // scrubs regardless of the setting).
-    let searchText = buildSearchText(parsed, call, redaction ? derived.outbound : outboundParts);
+    // Contents only: a detail is a substring of its own call message's rendered
+    // arguments, so indexing it would add nothing but a duplicate hit.
+    let searchText = buildSearchText(parsed, call, redaction ? outContents : contentParts);
     if (redaction?.heldOut) {
       sseRaw = null; // the raw stream could hold the unverified value
       searchText = "";
@@ -593,33 +674,40 @@ export class Daemon {
     // beside them. Persist the redacted projection for those rows and let it
     // win over the re-parse (viewer/detail.ts).
     //
-    // Layout is [system, ...messages], with index 0 ALWAYS the system prompt
-    // (empty when the request had none) — that fixed shape is what lets the
-    // viewer lift it back out unambiguously, even from a body whose own
-    // messages carry a "system" role.
+    // STORED layout is [system, ...messages, reply?, ...response calls], with
+    // index 0 ALWAYS the system prompt (empty when the request had none) — that
+    // fixed head is what lets the viewer lift it back out unambiguously, even
+    // from a body whose own messages carry a "system" role, and the tail is
+    // marked by a `kind` the parsers never emit.
     //
-    // `detail` is the first of the two boundaries named above, and this is the
-    // surface it actually reaches, so it is scrubbed BY VALUE here rather than
-    // left raw. Not a part, so no span covers it; but nothing manufactures a
-    // detail by joining blocks either — it is a verbatim slice of ONE tool
-    // argument, and that argument also rides the paired function_call's
-    // content, which the derived pass did scan. So the value is always already
-    // known, and redactValuesInText's raw/json-unescaped pair spans the
-    // escaping difference between the body's `arguments` string and the
-    // rendered detail (a PEM's real newlines vs the body's \n).
+    // It is NOT the derived array reshaped: that one carries a detail per
+    // message in a trailing run of its own, which has no entry here. The halves
+    // were lifted back out separately above precisely so this list can keep its
+    // own shape instead of inheriting the scan's.
     //
-    // What that does NOT reach is the same 8-char floor the note above
-    // describes: a connection-string password of four chars stays raw in a
-    // detail exactly as it would in a value-scrubbed summary. Closing that
-    // needs `detail` promoted to a scanned part, which reshapes outbound and
-    // its index arithmetic — deliberately not done here.
+    // Every `detail` here — a request message's and a response call's alike —
+    // arrives span-redacted from its own part, so the value scrub below is no
+    // longer what stands in for a missing span. It is the seam pass: a body
+    // value the DERIVED scan never reported at any offset in this projection
+    // (the finding cap). Belt and braces, the same pairing the Mode B search
+    // text uses.
+    //
+    // NOT gated on `redaction`, unlike the stored bodies and the search index.
+    // Turning redact-on-capture off buys the raw view of BYTES THAT WERE ON THE
+    // WIRE — and a secret a join manufactures was never on the wire in that
+    // form; the reassembly builds it at read time out of parts that are
+    // individually innocent. So the setting has no raw copy to protect here,
+    // and leaving this NULL only meant the viewer rebuilt the secret instead.
+    // The always-visible summary already draws exactly this line above ("Runs
+    // whatever the setting"). The raw panes still show every byte as received,
+    // which is what the setting is actually for.
     let displayMessages: DisplayMessage[] | null = null;
-    if (redaction && !redaction.heldOut && derived.values.length > 0 && parsed) {
+    if (!redaction?.heldOut && derived.values.length > 0 && parsed) {
       // Built inside the branch: persisting a projection is the exception, so
       // the common row must not pay to assemble a value list it never reads.
-      const values = [...derived.values, ...redaction.values, ...bodyValues];
+      const values = [...derived.values, ...(redaction?.values ?? []), ...bodyValues];
       displayMessages = [
-        { role: "system", content: derived.outbound[0]! },
+        { role: "system", content: outContents[0]! },
         ...redactedMessages.map((m) =>
           m.detail ? { ...m, detail: redactValuesInText(m.detail, values) } : m,
         ),
@@ -635,6 +723,22 @@ export class Daemon {
         ...(respParsed?.text !== undefined
           ? [{ role: "assistant", kind: "response" as const, content: derived.inbound[0] ?? "" }]
           : []),
+        // The reply's TOOL CALLS, same marker trick and same reason. The viewer
+        // re-runs extractActions over the stored body, which JSON-parses it —
+        // decoding the very escapes that hid the value from the scanner — so
+        // both halves of each card rebuild a string no rule ever matched in
+        // those bytes. args rides `content` (it is the card's body); detail
+        // keeps its own. Placeholder discovery covers BOTH fields now — see
+        // storedText — so the placement is the card's shape talking, not a
+        // constraint of what gets scanned for markers.
+        ...respActions.map((a, i) => ({
+          role: "assistant",
+          kind: "response-call" as const,
+          tool: a.tool,
+          callId: a.callId,
+          detail: derived.inbound[1 + 2 * i]!,
+          content: derived.inbound[2 + 2 * i]!,
+        })),
       ];
     }
 
@@ -880,7 +984,12 @@ export class Daemon {
         : messages.map((m, i) => {
             const content = redaction ? derived.outbound[i]! : String(m.content);
             return {
-              ...m, // keep display labels (tool/kind) — only the content is scrubbed
+              // Keep display labels (tool/kind) — only the content is scrubbed.
+              // Sound ONLY because these labels carry no content: the wire path
+              // spreads the same way and had to give `detail` its own derived
+              // part to stop it riding through raw. A Mode B mapper that starts
+              // setting `detail` (otlp-map sets none today) reopens that hole.
+              ...m,
               role: m.role,
               content:
                 (m as DisplayMessage).kind === "result"
@@ -1286,7 +1395,7 @@ export function buildSummary(
         ? firstLine(responseText, sent ? 80 : 100)
         : null;
   if (got !== null) {
-    return sent ? `${sent} → ${got}` : got;
+    return clampLine(sent ? `${sent} → ${got}` : got, SUMMARY_CAP);
   }
   if (!parsed) return "unparsed call (raw view available)";
   if (parsed.messages.length === 0) return "(no message content)";
@@ -1294,8 +1403,24 @@ export function buildSummary(
   // Mode B records are often tool-output-only (role "tool") or assistant-only —
   // their content should show ("ToolSearch: …"), not a bare "N messages" count.
   const pick = [...parsed.messages].reverse().find((m) => m.role === "user") ?? parsed.messages.at(-1)!;
-  return firstLine(pick.content, 100);
+  return clampLine(firstLine(pick.content, 100), SUMMARY_CAP);
 }
+
+// The assembled line's own bound. Each half already clamps, but the halves
+// COMPOSE — an ask plus three tool details is four independent run-pasts, which
+// stacked to 274 chars of real placeholder (541 for one forged in captured
+// content) and quietly walked back the "summary became unbounded" fix. Clamping
+// once here keeps that invariant statable again: SUMMARY_CAP, plus at most a
+// SINGLE placeholder run-past.
+//
+// 200 sits above the ~162 a summary of recognized verbs reaches, so ordinary
+// rows pass through untouched — but NOT every placeholder-free row does, and
+// the claim is worth stating honestly: verb() returns an unrecognized tool's
+// name verbatim and `tool` arrives unbounded, so a turn full of long MCP names
+// can cross 200 on name length alone and lose the trailing `+N` inside the cut.
+// That is the cap doing its job rather than a silent one — the ellipsis it
+// leaves is the same "there was more" signal `+N` carries.
+const SUMMARY_CAP = 200;
 
 // The request's newest content, judged from its trailing messages only (the
 // daemon has no previous-call diff): a trailing user message, or a trailing
@@ -1366,9 +1491,31 @@ function summarizeActions(actions: ToolAction[], compact = false): string {
   return extra > 0 ? `${shown} +${extra}` : shown;
 }
 
+// Bound a single line to `max` for display. Every caller clamps text
+// buildSummary already redacted (the scrub runs before EVERY truncation,
+// above), so on a leak row a placeholder straddling `max` is the NORMAL case —
+// and a bare slice leaves `my key [RED…`, which reads as a corrupted
+// transcript and drops the secret TYPE the placeholder exists to name.
+// clampRedacted runs past the closing bracket instead; the ellipsis stays for
+// the genuinely-truncated case.
+//
+// The overshoot is bounded by clampRedacted's own ceiling: 39 chars for a real
+// placeholder (the longest rule id is 21), 128 for one a captured tool result
+// forged in its content. That is why the quoted-ask regexes in
+// commands.ts/app.js bound that half at 200 rather than 40 — see the note
+// there — and why the assembled line clamps once more at SUMMARY_CAP.
+function clampLine(line: string, max: number): string {
+  if (line.length <= max) return line;
+  const clamped = clampRedacted(line, max - 1);
+  // Running past to the end dropped nothing — an ellipsis would be a lie.
+  if (clamped.length >= line.length) return line;
+  // The outer SUMMARY_CAP pass can land right after a half's own ellipsis;
+  // one mark already says "truncated", and `……` just reads as a typo.
+  return clamped.endsWith("…") ? clamped : clamped + "…";
+}
+
 function firstLine(s: string, max: number): string {
-  const line = s.split("\n")[0] ?? "";
-  return line.length > max ? line.slice(0, max - 1) + "…" : line;
+  return clampLine(s.split("\n")[0] ?? "", max);
 }
 
 function buildSearchText(parsed: ParsedRequest | null, call: CapturedCall, outboundParts: string[]): string {

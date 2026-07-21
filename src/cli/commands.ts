@@ -17,6 +17,7 @@ import { listLeakEvents } from "../viewer/feed-query";
 import { sessionHeadlines } from "../viewer/session-view";
 import { buildDetail, leakSpansFor, leakTypesFor } from "../viewer/detail";
 import { secretName } from "../notifier/alert-copy";
+import { clampRedacted } from "../transform/redact";
 import { buildCodexOtelArgs, buildCodexOtelEnv, buildHookSettings, buildOtelEnv, mergeHookIntoSettings } from "../parsers/otlp-map";
 import { codexSessionsRoot } from "../adapters/codex-rollout-tailer";
 import { buildExtensionRedirect, buildRedirectConfig, readFirstConfig, writeRedirectConfig, writeRedirectExtension } from "../install/config-redirect";
@@ -362,7 +363,12 @@ function fmtWhen(ts: number): string {
 // title-generation turn whose summary is literally {"title":"…"}.
 function unwrapTitle(raw: string | undefined): string {
   let t = (raw ?? "").trim();
-  let m = t.match(/^"([^"]{1,40})" → [\s\S]*$/);
+  // 200, not firstLine's 40: a redaction placeholder straddling that cap is run
+  // past whole rather than cut in half, so the ask can reach 38 + clampRedacted's
+  // 128-char overshoot ceiling + the ellipsis = 167. Bounded, but well over 40 —
+  // and a tighter bound here would silently stop matching, dropping the title
+  // back to the whole `"ask" → got` line on exactly the leak rows that matter.
+  let m = t.match(/^"([^"]{1,200})" → [\s\S]*$/);
   if (m) t = m[1]!;
   else if ((m = t.match(/^\d+ [A-Za-z_][\w.-]{0,40} results? → ([\s\S]*)$/))) t = m[1]!;
   else t = t.replace(/^([\s\S]*) — (?:to "[^"]{0,80}"|after \d+ [A-Za-z_][\w.-]{0,40} results?)$/, "$1");
@@ -409,8 +415,11 @@ export function cmdLeaks(stateDir: string): string {
     const head = headlines.get(sessionId) ?? {};
     const full = clean(unwrapTitle(head.title));
     // Cap the headline: stored summaries can run a sentence long, and the
-    // title only needs to identify the conversation.
-    const title = (full.length > 64 ? full.slice(0, 63) + "…" : full) || "(untitled session)";
+    // title only needs to identify the conversation. clampRedacted, not a bare
+    // slice — this is the leak log, where cutting a placeholder in half would
+    // stump the one thing the line is about right where it names the type.
+    const capped = full.length > 64 ? clampRedacted(full, 63) : full;
+    const title = (capped.length < full.length ? capped + "…" : full) || "(untitled session)";
     const agent = head.agent ? clean(head.agent) : "unknown agent";
     lines.push("", `  ${title} — ${agent} · session ${clean(sessionId)}`);
     for (const e of group) {

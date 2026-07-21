@@ -45,8 +45,10 @@ export interface CallRecord {
   responseBody: Uint8Array | null;
   responseHeaders: Array<[string, string]> | null;
   sseRaw: Uint8Array | null;
-  /** Mode B only: pre-flattened display messages (the self-report's structure). */
-  displayMessages?: Array<{ role: string; content: string }> | null;
+  /** Pre-flattened display messages (Mode B's self-report structure, and the
+   *  wire path's redacted projection). `detail` is redacted like `content` and
+   *  is typed here so a reader can't silently skip a masked surface. */
+  displayMessages?: Array<{ role: string; content: string; detail?: string }> | null;
   searchText: string;
 }
 
@@ -434,10 +436,20 @@ export class Store {
       // a Mode B row (search text ~= request body) outweighs the blobs. The
       // index cost is read from the stamped search_bytes rather than joined
       // from fts5 — see the schema note on why that join is O(n²).
+      // The stored transcript counts too. It is a near-full second copy of the
+      // row's readable text — for Mode B always, and for a wire row whenever
+      // derived redaction wrote one — so leaving it out under-bills exactly the
+      // rows that carry a secret, the same gap search_bytes was added to close.
+      // CAST to BLOB first: length() on TEXT counts CHARACTERS, so a transcript
+      // in CJK or one carrying emoji would bill about a third of its real
+      // footprint while every BLOB term beside it bills bytes. Same reason
+      // backfillSearchBytes casts, and it keeps the unit identical to
+      // search_bytes (Buffer.byteLength, utf8).
       const rows = this.db.all<{ id: string; sz: number }>(
         `SELECT e.id AS id,
                 COALESCE(length(p.request_body),0) + COALESCE(length(p.response_body),0)
                 + COALESCE(length(p.sse_raw),0)
+                + COALESCE(length(CAST(p.display_messages AS BLOB)),0)
                 + COALESCE(e.search_bytes,0) * ? AS sz
          FROM exchanges e LEFT JOIN payloads p ON p.exchange_id = e.id
          ORDER BY e.ts_request DESC`,

@@ -289,7 +289,9 @@ function App() {
 // plain run. Text nodes only either way (§6.8).
 function summaryParts(summary) {
   const s = summary ?? "(no summary)";
-  let m = s.match(/^("[^"]{1,40}" → |\d+ [A-Za-z_][\w.-]{0,40} results? → )([\s\S]*)$/);
+  // The ask bounds at 200, not firstLine's 40 — a placeholder straddling that
+  // cap is run past whole, so the ask can reach 167 (see firstLine in daemon.ts).
+  let m = s.match(/^("[^"]{1,200}" → |\d+ [A-Za-z_][\w.-]{0,40} results? → )([\s\S]*)$/);
   if (m) return [[m[1], true], [m[2], false]];
   m = s.match(/^([\s\S]*)( — (?:to "[^"]{0,80}"|after \d+ [A-Za-z_][\w.-]{0,40} results?))$/);
   return m ? [[m[1], false], [m[2], true]] : [[s, false]];
@@ -403,7 +405,8 @@ function sessionTitle(raw) {
   // — after N x results) — strip it (rightmost, bounded). A summary matching
   // none of these is already title-shaped.
   let t = (raw ?? "").trim();
-  let m = t.match(/^"([^"]{1,40})" → [\s\S]*$/);
+  // 200, not firstLine's 40 — see summaryParts above.
+  let m = t.match(/^"([^"]{1,200})" → [\s\S]*$/);
   if (m) t = m[1];
   else if ((m = t.match(/^\d+ [A-Za-z_][\w.-]{0,40} results? → ([\s\S]*)$/))) t = m[1];
   else t = t.replace(/^([\s\S]*) — (?:to "[^"]{0,80}"|after \d+ [A-Za-z_][\w.-]{0,40} results?)$/, "$1");

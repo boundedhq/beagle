@@ -48,6 +48,43 @@ describe("scan-time budget (R5: p99 ≤ ~10ms on 1 MB)", () => {
     // generous ceiling for CI variance; the design target is ~10ms
     expect(median(times)).toBeLessThan(50);
   });
+
+  // The body above contains no JSON escapes, so it takes the single-pass fast
+  // path and would not notice the second view at all. Tool-call traffic is the
+  // shape that forces BOTH passes, and it is the common case in practice, so
+  // the budget needs a sample of it.
+  //
+  // The chunk carries secret-ish KEYWORDS on purpose. The prescan is the lever
+  // that keeps scan time flat, so a keyword-free body measures almost nothing:
+  // only 3 of 30 rules survive it, and the second pass re-runs just those. With
+  // keywords it is 5 of 30 — still not "every rule", which no realistic body
+  // reaches. (The ratio to the plain-body gate is machine-specific: measured
+  // between 2.2x and 3.9x on different hosts, so no number is quoted here.)
+  //
+  // Note what this body did BEFORE the change that added this gate: masking used
+  // to leave `\"` alone, so a body whose only escapes were quotes took the
+  // single-pass fast path. Blanking them is what moves ordinary tool-call
+  // traffic onto two passes. The cost below is that decision's, not a standing
+  // property of two-view scanning.
+  //
+  // What this catches is a blow-up: masking going superlinear, or a third view
+  // being added. It is far too loose to catch a modest regression, exactly as
+  // with the plain-body gate above, and nothing here proves the R5 p99 target.
+  // The ceiling keeps roughly the same headroom over the local median that the
+  // gate above does, so a slow shared runner doesn't turn it into a flake.
+  test("median 1 MB escape-dense body scan stays well under the deadline", () => {
+    let body = "";
+    const chunk = String.raw`{"tool_calls":[{"function":{"name":"write_file","arguments":"{\"path\":\".env\",\"content\":\"AWS_SECRET_ACCESS_KEY=changeme\\napi_key: none\\npassword: none\\n\"}"}}]},` + "\n";
+    while (body.length < 1 << 20) body += chunk;
+    const bytes = new TextEncoder().encode(body);
+    const times: number[] = [];
+    for (let i = 0; i < 30; i++) {
+      const t = performance.now();
+      scan(bytes, {}, rules);
+      times.push(performance.now() - t);
+    }
+    expect(median(times)).toBeLessThan(150);
+  });
 });
 
 describe("proxy added-latency budget (R9: p50 ≤ ~5ms over direct)", () => {

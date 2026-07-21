@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { buildSummary } from "../src/daemon/daemon";
+import { redactionPlaceholder } from "../src/transform/redact";
 import type { ParsedRequest } from "../src/parsers/parsers";
 
 // Regression for the Mode B display bug: rows whose only message wasn't from
@@ -192,5 +193,89 @@ describe("buildSummary — wire-order sent half", () => {
     );
     expect(s).not.toContain(SECRET);
     expect(s).toContain("[REDACTED:aws-access-key-id:");
+  });
+
+  test("a placeholder straddling a cap renders WHOLE, not cut to a `[RED…` stump", () => {
+    // The scrub runs before every truncation, so on a leak row a placeholder
+    // straddling a cap is the NORMAL case, not an edge one: a placeholder is
+    // ~35 chars against caps of 40 (the quoted ask) and 100 (the fallback).
+    // Half of one reads as a corrupted transcript AND drops the secret type.
+    const SECRET = "AKIAZQ3DRSTUVWXY2345";
+    const vals = [{ value: SECRET, type: "aws-access-key-id" }];
+    const P = redactionPlaceholder("aws-access-key-id", SECRET);
+
+    // The 40-char quoted ask — the tightest budget in buildSummary.
+    const ask = buildSummary(
+      req([{ role: "user", content: `use key ${SECRET} for deploy` }]),
+      "Deploying.", undefined, vals,
+    );
+    expect(ask).toBe(`"use key ${P}…" → Deploying.`);
+    // ...and the run-past still fits the bound sessionTitle/summaryParts parse
+    // the sent half with — the tripwire if a longer rule id ever lands.
+    expect(ask).toMatch(/^"[^"]{1,200}" → /);
+
+    // The 100-char fallback, with the secret starting at char 95.
+    const fallback = buildSummary(
+      req([{ role: "user", content: `${"p".repeat(94)} ${SECRET}` }]),
+      undefined, undefined, vals,
+    );
+    expect(fallback).toBe(`${"p".repeat(94)} ${P}`);
+    expect(fallback).not.toContain("…"); // nothing followed the secret to drop
+  });
+
+  test("run-pasts COMPOSE, so the assembled line clamps once more at SUMMARY_CAP", () => {
+    // Keeping a placeholder whole widens a half; the halves then compose. An
+    // ask plus three tool details is FOUR independent run-pasts, and without a
+    // bound on the assembled line they stacked to 274 chars of real placeholder
+    // (541 for one forged in captured content) — quietly walking back the
+    // "summary became unbounded" fix that the branch-level clamps exist for.
+    // Both fixtures below exceed the cap only via run-past, never raw length.
+    const SECRET = "AKIAZQ3DRSTUVWXY2345";
+    const vals = [{ value: SECRET, type: "aws-secret-access-key" }]; // longest rule id: 21
+    const straddle = `${"g".repeat(38)}${SECRET}${"t".repeat(400)}`;
+    const real = buildSummary(
+      req([{ role: "user", content: straddle }]),
+      undefined,
+      Array.from({ length: 3 }, () => ({ tool: "grep", detail: straddle })),
+      vals,
+    );
+
+    // A placeholder-SHAPED literal in captured content is not a real secret,
+    // so no scrub is involved — clampRedacted still runs past it, up to its
+    // 128-char window. This is the ceiling an agent's own output can reach.
+    const forged = `${"g".repeat(38)}[REDACTED:${"F".repeat(110)}:abcdef]${"t".repeat(400)}`;
+    const spoofed = buildSummary(
+      req([{ role: "user", content: forged }]),
+      undefined,
+      Array.from({ length: 3 }, () => ({ tool: "grep", detail: forged })),
+    );
+
+    for (const s of [real, spoofed]) {
+      // SUMMARY_CAP (200) plus at most ONE placeholder run-past — the outer
+      // clamp's whole point is that the overshoot no longer multiplies.
+      expect(s.length).toBeLessThanOrEqual(200 + 128);
+      expect(s).not.toContain("\n"); // still one stored line
+    }
+    // The real-placeholder case is the one a leak actually produces; pin it
+    // tightly so a future widening cannot hide inside the forged headroom.
+    expect(real.length).toBeLessThanOrEqual(200 + 39);
+
+    // Both fixtures above land the OUTER clamp in filler, so they say nothing
+    // about bisection — a bare slice would pass them. This padding puts a
+    // placeholder across SUMMARY_CAP itself, so the outer clamp has to run past
+    // it exactly as the inner ones do. A bare slice here ends
+    // `…D:aws-secret-access-key:6cc69…` — the stump this whole PR is about.
+    const atTheCap = buildSummary(
+      req([{ role: "user", content: `${SECRET}${"t".repeat(300)}` }]),
+      undefined,
+      Array.from({ length: 2 }, () => ({ tool: "grep", detail: `${"h".repeat(27)}${SECRET}${"u".repeat(300)}` })),
+      vals,
+    );
+    expect(atTheCap.length).toBeGreaterThan(200); // the outer clamp DID run past
+    expect(atTheCap).toEndWith(`${redactionPlaceholder("aws-secret-access-key", SECRET)}…`);
+    for (const s of [real, spoofed, atTheCap]) {
+      expect(s).not.toMatch(/\[REDACTED:[^\]]*$/); // never a bisected tail
+      expect(s).not.toContain("……"); // one truncation mark, not two
+    }
   });
 });

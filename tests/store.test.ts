@@ -448,6 +448,34 @@ describe("Retention & purge", () => {
     store.close();
   });
 
+  test("sweep bills the stored transcript, in BYTES not characters", () => {
+    // Two bugs in one test. The transcript column was billed at 0, though for a
+    // Mode B row it is a second copy of the whole readable text; and it is TEXT,
+    // where SQLite's length() counts CHARACTERS. Agent traffic is routinely
+    // non-ASCII (CJK, emoji, accented prose) at 3-4 bytes a character, so
+    // billing characters lets the store grow to several times the configured
+    // cap. The CAST is what makes the unit match search_bytes.
+    const store = Store.open(dir);
+    const wide = "日".repeat(60_000); // 60k chars, 180k bytes
+    const mk = (ageMs: number) =>
+      fakeCall({
+        tsRequest: Date.now() - ageMs,
+        requestBody: new Uint8Array(0),
+        responseBody: null,
+        searchText: "",
+        displayMessages: [{ role: "user", content: wide }],
+      });
+    const [a, b] = [mk(2000), mk(1000)];
+    for (const e of [a, b]) store.insertCall(e);
+    // The cap sits between the two readings: under the true byte cost of both
+    // rows (~360k) but above their character count (~120k). Billing characters
+    // — or not billing at all — keeps everything; billing bytes evicts the older.
+    store.sweep({ payloadWindowMs: Infinity, eventWindowMs: Infinity, sizeCapBytes: 200_000 });
+    expect(store.getCall(b.id)).not.toBeNull(); // newest fits
+    expect(store.getCall(a.id)).toBeNull(); // older row is over the byte cap
+    store.close();
+  });
+
   test("a search-text-heavy store actually shrinks to the configured cap on disk", () => {
     // End-to-end: the cap has to bound the file the user sees in `beagle
     // status`, not an internal tally. Realistic log-like text, since the
