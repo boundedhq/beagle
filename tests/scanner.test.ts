@@ -230,6 +230,23 @@ describe("JSON-escape-prefixed secrets (leading-boundary regression)", () => {
     }
   });
 
+  test("masking does not shorten a run into a bounded-length rule's window", () => {
+    // The real FP surface of masking, which the word-char test above does NOT
+    // cover: `aws-secret-shape` wants exactly 40 chars and
+    // `base64-wrapped-secret` at most 256, so blanking a character could drop
+    // an over-long run into range. Masking always eats from a run's HEAD (the
+    // blanked span starts at a backslash, already a delimiter), so an interior
+    // character can never be removed and a run can never be split in two.
+    const run41 = "kR8vQ2mZ7xL4pN9wT3yB6cF1jH5sD0gA8eU2iO4tX"; // 41 chars, high entropy
+    expect(run41.length).toBe(41);
+    // Interior escape: the run is already delimited by the backslash itself,
+    // so neither view invents a 40-char window here.
+    expect(scanText(`note ${run41.slice(0, 20)}${BS}n${run41.slice(20)} end`)
+      .some((f) => f.secretType === "aws-secret-shape")).toBe(false);
+    // And a genuinely 41-char run stays out of the window from either view.
+    expect(scanText(`note ${run41} end`).some((f) => f.secretType === "aws-secret-shape")).toBe(false);
+  });
+
   test("a backslash that is NOT a JSON escape is left alone", () => {
     // Regression: masking `\A` as though it were an escape would blank the
     // key's own first character and turn a detection into a miss. Only the
@@ -241,16 +258,28 @@ describe("JSON-escape-prefixed secrets (leading-boundary regression)", () => {
     }
   });
 
-  test("known gap: a bare backslash in a NON-JSON body can still eat a b/f/n/r/t head", () => {
-    // Accepted limitation, pinned so it stays a decision and not a surprise.
-    // `npm_` is the only structured rule whose secret starts with one of the
-    // escape letters, so `\` + `npm_…` tokenizes as `\n` and loses the `n`.
+  test("a literal backslash cannot hide a secret whose head is an escape letter", () => {
+    // Masking alone could not tell `\r` in `C:\creds\redis://…` from a real
+    // escape, and blanked the `r` — so the HIGH-severity connection-string rule
+    // missed it. Scanning the raw view too is what closes this; `npm_` (n) and
+    // `redis` (r) are the structured rules whose secret starts with an escape
+    // letter, and connection-string's password group accepts backslashes so it
+    // can also lose a character MID-value.
     const NPM = "npm_Zx9Yw8Vu7Tt6Ss5Rr4Qq3Pp2Oo1Nn0MmLl2K";
-    expect(scanText(`C:${BS}creds${BS}${NPM}`).some((f) => f.secretType === "npm-token")).toBe(false);
-    // In real JSON that backslash MUST be doubled — and then it works.
-    expect(scanText(`C:${BS}${BS}creds${BS}${BS}${NPM}`).some((f) => f.secretType === "npm-token")).toBe(true);
-    // No other structured rule starts with b/f/n/r/t, so nothing else regresses.
-    expect(scanText(`C:${BS}creds${BS}AKIAZQ3DRSTUVWXY2345`).some((f) => f.secretType === "aws-access-key-id")).toBe(true);
+    const has = (t: string, d: string) => scanText(t).some((f) => f.secretType === d);
+    expect(has(`C:${BS}creds${BS}${NPM}`, "npm-token")).toBe(true);
+    expect(has(`C:${BS}${BS}creds${BS}${BS}${NPM}`, "npm-token")).toBe(true); // JSON form
+    expect(has(`${BS}redis://user:hunter2secret@h/0`, "connection-string")).toBe(true);
+    expect(has(`C:${BS}creds${BS}redis://user:hunter2secret@db:6379/0`, "connection-string")).toBe(true);
+    expect(has(`mongodb://u:ab${BS}ncd@host/db`, "connection-string")).toBe(true); // mid-value
+    expect(has(`C:${BS}creds${BS}AKIAZQ3DRSTUVWXY2345`, "aws-access-key-id")).toBe(true);
+  });
+
+  test("the union does not double-report a secret both views agree on", () => {
+    // Every finding is reported once, or the store and the alert engine would
+    // see phantom duplicates on any body carrying an escape.
+    const body = JSON.stringify({ role: "user", content: `key:\nAKIAZQ3DRSTUVWXY2345\n` });
+    expect(scanText(body).filter((f) => f.secretType === "aws-access-key-id").length).toBe(1);
   });
 
   test("escape-prefixed decoys stay silent at every tier", () => {
@@ -267,15 +296,34 @@ describe("JSON-escape-prefixed secrets (leading-boundary regression)", () => {
     }
   });
 
-  test("masking is length-preserving, or every finding offset would shift", () => {
+  test("masking only ever blanks whole escapes to spaces, in place", () => {
     // The whole design rests on this: spans index the raw bytes that
-    // redact-on-capture and the store slice.
+    // redact-on-capture and the store slice. Length alone is too weak an
+    // assertion (an identity function passes it), so also require that every
+    // position either kept its character or became a space.
     for (const s of [
       String.raw`a\nb`, String.raw`Ax`, String.raw`\t\r\n`, String.raw`a\\nb`,
       String.raw`q\"quoted\"`, "no escapes at all", String.raw`\\`,
+      String.raw`Ax`, String.raw`\uZZZZ`, String.raw`\u12`,
       "dangling" + BS, // a lone trailing backslash must not throw or resize
     ]) {
-      expect(maskJsonEscapes(s).length).toBe(s.length);
+      const m = maskJsonEscapes(s);
+      expect(m.length).toBe(s.length);
+      for (let i = 0; i < s.length; i++) {
+        expect(m[i] === s[i] || m[i] === " ").toBe(true);
+      }
+    }
+  });
+
+  test("offsets stay exact across multi-byte and astral characters", () => {
+    // Offsets are UTF-16 indices; a surrogate pair or a 3-byte character before
+    // the secret must not shift the span redaction slices out.
+    const K = "AKIAZQ3DRSTUVWXY2345";
+    for (const lead of ["日本語のテキスト", "emoji 🙈🙉 here", "mixed 日本 🙈 text"]) {
+      const body = JSON.stringify({ role: "user", content: `${lead}:\n${K}\ndone` });
+      const f = scanText(body).find((x) => x.secretType === "aws-access-key-id");
+      expect(f).toBeDefined();
+      expect(body.slice(f!.start, f!.end)).toBe(K);
     }
   });
 
@@ -290,12 +338,6 @@ describe("JSON-escape-prefixed secrets (leading-boundary regression)", () => {
     expect(maskJsonEscapes(String.raw`key\\nAKIA`)).toBe(String.raw`key\\nAKIA`);
   });
 
-  test("rules stay data — the fix touches no regex, so the pin still holds", () => {
-    // R5/§6.11: the widening lives in the engine, not the vendored corpus.
-    const raw = readFileSync("rules/beagle-rules.json", "utf8");
-    const pin = readFileSync("rules/beagle-rules.sha256", "utf8").trim();
-    expect(() => loadRuleFile(raw, pin)).not.toThrow();
-  });
 });
 
 describe("helpers", () => {

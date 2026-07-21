@@ -62,23 +62,29 @@ const MAX_FINDINGS_PER_RULE = 500;
 // tokenizing — in `\\n` the `n` is literal text, not an escape, and must keep
 // suppressing the boundary.
 //
-// KNOWN GAP (accepted): a body that is NOT JSON can carry a bare backslash
-// that looks exactly like an escape, and nothing here can tell the two apart.
-// A secret whose FIRST character is b/f/n/r/t, sitting immediately after such
-// a backslash, loses that character to the mask and is missed — of the
-// structured rules only `npm-token` starts with one (`C:\creds\npm_…`).
-// Valid JSON must write that backslash as `\\`, which tokenizes correctly, so
-// this cannot bite a real JSON body. Closing it needs either a second pass
-// over the raw view (~2x scan time on the JSON traffic beagle mostly sees) or
-// a content-type threaded down to the scanner; neither is worth it for one
-// rule in a shape that does not occur in practice.
+// Masking alone is still not enough, because a body that is NOT JSON can carry
+// a bare backslash that looks exactly like an escape and nothing here can tell
+// the two apart. `C:\creds\redis://u:pw@h/0` loses the `r` of `redis` and the
+// high-severity connection-string rule misses it; the same rule's password
+// group accepts backslashes, so `mongodb://u:ab\ncd@h/db` loses a character
+// mid-value. That is why scan() runs the rules over BOTH views and unions the
+// results rather than trusting the masked view alone.
 const JSON_ESCAPE = /\\(?:u[0-9a-fA-F]{4}|[bfnrt"\\/])/g;
+
+// Hot path: an 8 MiB escape-dense body runs this millions of times, so the
+// replacement avoids a per-match regex test. A match is either a 6-char
+// `\uXXXX` or a 2-char `\X`; only `"`, `\` and `/` end in a non-word char.
+const SPACES_2 = "  ";
+const SPACES_6 = "      ";
+const QUOTE = 34, BACKSLASH = 92, SLASH = 47;
 
 export function maskJsonEscapes(text: string): string {
   if (!text.includes("\\")) return text; // fast path: nothing to mask
-  return text.replace(JSON_ESCAPE, (esc) =>
-    /[A-Za-z0-9_]$/.test(esc) ? " ".repeat(esc.length) : esc,
-  );
+  return text.replace(JSON_ESCAPE, (esc) => {
+    if (esc.length === 6) return SPACES_6; // \uXXXX — tail is a hex digit
+    const c = esc.charCodeAt(1);
+    return c === QUOTE || c === BACKSLASH || c === SLASH ? esc : SPACES_2;
+  });
 }
 
 export function compileRules(specs: RuleSpec[], hmacKey: Uint8Array): CompiledRules {
@@ -90,11 +96,28 @@ export function compileRules(specs: RuleSpec[], hmacKey: Uint8Array): CompiledRu
 
 export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): Finding[] {
   const raw = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-  // Match against the escape-masked view; read secret VALUES back out of `raw`
-  // at the reported offsets. Masking is length-preserving, so the two index
-  // identically — and a secret that legitimately spans an escape (a PEM body
-  // carrying `\n`) is still fingerprinted and redacted from its true bytes.
-  const text = maskJsonEscapes(raw);
+  const masked = maskJsonEscapes(raw);
+  // Both views, unioned. The masked view finds a secret whose separator is a
+  // JSON escape; the raw view finds one whose backslash was literal text after
+  // all. Neither view alone is sound — see JSON_ESCAPE — and a miss costs more
+  // than the second pass, which only runs when the views actually differ.
+  // Offsets agree because masking is length-preserving, so a finding from
+  // either view indexes the same raw bytes and dedupes by span.
+  const findings = matchAll(raw, masked, ctx, compiled);
+  if (masked !== raw) {
+    for (const f of matchAll(raw, raw, ctx, compiled)) {
+      if (!findings.some((g) => g.start === f.start && g.end === f.end && g.detector === f.detector)) {
+        findings.push(f);
+      }
+    }
+  }
+  return suppressOverlaps(findings);
+}
+
+// Run every rule over `view`, reporting spans into `raw`. Split out of scan()
+// only so both views share one implementation.
+function matchAll(raw: string, view: string, ctx: ScanCtx, compiled: CompiledRules): Finding[] {
+  const text = view;
   const lower = text.toLowerCase();
   const authNorm = ctx.authValue ? normalize(ctx.authValue) : undefined;
   const findings: Finding[] = [];
@@ -163,9 +186,15 @@ export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): 
     }
   }
 
-  // Overlap suppression: a structured hit owns its span; possible-tier
-  // findings on the same bytes are noise (the generic rule re-matching an
-  // AWS key must not double-report).
+  return findings;
+}
+
+// Overlap suppression: a structured hit owns its span; possible-tier findings
+// on the same bytes are noise (the generic rule re-matching an AWS key must
+// not double-report). Runs on the UNION of both views, so a structured hit
+// found only in the raw view still silences a quiet-tier hit from the masked
+// one.
+function suppressOverlaps(findings: Finding[]): Finding[] {
   const structuredSpans = findings.filter((f) => f.tier === "structured");
   const result = findings.filter(
     (f) =>
