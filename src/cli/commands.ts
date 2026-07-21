@@ -18,6 +18,7 @@ import { sessionHeadlines } from "../viewer/session-view";
 import { buildDetail, leakSpansFor, leakTypesFor } from "../viewer/detail";
 import { secretName } from "../notifier/alert-copy";
 import { buildCodexOtelArgs, buildCodexOtelEnv, buildHookSettings, buildOtelEnv, mergeHookIntoSettings } from "../parsers/otlp-map";
+import { codexSessionsRoot } from "../adapters/codex-rollout-tailer";
 import { buildExtensionRedirect, buildRedirectConfig, readFirstConfig, writeRedirectConfig, writeRedirectExtension } from "../install/config-redirect";
 import { AGENTS, buildRunEnv, runBaseUrl } from "./agents";
 import { BEAGLE_VERSION } from "../core/version";
@@ -198,16 +199,12 @@ function daemonWhy(d: DaemonInfo): string | null {
     : "idle — winds down within a few minutes";
 }
 
-// Where codex writes its per-session rollout logs — the source Beagle reads
-// codex's assistant replies from (its OTel self-report omits them). Mirrors
-// codexSessionsRoot() in adapters/codex-rollout-tailer.ts; kept local so the CLI
-// doesn't import the tailer (fs/timers) for one path. Injectable for tests.
-function codexSessionsDir(): string {
-  return join(process.env.CODEX_HOME || join(homedir(), ".codex"), "sessions");
-}
+// True if codex has written any session logs under `dir` — the source Beagle
+// reads codex's assistant replies from (its OTel self-report omits them). A lone
+// dotfile (e.g. a macOS .DS_Store) doesn't count as a real session log.
 function hasCodexSessionLogs(dir: string): boolean {
   try {
-    return existsSync(dir) && readdirSync(dir).length > 0;
+    return existsSync(dir) && readdirSync(dir).some((name) => !name.startsWith("."));
   } catch {
     return false;
   }
@@ -219,8 +216,9 @@ export function cmdStatus(
   // Injectable so tests don't shell out to launchctl/systemctl.
   isServiceActive: (kind: ServiceKind, path: string) => boolean = (kind, path) =>
     osServiceRunner.isActive?.({ kind, path }) ?? true,
-  // Injectable so tests don't depend on the real ~/.codex.
-  codexSessions: string = codexSessionsDir(),
+  // codex's rollout-log root (the source of codex replies); injectable for tests.
+  // Single source of truth is the tailer, so status looks where the daemon reads.
+  codexSessions: string = codexSessionsRoot(),
 ): string {
   const row = (label: string, text: string) => label.padEnd(STATUS_GUTTER) + text;
   const cont = (text: string) => " ".repeat(STATUS_GUTTER) + text;
@@ -272,14 +270,17 @@ export function cmdStatus(
   const leaks = store?.countLeakEvents() ?? 0;
   // Agent-reported (Mode B) calls carry a known content gap — disclose it here
   // (R2, spike criterion #2) whenever any exist, not just in the docs.
-  const otelCalls = store?.queryAll<{ n: number }>(
-    "SELECT COUNT(*) AS n FROM exchanges WHERE source='otel'",
-  )[0]?.n ?? 0;
-  // Codex subscription turns specifically: their answer is recovered from the
-  // rollout log, so a missing log is a codex-only capture gap worth surfacing.
-  const codexOtelCalls = store?.queryAll<{ n: number }>(
-    "SELECT COUNT(*) AS n FROM exchanges WHERE source='otel' AND agent='codex'",
-  )[0]?.n ?? 0;
+  // One pass over exchanges: total agent-reported (Mode B) rows, and the codex
+  // subset — codex's answer is recovered from the rollout log, so a missing log
+  // is a codex-only capture gap worth surfacing below. (SUM over a bool expr is
+  // SQLite's conditional count; NULL only when the table is empty.)
+  const otelCounts = store?.queryAll<{ otel: number | null; codex: number | null }>(
+    `SELECT SUM(source='otel') AS otel,
+            SUM(source='otel' AND agent='codex') AS codex
+     FROM exchanges`,
+  )[0];
+  const otelCalls = otelCounts?.otel ?? 0;
+  const codexOtelCalls = otelCounts?.codex ?? 0;
   store?.close();
   const dbPath = join(stateDir, "beagle.db");
   const sizeMb = existsSync(dbPath) ? (statSync(dbPath).size / (1 << 20)).toFixed(1) : "0.0";
