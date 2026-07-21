@@ -402,6 +402,31 @@ describe("Codex OTLP → Call mapping (Codex Mode B, codex.* schema)", () => {
     expect(scanned).toContain("AKIAZQ3DRSTUVWXY2345"); // the tool OUTPUT — the key gap Codex closes natively
   });
 
+  test("BOTH tool-result mappers emit UNTRUNCATED content, carrying the cap as a hint", () => {
+    // The cap belongs to the ingest path now, applied only after redaction has
+    // scrubbed whole values (capDisplay). A mapper that truncates again would
+    // reopen the hole — a secret straddling the cut keeps its head in the
+    // transcript, unreachable by BOTH passes (the rule needs the tail it lost,
+    // the value scrub needs the whole value). The daemon-level regression
+    // covers the codex mapper end-to-end; this pins the contract at the layer
+    // where it is actually expressed, and covers the hook mapper, whose
+    // display message no other test touches.
+    const big = "z".repeat(9000);
+    const codex = mapCodexOtlpToCalls(
+      codexLogs([codexEvent("codex.tool_result", { "conversation.id": "c", tool_name: "exec_command", output: big })]),
+    )[0]!;
+    const hookCall = mapHookToCall({ session_id: "s", tool_name: "Bash", tool_response: big }, ctx)!;
+    for (const [tool, call] of [["exec_command", codex], ["Bash", hookCall]] as const) {
+      const m = call.request.messages![0]! as DisplayMessage;
+      expect(m.content).toBe(`${tool}: ${big}`); // untruncated: the whole output rides through
+      expect(m.displayMax).toBe(`${tool}: `.length + 4000); // the cap the daemon will apply
+    }
+    // tool_name is agent-supplied and unbounded — the cap must not scale with
+    // it, or a hostile name carries an arbitrarily large row into the store.
+    const hostile = mapHookToCall({ session_id: "s", tool_name: "T".repeat(50_000), tool_response: big }, ctx)!;
+    expect((hostile.request.messages![0]! as DisplayMessage).displayMax).toBe(64 + 2 + 4000);
+  });
+
   test("operational codex.* events (api_request, sse_event) carry no content and map to nothing", () => {
     const calls = mapCodexOtlpToCalls(
       codexLogs([
@@ -468,6 +493,13 @@ describe("Codex OTLP → Call mapping (Codex Mode B, codex.* schema)", () => {
     // codex streams long exec output across several tool_result records; a
     // secret cut at a chunk boundary must be reassembled or the detector regex
     // can never see it whole.
+    //
+    // This test used to assert `toContain("AKIAZQ3DRS\nTUVWXY2345")` — the
+    // newline-JOINED form — which reads like reassembly but is precisely the
+    // thing that stops the rule matching. It passed for as long as the bug
+    // existed. Assert the secret is CONTIGUOUS, the only property that makes
+    // the merge worth doing; tests/otlp-daemon.test.ts pins the detection
+    // end-to-end (an alert actually firing).
     const calls = mapCodexOtlpToCalls(
       codexLogs([
         codexEvent("codex.tool_result", {
@@ -482,7 +514,11 @@ describe("Codex OTLP → Call mapping (Codex Mode B, codex.* schema)", () => {
     );
     expect(calls.length).toBe(1); // one Call per call_id, not per chunk
     const scanned = decode(calls[0]!.request.bodyBytes);
-    expect(scanned).toContain("AKIAZQ3DRS\nTUVWXY2345"); // chunks adjacent, newline-joined
+    expect(scanned).toContain("AKIAZQ3DRSTUVWXY2345"); // seam erased: the key is whole
+    expect(scanned).not.toContain("AKIAZQ3DRS\nTUVWXY2345"); // no separator AT the seam
+    // The display copy carries the reassembly too, or the value scrub has no
+    // whole value to find and the transcript keeps the key (daemon-level test).
+    expect((calls[0]!.request.messages![0]! as DisplayMessage).content).toContain("AKIAZQ3DRSTUVWXY2345");
     expect(scanned.match(/cat key\.txt/g)?.length).toBe(1); // repeated arguments deduped
     // distinct call_ids stay distinct rows
     const two = mapCodexOtlpToCalls(

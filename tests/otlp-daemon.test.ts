@@ -242,6 +242,57 @@ describe("Mode B end-to-end through the daemon", () => {
     store.close();
   });
 
+  test("a secret split across two tool_result CHUNKS is detected", async () => {
+    // codex streams one exec's output across several tool_result records. The
+    // grouping exists so a secret cut at a chunk seam is reassembled — but
+    // joining the chunks with "\n" put a newline exactly AT the seam, so the
+    // detector never matched and NOTHING fired: no alert, no redaction, raw
+    // halves in the body and the index. Worse than the display hole above,
+    // which at least alerted.
+    const chunk = (output: string) =>
+      codexEvent("codex.tool_result", {
+        "conversation.id": "otel-conv-split", call_id: "call-7",
+        tool_name: "exec_command", arguments: '{"cmd":"cat key.txt"}', output,
+      });
+    await post(codexLogs([chunk("the key is AKIAZQ3DRS"), chunk("TUVWXY2345 and the rest")]));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    expect(listLeakEvents(store).length).toBe(1); // reassembled → detected
+    const call = store.getCall(store.searchLiteral("cat key.txt")[0]!.callId)!;
+    expect(call.redacted).toBe(true);
+    const body = new TextDecoder().decode(call.requestBody!);
+    expect(body).not.toContain("AKIAZQ3DRSTUVWXY2345");
+    expect(body).toContain("[REDACTED:aws-access-key-id:");
+    store.close();
+  });
+
+  test("a secret straddling a CHUNK boundary is scrubbed from the transcript too", async () => {
+    // The display copy showed only the LAST chunk while the scan surface was
+    // every chunk joined, so the matched value was not a substring of the
+    // display text and the value scrub no-opped — the same failure class as
+    // the truncation hole, at a different boundary. The transcript now renders
+    // the whole reassembled output, so the scrub has the value to find.
+    const pemHead = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAchunkSeam";
+    const pemTail = "Regression\n-----END RSA PRIVATE KEY-----";
+    const chunk = (output: string) =>
+      codexEvent("codex.tool_result", {
+        "conversation.id": "otel-conv-seam", call_id: "call-9",
+        tool_name: "exec_command", arguments: '{"cmd":"cat id_rsa"}', output,
+      });
+    await post(codexLogs([chunk(pemHead), chunk(pemTail)]));
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    expect(listLeakEvents(store).length).toBe(1);
+    const call = store.getCall(store.searchLiteral("cat id_rsa")[0]!.callId)!;
+    const dm = JSON.stringify(call.displayMessages);
+    expect(dm).not.toContain("MIIEowIBAAKCAQEAchunkSeam");
+    expect(dm).not.toContain("-----END RSA PRIVATE KEY-----");
+    expect(dm).toContain("[REDACTED:private-key:");
+    // …and the earlier chunk is rendered at all, not silently dropped.
+    expect(new TextDecoder().decode(call.requestBody!)).toContain("[REDACTED:private-key:");
+    store.close();
+  });
+
   test("a long tool output is still capped — moving the cut must not grow transcripts", async () => {
     // The other half of the fix above: the cap moved from the mapper to the
     // store step, so nothing else asserts it still happens. Without this, the

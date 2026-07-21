@@ -540,10 +540,10 @@ export class Daemon {
       //
       // That outbound surface is the SCANNED BYTES, not the display messages.
       // A display message is a PARTIAL view of it: a tool result drops the tool
-      // INPUT entirely and its stored copy is capped at TOOL_OUTPUT_DISPLAY_MAX
-      // (otlp-map's buildCodexCall / mapHookToCall). Indexing that copy meant a
-      // secret past the cap — or one that only ever appeared in a command's
-      // arguments — was scanned, alerted and redacted, while `beagle search`
+      // INPUT entirely and its stored copy is capped (otlp-map's
+      // toolResultDisplay sets that cap; it is applied below). Indexing that
+      // copy meant a secret past the cap — or one that only ever appeared in a
+      // command's arguments — was scanned, alerted and redacted, while `beagle search`
       // answered "never sent": a false negative on the one question search
       // exists to answer definitively. Search covers the whole scanned surface
       // now rather than a truncated slice of it. Offset-redacted bytes, the

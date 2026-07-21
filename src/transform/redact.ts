@@ -1,6 +1,9 @@
 // redact-on-capture (design §4/R11): drop the raw secret value at capture
 // time, keeping a stable typed placeholder. The single biggest store-liability
-// reducer; off by default in v1 (raw fidelity serves the parity story).
+// reducer; ON by default (config.ts) — turn it off for the raw-fidelity view.
+// This comment claimed the opposite ("off by default in v1") long after the
+// default flipped, which understates every bug on this path: a hole here is a
+// default-configuration hole, not one only opted-in users can reach.
 import { createHash } from "node:crypto";
 import type { Finding } from "../core/scanner/engine";
 
