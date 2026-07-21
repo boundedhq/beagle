@@ -4,15 +4,19 @@
 // that log and pairs each answer with its prompt so the answer can be stitched
 // onto the self-reported (OTel) turn row. PURE (no fs/timers) so the pairing is
 // unit-testable; the fs polling lives in src/adapters/codex-rollout-tailer.ts.
-// See docs/codex-rollout-response-capture-design.md.
+// Stitching an answer does NOT upgrade fidelity: the rollout is Codex's own
+// post-hoc record of the turn, so the row stays badged self-reported, never
+// wire-verified.
 import { createHash } from "node:crypto";
 
 // The per-turn join key, computed IDENTICALLY here and in the Codex OTel mapper
 // (otlp-map buildCodexCall) so a rollout answer and its OTel prompt row share a
 // prompt_key. Normalize conservatively — collapse whitespace, NFC — then
 // sha256, first 16 hex. Verified byte-identical to the Phase-0 Python spike
-// (design §8.2). Hash-of-prompt is the ONLY per-turn join: Codex OTel carries no
-// turn/prompt id (§8.7), and a mis-key fails safe (no attach, never a wrong one).
+// against Codex 0.144.6. Hash-of-prompt is the ONLY per-turn join: Codex OTel
+// carries no turn/prompt id — its codex.user_prompt attribute set has no
+// prompt.id, turn_id or ordinal — and a mis-key fails safe (no attach, never a
+// wrong one).
 export function codexPromptKey(text: string): string {
   const normalized = text.normalize("NFC").split(/\s+/).join(" ").trim();
   return createHash("sha256").update(normalized).digest("hex").slice(0, 16);

@@ -46,7 +46,7 @@ export interface OtelCall extends Call {
   promptId?: string;
   /** Set only by the Codex rollout tailer, so the daemon's response-only branch
    *  treats it as attach-or-DROP (never a standalone row) and keeps the answer
-   *  out of the outbound search index. See codex-rollout-tailer.ts / design §6.1. */
+   *  out of the outbound search index. See codex-rollout-tailer.ts. */
   origin?: "codex-rollout";
   /** Which same-key turn a rollout answer belongs to (0-based); promptId for
    *  Codex is hash(prompt), so repeated identical prompts need this to reach
