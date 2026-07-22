@@ -34,9 +34,12 @@ const NEGATIVES: string[] = [
   'a bearer token goes in the Authorization header',
   'the private key lives in ~/.ssh/id_ed25519',
   'card numbers are validated with the Luhn algorithm',
-  // Both fire under a looser hyphen window, so both hold this corpus to the
-  // formulation that shipped. A negative no candidate ever trips would only
-  // pad the denominator and make this gate easier to pass.
+  // Two deliberate near-miss canaries: the aws-secret-access-key rule is tuned
+  // to REJECT both, but each fires under a looser hyphen/keyword window, so they
+  // pin the shipped formulation. Under the zero-structured-alert gate below a
+  // canary that starts firing is a real precision regression, caught with no
+  // slack (the old "< 5%" rate tolerated one such fixture; this gate tolerates
+  // none).
   'aws-cdk-lib-construct-x 3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5e',
   'aws-object-key: 3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5e',
 ];
@@ -70,12 +73,16 @@ describe("detection precision regression gate", () => {
     expect(misses).toEqual([]);
   });
 
-  test("public docs do not present curated fixtures as a false-positive rate", () => {
-    const readme = readFileSync("README.md", "utf8");
-    const publicDocs = readme + "\n" + readFileSync("CONTRIBUTING.md", "utf8");
-    const percentageClaim =
-      /(?:false[- ]positives?[\s\S]{0,80}%|%[\s\S]{0,80}false\s*positives?)/i;
-    expect(percentageClaim.test(publicDocs)).toBe(false);
-    expect(readme).toContain("not a measured false-positive rate");
+  test("the corpora are non-trivially sized (a filter over an empty array passes)", () => {
+    // Both gates above are `expect([].filter(...)).toEqual([])`, which passes
+    // vacuously if the corpus is silently emptied by a bad rebase/dedup. Pin a
+    // floor so accidental shrinkage fails loudly. Not coupled to any doc number
+    // (the README no longer cites a count); a floor, so growth is free.
+    expect(NEGATIVES.length).toBeGreaterThanOrEqual(20);
+    expect(POSITIVES.length).toBeGreaterThanOrEqual(6);
   });
 });
+// The guard that public docs don't restate the curated fixtures as a
+// false-positive RATE lives in scripts/lint-docs-claims.ts (a repo lint over
+// all *.md, run by `bun run lint`), not here — a scanner-precision test should
+// not readFileSync and grep prose.
