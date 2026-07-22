@@ -946,6 +946,104 @@ describe("buildSessionTurns — subscription sequencing", () => {
     expect(view.turns[1]!.leaks.some((l) => l.value === secret)).toBe(true);
     store.close();
   });
+
+  test("claude: a hook-recovered call's arg secret still highlights (R7)", () => {
+    const store = Store.open(dir);
+    const t0 = Date.now();
+    const secret = "AKIAZQ3DRSTUVWXY2345";
+    // The turn event omitted the tool call; only the PostToolUse hook reports
+    // it, so the command is recovered onto the turn's response. Its secret was
+    // scanned on the hook row alone (the turn row never saw this arg) — the
+    // recovered card must still carry the highlight, like the codex chain does.
+    const turn = call({
+      source: "otel", endpoint: "otel:claude_code.turn", agent: "claude", promptKey: "P1",
+      displayMessages: [{ role: "user", content: "do it" }],
+      requestBody: enc("do it"), responseBody: enc("working"), id: ulid(t0), tsRequest: t0,
+    });
+    const hookBody = `Bash\ncurl -H 'x: ${secret}'\nok`;
+    const hook = call({
+      source: "otel", endpoint: "otel:tool_output:Bash", agent: "claude", promptKey: undefined,
+      displayMessages: [
+        { role: "tool", content: `curl -H 'x: ${secret}'`, tool: "Bash", kind: "call" },
+        { role: "tool", content: "ok", tool: "Bash", kind: "result" },
+      ],
+      requestBody: enc(hookBody), responseBody: null, tsResponse: undefined,
+      id: ulid(t0 + 500), tsRequest: t0 + 500,
+    });
+    for (const c of [turn, hook]) store.insertCall(c);
+    store.upsertLeakEvent({
+      fingerprint: "fp-claude-arg", sessionId: "sess-1", detector: "aws-access-key-id",
+      secretType: "aws-access-key-id", severity: "high", confidenceTier: "structured",
+      destination: "anthropic", callId: hook.id, ts: t0 + 500,
+      spanStart: hookBody.indexOf(secret), spanEnd: hookBody.indexOf(secret) + secret.length,
+    });
+    const view = buildSessionTurns(store, "sess-1");
+    const turnT = view.turns.find((x) => x.id === turn.id)!;
+    expect(turnT.responseCalls.some((c) => String(c.args).includes(secret))).toBe(true);
+    expect(turnT.responseLeaks.some((l) => l.value === secret)).toBe(true);
+    store.close();
+  });
+
+  test("an unlinked claude hook is NOT merged into a later, unrelated prompt", () => {
+    const store = Store.open(dir);
+    const t0 = Date.now();
+    const turn1 = call({
+      source: "otel", endpoint: "otel:claude_code.turn", agent: "claude", promptKey: "P1",
+      displayMessages: [
+        { role: "user", content: "Q1" },
+        { role: "tool", content: '{"f":"a"}', tool: "Read", kind: "call" },
+      ],
+      requestBody: enc("Q1"), responseBody: enc("working1"), id: ulid(t0), tsRequest: t0,
+    });
+    const hookRead = call({
+      source: "otel", endpoint: "otel:tool_output:Read", agent: "claude", promptKey: undefined,
+      displayMessages: [
+        { role: "tool", content: '{"f":"a"}', tool: "Read", kind: "call" },
+        { role: "tool", content: "fileA", tool: "Read", kind: "result" },
+      ],
+      requestBody: enc("Read\nfileA"), responseBody: null, tsResponse: undefined,
+      id: ulid(t0 + 500), tsRequest: t0 + 500,
+    });
+    const turn2 = call({
+      source: "otel", endpoint: "otel:claude_code.turn", agent: "claude", promptKey: "P2",
+      displayMessages: [
+        { role: "user", content: "Q2" },
+        { role: "tool", content: '{"p":"x"}', tool: "Grep", kind: "call" },
+      ],
+      requestBody: enc("Q2"), responseBody: enc("answer2"), id: ulid(t0 + 1000), tsRequest: t0 + 1000,
+    });
+    for (const c of [turn1, hookRead, turn2]) store.insertCall(c);
+    // no linkTurns — the hook is unlinked (its row: link never landed)
+    const view = buildSessionTurns(store, "sess-1");
+    // Q2's request is only its own user message — never Q1's tool result…
+    const t2 = view.turns.find((x) => x.id === turn2.id)!;
+    expect(t2.messages.map((m) => m.kind ?? m.role)).toEqual(["user"]);
+    // …and Q1's result rides its own standalone turn, ordered between the two.
+    expect(view.turns.map((x) => x.id)).toEqual([turn1.id, hookRead.id, turn2.id]);
+    expect(view.turns[1]!.messages.map((m) => [m.kind, m.content])).toEqual([["result", "fileA"]]);
+    store.close();
+  });
+
+  test("a hook that opens the view (no turn row yet) keeps its command card", () => {
+    const store = Store.open(dir);
+    const t0 = Date.now();
+    // The claude_code.turn event was lost or fell outside the window; the hook
+    // is the first captured row. Its command must not vanish from the cards.
+    const hook = call({
+      source: "otel", endpoint: "otel:tool_output:Read", agent: "claude", promptKey: undefined,
+      displayMessages: [
+        { role: "tool", content: '{"file_path":"/secret/path"}', tool: "Read", kind: "call" },
+        { role: "tool", content: "body", tool: "Read", kind: "result" },
+      ],
+      requestBody: enc("Read\nbody"), responseBody: null, tsResponse: undefined,
+      id: ulid(t0), tsRequest: t0,
+    });
+    store.insertCall(hook);
+    const view = buildSessionTurns(store, "sess-1");
+    expect(view.turns).toHaveLength(1);
+    expect(view.turns[0]!.messages.map((m) => m.kind)).toEqual(["call", "result"]);
+    store.close();
+  });
 });
 
 // The feed is the stable raw-capture ledger beneath the reconstructed session:

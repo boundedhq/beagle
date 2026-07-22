@@ -304,6 +304,18 @@ function cardAction(card: DisplayMessage, sourceId: string): ToolAction {
   };
 }
 
+// The subset of `leaks` whose secret value actually appears in these cards.
+// A split tool row shows its command on one turn (the response call) and its
+// result on the next (the request) — this routes each secret's highlight to the
+// turn that displays it, so a moved card still highlights and an unrelated turn
+// gets no phantom "secret sent" flag. Never used to DECIDE visibility: a leak
+// always keeps its own row's feed line regardless (R7).
+function leaksIn(leaks: DetailLeak[], cards: DisplayMessage[]): DetailLeak[] {
+  if (leaks.length === 0) return leaks;
+  const text = cards.map((c) => `${c.content ?? ""}\n${c.detail ?? ""}`).join("\n");
+  return leaks.filter((l) => l.value && text.includes(l.value));
+}
+
 function sequenceModeBTurns(
   store: Store,
   sessionId: string,
@@ -397,20 +409,40 @@ function sequenceModeBTurns(
   // are intentionally preserved: they contain distinct responses.
   const dropped = new Set<SessionTurn>();
   let lastClaude: SessionTurn | null = null;
-  let pending: Array<{ turn: SessionTurn; promptKey?: string }> = [];
-  const seenHookCalls = new WeakMap<SessionTurn, Map<string, number>>();
+  // Hook rows waiting to become the next cycle's request. `callShown` records
+  // whether this hook's command was already surfaced (the turn event listed it,
+  // or it was recovered onto a response). If not, the command card must survive
+  // rather than being stripped to the bare result — capture must stay visible.
+  let pending: Array<{ turn: SessionTurn; promptKey?: string; callShown: boolean }> = [];
+  // Calls already on the current turn's response, per tool, so a hook that
+  // merely re-reports a call the turn event listed isn't shown twice. Counted
+  // DOWN as hooks match it (seeded when the turn becomes current) — no re-scan
+  // of the growing responseCalls array per hook.
+  let reportedByTool = new Map<string, number>();
+  const seedReported = (t: SessionTurn) => {
+    reportedByTool = new Map();
+    for (const c of t.responseCalls) reportedByTool.set(c.tool, (reportedByTool.get(c.tool) ?? 0) + 1);
+  };
   const mergePending = (target: SessionTurn, promptKey: string | null): void => {
-    const eligible = pending.filter((p) => !p.promptKey || !promptKey || p.promptKey === promptKey);
-    if (!eligible.length) return;
+    // Only a CONTINUATION cycle (one carrying no fresh user prompt) may absorb a
+    // prior cycle's tool results — a NEW prompt's turn must never show the
+    // previous turn's output as its own request (the row would render above that
+    // turn's user message). A keyed hook still needs a matching prompt; an
+    // unlinked hook rides any continuation.
+    if (target.messages.some((c) => c.role === "user")) return;
+    const kept: typeof pending = [];
     const cards: DisplayMessage[] = [];
-    for (const { turn } of eligible) {
-      const results = turn.messages.filter((m) => m.kind === "result");
-      cards.push(...(results.length ? results : turn.messages).map((m) => ({ ...m, sourceId: turn.id })));
-      target.leaks.push(...turn.leaks);
-      dropped.add(turn);
+    for (const p of pending) {
+      if (p.promptKey && promptKey && p.promptKey !== promptKey) { kept.push(p); continue; }
+      const results = p.turn.messages.filter((c) => c.kind === "result");
+      cards.push(...results.map((c) => ({ ...c, sourceId: p.turn.id })));
+      // The result carries this row's output-side secrets; an input-side secret
+      // rode the call card and highlights where that card is shown (above).
+      target.leaks.push(...leaksIn(p.turn.leaks, results));
+      dropped.add(p.turn);
     }
-    target.messages.unshift(...cards);
-    pending = pending.filter((p) => !eligible.includes(p));
+    if (cards.length) target.messages.unshift(...cards);
+    pending = kept;
   };
   for (const t of turns) {
     const m = rowMeta.get(t);
@@ -421,36 +453,45 @@ function sequenceModeBTurns(
       t.messages = t.messages.filter((card) => card.kind !== "call");
       t.responseCalls.push(...callCards.map((card) => cardAction(card, t.id)));
       lastClaude = t;
+      seedReported(t);
       continue;
     }
     if (!m.endpoint.startsWith("otel:tool_output:")) continue;
     const rowLink = links.get(`row:${t.id}`);
     const callCards = t.messages.filter((card) => card.kind === "call");
+    let callShown = false;
     if (lastClaude && callCards.length) {
-      // Claude can report the call both in its turn event and in PostToolUse.
-      // Match duplicates by tool occurrence; if the turn event omitted it,
-      // recover the call from the hook instead of losing the command.
+      // Claude can report a call both in its turn event and in PostToolUse.
+      // Skip a card the turn already listed (matched by tool occurrence);
+      // recover the rest so an under-reported command isn't lost — and carry the
+      // hook's matching leaks onto the response so the recovered arg still
+      // highlights (the turn row never scanned this arg). The codex chain sets
+      // responseLeaks the same way — keep the two paths symmetric (R7).
       for (const card of callCards) {
         const tool = card.tool ?? "tool";
-        const seen = seenHookCalls.get(lastClaude) ?? new Map<string, number>();
-        const occurrence = seen.get(tool) ?? 0;
-        const reported = lastClaude.responseCalls.filter((c) => c.tool === tool).length;
-        if (reported <= occurrence) lastClaude.responseCalls.push(cardAction(card, t.id));
-        seen.set(tool, occurrence + 1);
-        seenHookCalls.set(lastClaude, seen);
+        const dup = reportedByTool.get(tool) ?? 0;
+        if (dup > 0) {
+          reportedByTool.set(tool, dup - 1);
+        } else {
+          lastClaude.responseCalls.push(cardAction(card, t.id));
+          lastClaude.responseLeaks = [...lastClaude.responseLeaks, ...leaksIn(t.leaks, [card])];
+        }
       }
+      callShown = true;
     }
-    pending.push({ turn: t, promptKey: rowLink?.promptKey });
+    pending.push({ turn: t, promptKey: rowLink?.promptKey, callShown });
   }
 
-  // Results produced after the final reported response are still meaningful:
-  // render them as pending requests, but remove their duplicated call cards
-  // when the preceding response already shows those calls.
-  for (const { turn } of pending) {
-    const results = turn.messages.filter((m) => m.kind === "result");
-    if (results.length) turn.messages = results.map((m) => ({ ...m, sourceId: turn.id }));
-    turn.responseText = null;
-    turn.responseCalls = [];
+  // Results with no following cycle stay as their own pending request. Strip a
+  // hook to its result once its command has been shown elsewhere; keep the
+  // command card when nothing else did (a hook before any turn) so the tool
+  // input never vanishes from the transcript.
+  for (const p of pending) {
+    const results = p.turn.messages.filter((c) => c.kind === "result");
+    p.turn.messages = (p.callShown && results.length ? results : p.turn.messages)
+      .map((c) => ({ ...c, sourceId: p.turn.id }));
+    p.turn.responseText = null;
+    p.turn.responseCalls = [];
   }
 
   const out: SessionTurn[] = [];
