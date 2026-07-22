@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, cmdUninstall, countPossibleLeaksSince, detectLine, interpretAskAnswer, isLoopbackHookEndpoint, otelCallsArrivedSince, parseRunArgs, readCodexApiKey, resolveRunMode, runCallsArrived, watchForFirstCapture, wireCaptureLive } from "../src/cli/commands";
@@ -515,6 +515,66 @@ describe("config-driven run redirect (opencode)", () => {
     expect(merged.provider.openai.options.apiKey).toBe("sk-mine"); // preserved
     expect(merged.theme).toBe("dark"); // preserved
   });
+});
+
+describe("Claude telemetry settings redirect", () => {
+  test("multiple --settings flags collapse to the last user config plus Beagle's hook", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "beagle-claude-settings-"));
+    const first = join(stateDir, "first.json");
+    const second = join(stateDir, "second.json");
+    writeFileSync(first, JSON.stringify({ theme: "light" }));
+    writeFileSync(
+      second,
+      JSON.stringify({
+        theme: "dark",
+        hooks: { PostToolUse: [{ hooks: [{ type: "command", command: "user-hook" }] }] },
+      }),
+    );
+
+    // Capture the effective settings while the Beagle-owned file still exists;
+    // cmdRun deletes it as soon as this fake Claude process exits.
+    const fakeAgent = join(stateDir, "argv-printer.sh");
+    writeFileSync(
+      fakeAgent,
+      '#!/bin/sh\ncount=0\nsettings=""\nwhile [ "$#" -gt 0 ]; do\n  if [ "$1" = "--settings" ]; then\n    count=$((count + 1))\n    settings="$2"\n    shift 2\n  else\n    printf "ARG:%s\\n" "$1"\n    shift\n  fi\ndone\nprintf "COUNT:%s\\nCONFIG:" "$count"\ncat "$settings"\nprintf "\\n"\n',
+    );
+    chmodSync(fakeAgent, 0o755);
+
+    const run = Bun.spawnSync(
+      [
+        "bun",
+        join(import.meta.dir, "..", "src", "cli", "main.ts"),
+        "run",
+        "claude",
+        "--telemetry",
+        "--real",
+        fakeAgent,
+        "--",
+        "--settings",
+        first,
+        "user-arg",
+        "--settings",
+        second,
+      ],
+      { env: { ...process.env, BEAGLE_STATE_DIR: stateDir } },
+    );
+
+    const stdout = run.stdout.toString();
+    expect(run.exitCode).toBe(0);
+    expect(stdout).toContain("ARG:user-arg");
+    expect(stdout).toContain("COUNT:1");
+    const effective = JSON.parse(stdout.slice(stdout.indexOf("CONFIG:") + "CONFIG:".length)) as any;
+    expect(effective.theme).toBe("dark"); // Claude's last-value-wins behavior is preserved
+    const commands = effective.hooks.PostToolUse.map((entry: any) => entry.hooks[0].command);
+    expect(commands[0]).toBe("user-hook");
+    expect(commands[1]).toContain("__hook");
+
+    try {
+      const info = JSON.parse(readFileSync(join(stateDir, "daemon.json"), "utf8")) as { socketPath: string };
+      const { controlRequest } = await import("../src/daemon/control");
+      await controlRequest(info.socketPath, { cmd: "shutdown" });
+    } catch { /* already gone */ }
+  }, 20_000);
 });
 
 describe("pi extension redirect (run-level)", () => {

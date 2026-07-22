@@ -1479,19 +1479,23 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
       // hooks) that forwards each tool result to the receiver so a secret in a
       // tool's OUTPUT is scanned too. Endpoint + token ride env vars the hook
       // process inherits — never argv.
-      // Claude takes ONE --settings value (last wins), so if the user passed
-      // their own, blindly prepending ours would either lose theirs or (their
-      // flag coming later) silently drop the hook — and with it tool-output
-      // scanning. Merge instead: their settings verbatim, our hook appended.
-      const si = agentArgs.indexOf("--settings");
-      let settings = buildHookSettings(beagleHookCommand());
-      let restArgs = agentArgs;
-      if (si !== -1 && agentArgs[si + 1] !== undefined) {
-        settings = mergeHookIntoSettings(agentArgs[si + 1]!, beagleHookCommand());
-        restArgs = [...agentArgs.slice(0, si), ...agentArgs.slice(si + 2)];
+      // Claude takes ONE --settings value (last wins). Keep that same meaning
+      // when the flag is repeated, but collapse every valid pair so no later
+      // user flag can displace Beagle's merged hook and tool-output scanning.
+      let userSettings: string | null = null;
+      const restArgs: string[] = [];
+      for (let i = 0; i < agentArgs.length; i++) {
+        if (agentArgs[i] === "--settings" && agentArgs[i + 1] !== undefined) {
+          userSettings = agentArgs[++i]!;
+        } else {
+          restArgs.push(agentArgs[i]!);
+        }
       }
+      const settings = userSettings
+        ? mergeHookIntoSettings(userSettings, beagleHookCommand())
+        : buildHookSettings(beagleHookCommand());
       cleanupFile = writeRedirectConfig(stateDir, `claude-hook-${runId}`, settings);
-      finalArgs = ["--settings", cleanupFile, ...restArgs];
+      finalArgs = [...restArgs, "--settings", cleanupFile];
       modeEnv.BEAGLE_HOOK_ENDPOINT = `${base}/v1/hook`;
       modeEnv.BEAGLE_HOOK_TOKEN = data.otlpToken;
     }
