@@ -41,6 +41,19 @@ describe("ScanHost (worker-hosted scanner)", () => {
     for (const f of r.findings) expect(body.slice(f.start, f.end)).toBe(KEY);
   });
 
+  test("exhausting the base64 decode-probe budget reports incomplete (no finding cap)", async () => {
+    // The OTHER incomplete source: a body with more base64 candidates than the
+    // probe budget. No finding cap is hit (these decode to nothing), so this
+    // pins the `probeBudgetExhausted` disjunct of the host's state mapping on its
+    // own — dropping it would let a secret past the 65,536th blob store as "ok".
+    const benign = Buffer.from("fillerdata12").toString("base64"); // clears the entropy pre-gate, decodes to nothing any rule knows
+    const body = Array.from({ length: (1 << 16) + 1 }, () => benign).join("\n");
+    const r = await host.scan(new TextEncoder().encode(body), {});
+    expect(r.probeBudgetExhausted).toBe(true);
+    expect(r.cappedRules).toEqual([]); // no rule reached MAX_FINDINGS_PER_RULE
+    expect(r.state).toBe("incomplete");
+  }, 20_000);
+
   test("deadline breach terminates the worker and reports incomplete, then recovers", async () => {
     const evil = new ScanHost({
       rulesJson: RULES_JSON,

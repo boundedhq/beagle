@@ -724,6 +724,14 @@ export class Daemon {
           extraValues: derived.values,
         })
       : null;
+    // A held-out call is never "ok": fold the withholding back into the stored
+    // verdict, as the Mode B path does (ingestOtel computes scanState from
+    // redaction.heldOut too). A response-body cap reaches only
+    // applyCaptureRedaction's `incomplete` flag above — never the scanState set
+    // at 594/709 — so without this the content is withheld while the row
+    // persists scanState "ok", contradicting its own "content withheld" summary
+    // and hiding it from every "unverified calls" view.
+    if (redaction?.heldOut) scanState = "incomplete";
     const requestBody = redaction ? redaction.requestBody : call.request.bodyBytes;
     const responseBody = redaction ? redaction.responseBody : (call.response.bodyBytes ?? null);
     let sseRaw: Uint8Array | null = call.response.sseRaw ?? null;
