@@ -62,6 +62,20 @@ describe("findDocsClaimViolations", () => {
     expect(findDocsClaimViolations(root)).toEqual([]);
   });
 
+  test("ignores Claude worktree copies while still checking active docs", () => {
+    const root = scratch();
+    mkdirSync(join(root, ".claude", "worktrees", "old-checkout"), { recursive: true });
+    writeFileSync(
+      join(root, ".claude", "worktrees", "old-checkout", "README.md"),
+      "false positives under 5%\n",
+    );
+    writeFileSync(join(root, "README.md"), "active docs are clean\n");
+    expect(findDocsClaimViolations(root)).toEqual([]);
+
+    writeFileSync(join(root, "SECURITY.md"), "false positives under 5%\n");
+    expect(findDocsClaimViolations(root).map((x) => x.file)).toEqual(["SECURITY.md"]);
+  });
+
   test("the repo's own docs are clean (the published claim is gone)", () => {
     expect(findDocsClaimViolations(join(import.meta.dir, ".."))).toEqual([]);
   });

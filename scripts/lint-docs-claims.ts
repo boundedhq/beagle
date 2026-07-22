@@ -1,8 +1,8 @@
 // Docs-claims guard: Beagle does not publish a false-positive RATE. The
 // curated fixtures in tests/precision.test.ts pin known detector behavior;
 // they are not a sample from which to estimate a real-world rate, so no public
-// doc may restate them as a percentage. This lints ALL Markdown for that
-// overclaim reappearing, in any file (not just the two it once lived in).
+// doc may restate them as a percentage. This lints all Markdown in the active
+// checkout for that overclaim reappearing (not nested worktree copies).
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 
@@ -40,6 +40,7 @@ export function findDocsClaimViolations(root: string): DocsClaimViolation[] {
     if (!norm.endsWith(".md")) continue;
     if (norm.startsWith("node_modules/") || norm.includes("/node_modules/")) continue;
     if (norm.startsWith(".git/")) continue;
+    if (norm.startsWith(".claude/worktrees/")) continue;
     let text: string;
     try {
       text = readFileSync(join(root, rel), "utf8");
