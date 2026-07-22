@@ -57,7 +57,6 @@ describe("new vendor token rules", () => {
     ["pypi-token", "password = pypi-AgEIcHlwaS5vcmcCJDkwNzYtZGVhZC1iZWVmLTEyMzQtNTY3ODlhYmNkZWYwAAIqWzM"],
     ["sendgrid-key", "SENDGRID=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"],
     ["huggingface-token", "login(token='hf_Ab3dEf6hIj9lMn2pQr5tUv8xYz1Bc4De7F')"],
-    ["twilio-api-key", "TWILIO_SID=SK3f9c1e8b7d62049f5e1c0a8b4d7e2f6c"],
     ["digitalocean-token", "doctl auth init -t dop_v1_3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5e3f9c1e8b7d62049f5e1c0a8b"],
     ["square-token", "SQUARE_ACCESS=sq0atp-Ab3dEf6hIj9lMn2pQr5tUv"],
     ["shopify-token", "X-Shopify-Access-Token: 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"],
@@ -76,6 +75,40 @@ describe("new vendor token rules", () => {
       expect(f.find((x) => x.detector === detector)?.tier).toBe("structured");
     });
   }
+});
+
+describe("vendor identifiers that are not secrets", () => {
+  test("Twilio API Key SID is not flagged, across delimiter spellings", () => {
+    const sid = "SK3f9c1e8b7d62049f5e1c0a8b4d7e2f6c"; // SK + 32 lowercase hex
+    // Each string places the SID where the generic rule WOULD fire without the
+    // exclusion (keyword within 1-5 separator chars of the value) — verified by
+    // mutation: with the exclusion removed, every one of these produces a
+    // generic-api-key finding, so each genuinely exercises the guard.
+    for (const text of [
+      `TWILIO_API_KEY=${sid}`,
+      JSON.stringify({ api_key: sid }), // JSON: api_key":"<sid>
+      `2026-01-02 provisioned twilio key=${sid}`, // log line
+      // '=' donation: the greedy key-separator class shares '=' with the value
+      // class and can push one into the value by backtracking; the guard's =*
+      // prefix must still suppress these (regression pin for that bypass).
+      `key =${sid}`,
+      `key:=${sid}`,
+      `key==${sid}`,
+    ]) {
+      expect(scanText(text)).toEqual([]);
+    }
+  });
+
+  test("the Twilio SID exclusion does not suppress neighboring generic shapes", () => {
+    const sid = "SK3f9c1e8b7d62049f5e1c0a8b4d7e2f6c";
+    for (const value of [
+      `${sid}A`, // SID + trailing char: no longer the whole-value SID shape
+      sid.toLowerCase(), // lowercase 'sk' prefix: not a Twilio SID
+      "SK" + sid.slice(2).toUpperCase(), // SK + UPPER hex: outside the real (lowercase) SID space
+    ]) {
+      expect(scanText(`api_key=${value}`).some((f) => f.detector === "generic-api-key")).toBe(true);
+    }
+  });
 });
 
 describe("quiet-tier fallbacks", () => {

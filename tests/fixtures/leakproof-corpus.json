@@ -187,6 +187,14 @@
       "text": "request_id = \"550e8400-e29b-41d4-a716-446655440000\"\n",
       "detectors": [],
       "outcome": "clean"
+    },
+    {
+      "id": "twilio_key_sid_not_secret",
+      "kind": "decoy",
+      "text": "provisioned Twilio API Key SK3f9c1e8b7d62049f5e1c0a8b4d7e2f6c for the messaging service\n",
+      "detectors": [],
+      "outcome": "clean",
+      "note": "Twilio Key SID (SK + 32 lowercase hex) is a documented public identifier (Not PII), paired with a separately-issued secret; suppressed in the generic fallback and no longer carried by a structured rule. A future rule re-catching this shape must fail here on purpose. https://www.twilio.com/docs/iam/api-keys/key-resource-v1"
     }
   ]
 }

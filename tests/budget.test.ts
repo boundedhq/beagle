@@ -60,8 +60,8 @@ describe("scan-time budget (median 1 MB scan under CI ceilings; R5's p99 ≤ ~10
   //
   // The chunk carries secret-ish KEYWORDS on purpose. The prescan is the lever
   // that keeps scan time flat, so a keyword-free body measures almost nothing:
-  // only 3 of 30 rules survive it, and the second pass re-runs just those. With
-  // keywords it is 5 of 30 — still not "every rule", which no realistic body
+  // only 3 of 29 rules survive it, and the second pass re-runs just those. With
+  // keywords it is 5 of 29 — still not "every rule", which no realistic body
   // reaches. (The ratio to the plain-body gate is machine-specific: measured
   // between 2.2x and 3.9x on different hosts, so no number is quoted here.)
   //
