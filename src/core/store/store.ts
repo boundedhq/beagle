@@ -718,7 +718,9 @@ function addNullable(a: number | null, b: number | undefined): number | null {
   return (a ?? 0) + (b ?? 0);
 }
 
-function escapeLike(s: string): string {
+// Exported for the viewer's search projection (feed-query), which runs its own
+// LIKE query and must escape the term the same way searchLiteral does.
+export function escapeLike(s: string): string {
   return s.replace(/[\\%_]/g, (c) => "\\" + c);
 }
 

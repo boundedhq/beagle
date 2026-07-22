@@ -159,8 +159,16 @@ describe("ViewerServer hardening (design §6.8)", () => {
       body: JSON.stringify({ term: "secret-content" }),
     });
     expect(post.status).toBe(200);
-    const hits = (await post.json()) as unknown[];
-    expect(hits.length).toBe(1);
+    // Rich hits: the client renders where the match lives (snippet) without a
+    // second fetch, so the result panel never depends on the feed window.
+    const body = (await post.json()) as {
+      hits: Array<{ callId: string; snippets: Array<{ pre: string; match: string; post: string }> }>;
+      truncated: boolean;
+    };
+    expect(body.truncated).toBe(false);
+    expect(body.hits.length).toBe(1);
+    expect(body.hits[0]!.callId).toBe(callId);
+    expect(body.hits[0]!.snippets[0]).toEqual({ pre: "hello ", match: "secret-content", post: " world" });
   });
 
   test("mutating endpoint (purge) requires credential and POST", async () => {

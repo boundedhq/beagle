@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseSegments } from "../src/viewer/static/render-json.module.js";
+import { findRuns, parseSegments } from "../src/viewer/static/render-json.module.js";
 
 // Mode B tool rows persist mixed prose+JSON bodies (`tool\n{args}\noutput…`),
 // which the whole-document tree path can't fold — the args JSON rendered flat.
@@ -68,5 +68,54 @@ describe("parseSegments (mixed prose+JSON bodies)", () => {
     const leaks = [{ value: "ghp_tokentokentokentoken", secretType: "github-pat", tier: "structured" }];
     const body = 'header ghp_tokentokentokentoken\n{"a":1}';
     expect(parseSegments(body, leaks)).not.toBeNull();
+  });
+});
+
+// findRuns is the pure splitter behind the search-term marks: the search view
+// opens a call with the searched term, and every body highlights where it
+// appears. Semantics mirror the store's LIKE matching — literal, ASCII-only
+// case-insensitive — so the marks light up exactly what made the call a hit.
+describe("findRuns (search-term marking)", () => {
+  test("splits around a case-insensitive match, preserving original text", () => {
+    expect(findRuns("Alpha PI Memory beta", "pi memory")).toEqual([
+      { text: "Alpha ", hit: false },
+      { text: "PI Memory", hit: true },
+      { text: " beta", hit: false },
+    ]);
+  });
+
+  test("no match / no term → one plain run", () => {
+    expect(findRuns("nothing here", "absent")).toEqual([{ text: "nothing here", hit: false }]);
+    expect(findRuns("nothing here", "")).toEqual([{ text: "nothing here", hit: false }]);
+    expect(findRuns("nothing here", undefined)).toEqual([{ text: "nothing here", hit: false }]);
+  });
+
+  test("adjacent matches each get their own run", () => {
+    expect(findRuns("abab", "ab")).toEqual([
+      { text: "ab", hit: true },
+      { text: "ab", hit: true },
+    ]);
+  });
+
+  test("regex metacharacters in the term are literal", () => {
+    expect(findRuns("cost a+b here", "a+b")).toEqual([
+      { text: "cost ", hit: false },
+      { text: "a+b", hit: true },
+      { text: " here", hit: false },
+    ]);
+    expect(findRuns("aab", "a+b")).toEqual([{ text: "aab", hit: false }]);
+  });
+
+  test("case folding is ASCII-only and length-preserving (LIKE semantics)", () => {
+    // "İ".toLowerCase() grows to two code units — full Unicode folding would
+    // shift every offset after it and mis-slice the runs. ASCII folding leaves
+    // it alone: neighbors with exotic case don't move the match.
+    expect(findRuns("İİ PI İİ", "pi")).toEqual([
+      { text: "İİ ", hit: false },
+      { text: "PI", hit: true },
+      { text: " İİ", hit: false },
+    ]);
+    // and "İ" only matches itself, never plain "i" (SQLite LIKE is ASCII-only)
+    expect(findRuns("İstanbul", "istanbul")).toEqual([{ text: "İstanbul", hit: false }]);
   });
 });

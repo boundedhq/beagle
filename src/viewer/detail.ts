@@ -163,7 +163,7 @@ export function buildDetail(call: CallRecord, spans: LeakSpan[]): CallDetail {
     requestRaw,
     responseRaw,
     sseRaw,
-    leaks: extractLeaks(requestRaw, spans, call.redacted ?? false, storedText(call)),
+    leaks: extractLeaks(requestRaw, spans, call.redacted ?? false, storedText(call.displayMessages)),
   };
 }
 
@@ -233,8 +233,11 @@ function storedProjection(
 // two forms of one secret hash differently and finding only the content's would
 // leave the detail's rendering unhighlighted (the case the redacted branch of
 // extractLeaks exists for).
-function storedText(call: CallRecord): string {
-  return (call.displayMessages ?? []).flatMap((m) => [m.content, m.detail ?? ""]).join("\n");
+// Structural param (content + detail are all it reads): CallRecord's stored
+// projection types `kind` looser than the parsers' DisplayMessage union, and
+// both shapes must flow through here.
+function storedText(messages: Array<{ content: string; detail?: string }> | undefined | null): string {
+  return (messages ?? []).flatMap((m) => [m.content, m.detail ?? ""]).join("\n");
 }
 
 // Just the parsed request messages — same result as buildDetail(call).messages,
@@ -255,7 +258,29 @@ export function detailMessages(call: CallRecord): DisplayMessage[] {
 // (R7 backward highlight) without building its whole CallDetail.
 export function detailLeaks(call: CallRecord, spans: LeakSpan[]): DetailLeak[] {
   const requestRaw = call.requestBody ? new TextDecoder("utf-8", { fatal: false }).decode(call.requestBody) : "";
-  return extractLeaks(requestRaw, spans, call.redacted ?? false, storedText(call));
+  return extractLeaks(requestRaw, spans, call.redacted ?? false, storedText(call.displayMessages));
+}
+
+// The same leaks from a NARROW row fetch: request body + stored transcript +
+// redaction flag — the three surfaces extractLeaks reads — WITHOUT getCall's
+// response/sse payloads, which the search view was loading and discarding for
+// every leak-bearing hit. Resilient per row: a corrupt display_messages JSON
+// degrades to placeholder discovery over the body alone instead of throwing
+// (one bad row must not take down the whole /api/search response).
+export function leakValuesFor(store: Store, callId: string): DetailLeak[] {
+  const r = store.queryAll<{ redacted: number | null; request_body: Uint8Array | null; display_messages: string | null }>(
+    `SELECT e.redacted, p.request_body, p.display_messages
+     FROM exchanges e LEFT JOIN payloads p ON p.exchange_id = e.id
+     WHERE e.id = ?`,
+    [callId],
+  )[0];
+  if (!r) return [];
+  const requestRaw = r.request_body ? new TextDecoder("utf-8", { fatal: false }).decode(r.request_body) : "";
+  let messages: DisplayMessage[] | null = null;
+  if (r.display_messages) {
+    try { messages = JSON.parse(r.display_messages) as DisplayMessage[]; } catch { /* body-only discovery */ }
+  }
+  return extractLeaks(requestRaw, leakSpansFor(store, callId), !!r.redacted, storedText(messages));
 }
 
 function extractLeaks(
@@ -279,7 +304,11 @@ function extractLeaks(
     for (const m of `${requestText}\n${transcript}`.matchAll(REDACTED_RE)) {
       if (seen.has(m[0])) continue;
       seen.add(m[0]);
-      const type = m[0].split(":")[1] ?? "secret";
+      // The emitted shape is "[REDACTED:type:shorthash]" (redact.ts) — the
+      // type is the run between the opener and the NEXT colon-or-bracket, so
+      // a hash-less legacy "[REDACTED:type]" parses clean too (split(":")[1]
+      // alone kept its closing bracket and mislabeled the chip).
+      const type = m[0].slice("[REDACTED:".length, -1).split(":")[0] || "secret";
       out.push({ value: m[0], secretType: type, tier: "structured" });
     }
     return out;

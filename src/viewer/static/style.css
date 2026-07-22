@@ -240,7 +240,10 @@ main { flex: 1; padding: 8px 16px; }
   font-size: var(--content);
 }
 .row:hover { background: var(--row-hover); }
-.row.leak { border-left-color: var(--leak); background: #1f151a; }
+/* ONE leak-row treatment for every list surface (feed, sessions, search) —
+   a leaked row must look the same wherever it appears, so the tint lives in
+   exactly one rule. */
+.row.leak, .srow.leak, .sv-hit.leak { border-left-color: var(--leak); background: #1f151a; }
 .row .time { color: var(--muted); flex: 0 0 96px; white-space: nowrap; }
 .row .agent { color: var(--accent); flex: 0 0 100px; overflow: hidden; text-overflow: ellipsis; }
 .row .model { color: var(--muted); flex: 0 0 130px; overflow: hidden; text-overflow: ellipsis; }
@@ -295,8 +298,8 @@ button.linklike:hover { text-decoration: underline; }
   border-left: 3px solid transparent; border-bottom: 1px solid var(--border);
   cursor: pointer;
 }
-.srow:hover { background: var(--row-hover); }
-.srow.leak { border-left-color: var(--leak); background: #1f151a; }
+.srow:hover, .sv-hitrow:hover { background: var(--row-hover); }
+/* (.srow.leak rides the shared leak-row rule beside .row.leak) */
 .srow .dot { align-self: flex-start; margin-top: 5px; } /* sit on the title line */
 .scol { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .stitle-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -310,7 +313,7 @@ button.linklike:hover { text-decoration: underline; }
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums;
 }
-.smeta .s-agent { color: var(--accent); }
+.smeta .s-agent, .sv-ghead .s-agent { color: var(--accent); }
 .smeta .s-model { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .s-go { flex: none; align-self: center; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .srow:hover .s-go { color: var(--accent); text-decoration: underline; }
@@ -568,6 +571,59 @@ footer {
   padding: 8px 16px; color: var(--muted); font-size: 12px;
   border-top: 1px solid var(--border); background: var(--panel);
 }
-.searchresults { margin: 8px 0; }
-.searchresults .hit { padding: 4px 10px; border-bottom: 1px solid var(--border); }
+/* ---- search view: a first-class results screen -------------------------- */
+/* Replaces the main content while a search is active. Hits group by session
+   (a bordered panel per conversation); each hit is a meta line plus a snippet
+   line, and clicking it opens the call's full detail INLINE underneath. */
+.searchview { margin: 10px 0 28px; }
+.sv-head {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  padding: 8px 4px 10px;
+}
+.sv-q { color: var(--bright); font-weight: 700; font-size: 15px; overflow-wrap: anywhere; }
+.sv-count { color: var(--muted); font-size: 12.5px; }
+.sv-head button { margin-left: auto; }
+.sv-note { color: var(--muted); font-size: 12px; padding: 0 4px 8px; }
+.sv-group {
+  border: 1px solid var(--border); border-radius: 10px; background: var(--panel);
+  margin: 10px 0; overflow: hidden;
+}
+.sv-ghead {
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  padding: 7px 12px; border-bottom: 1px solid var(--border);
+  background: var(--row); font-size: 12px; color: var(--muted);
+}
+/* (.sv-ghead .s-agent shares the accent rule beside .smeta .s-agent;
+   .sv-hit.leak shares the leak-row rule beside .row.leak;
+   .sv-hitrow:hover shares the row-hover rule beside .srow:hover) */
+.sv-gopen { margin-left: auto; font-size: 12px; white-space: nowrap; }
+.sv-hit { border-bottom: 1px solid var(--border); border-left: 3px solid transparent; }
+.sv-hit:last-child { border-bottom: none; }
+.sv-hitrow {
+  display: flex; align-items: baseline; gap: 8px; padding: 7px 12px 2px;
+  cursor: pointer; font-size: 11.5px; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.sv-hitrow .dot { align-self: center; }
+.sv-time { white-space: nowrap; }
+.sv-sum {
+  flex: 1 1 auto; min-width: 60px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* the toggle is a real <button> (keyboard-reachable), styled as quiet text
+   that answers the row's hover */
+.sv-hitrow .sv-toggle {
+  margin-left: auto; white-space: nowrap;
+  color: var(--muted); font-size: inherit;
+}
+.sv-hitrow:hover .sv-toggle, .sv-hitrow .sv-toggle:focus-visible { color: var(--accent); }
+/* the snippet indents under the meta line, past the status dot */
+.sv-snippet {
+  padding: 0 12px 8px 28px; font-size: var(--content); line-height: 1.55;
+  color: var(--text); overflow-wrap: anywhere;
+}
+.sv-hit .detail { margin: 4px 10px 12px; }
+/* the searched term, everywhere it appears: same amber family as the base
+   mark, distinct from the red leak mark */
+mark.find { padding: 0 2px; border-radius: 3px; }
 .empty { color: var(--muted); padding: 30px; text-align: center; }
