@@ -1,6 +1,6 @@
 // Schema from design §4. Version stamped in PRAGMA user_version; every
 // reader checks it before querying (two binaries share this file).
-export const SCHEMA_VERSION = 6; // v6: exchanges.search_bytes (size-cap accounting for the search index)
+export const SCHEMA_VERSION = 7; // v7: turn_link (Mode B display grouping — no migrate step, the table rides SCHEMA_SQL)
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS exchanges (
@@ -88,6 +88,22 @@ CREATE TABLE IF NOT EXISTS runs (
   auth_location TEXT,
   extra_headers TEXT,
   created_ts    INTEGER NOT NULL
+);
+
+-- Mode B display grouping: which TURN a tool row belongs to, so the viewer can
+-- fold codex/claude tool rows under their prompt turn like a wire session.
+-- Deliberately a side table and not exchanges.prompt_key: that column is the
+-- response-stitch TARGET key, and a tool row carrying it would become an
+-- attach candidate. link_key is namespaced by the writer — 'row:<exchange id>'
+-- (claude hook rows, linked at ingest) or 'call:<call_id>' (codex, linked
+-- async from the rollout). Grouping metadata only, never content.
+CREATE TABLE IF NOT EXISTS turn_link (
+  session_id TEXT NOT NULL,
+  link_key   TEXT NOT NULL,
+  prompt_key TEXT NOT NULL,
+  ordinal    INTEGER NOT NULL, -- Nth same-key turn (codex hashes prompts; claude prompt ids are unique → 0)
+  seq        INTEGER NOT NULL, -- order of a turn's calls
+  PRIMARY KEY (session_id, link_key)
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(

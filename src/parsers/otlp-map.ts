@@ -58,6 +58,17 @@ export interface OtelCall extends Call {
    *  absent means summarize the whole response, which is right everywhere
    *  else. Redacted on its own before it reaches the feed line. */
   responseHeadline?: string;
+  /** Which turn this ROW belongs to — display grouping only (turn_link side
+   *  table), deliberately not promptId/prompt_key, which is the response-stitch
+   *  target key (see mapHookToCall). Set by the Claude hook mapper, whose
+   *  payload names its turn synchronously. */
+  turnRef?: { promptKey: string };
+  /** Rollout-derived `call_id → turn` links, riding a metadata-only call from
+   *  the codex tailer (origin='codex-rollout', empty request AND response).
+   *  The daemon writes them to turn_link and ingests nothing else. `ordinal`
+   *  is the ALL-TURNS Nth occurrence of promptKey (hash-of-prompt collides on
+   *  repeated identical prompts); `seq` orders a turn's calls. */
+  toolLinks?: Array<{ callId: string; promptKey: string; ordinal: number; seq: number }>;
 }
 
 function attrMap(attrs: Array<{ key: string; value: AttrValue }> | undefined): Map<string, AttrValue> {
@@ -364,7 +375,10 @@ function buildCodexCall(o: {
   model?: string;
   endpoint: string;
   scanText: string;
-  display: DisplayMessage;
+  /** One display message (the user prompt) or several (a tool row's command
+   *  card + output card). scanText — the leak surface — is unchanged either way;
+   *  only the readable projection gains a card. */
+  display: DisplayMessage | DisplayMessage[];
   /** Stitch key — set only on the user_prompt row so the rollout answer has a
    *  target; tool_result rows leave it undefined and are not attach targets. */
   promptId?: string;
@@ -382,7 +396,7 @@ function buildCodexCall(o: {
     endpoint: o.endpoint,
     request: {
       bodyBytes: new TextEncoder().encode(o.scanText),
-      messages: [o.display],
+      messages: Array.isArray(o.display) ? o.display : [o.display],
     },
     response: { text: "", bodyBytes: new Uint8Array() },
     meta: { tsRequest: o.ts, tsResponse: o.ts },
@@ -397,6 +411,7 @@ interface CodexToolGroup {
   convId?: string;
   model?: string;
   tool: string;
+  callId?: string; // pairs the command card with its output card, and links the row to its turn
   args: string[]; // distinct `arguments` blobs seen across the call's records
   output: string; // the call's output, chunks CONCATENATED (see below)
 }
@@ -480,7 +495,7 @@ function mapCodexRecords(records: OtlpRecord[]): OtelCall[] {
         const key = callId ? `${convId ?? `#g${recordGroup.get(rec) ?? i}`}::${callId}` : `orphan-${i}`;
         let g = tools.get(key);
         if (!g) {
-          g = { order: i, ts, convId, model, tool, args: [], output: "" };
+          g = { order: i, ts, convId, model, tool, callId, args: [], output: "" };
           tools.set(key, g);
         }
         // Chunks of one call repeat the same arguments — dedupe; outputs concat.
@@ -500,19 +515,37 @@ function mapCodexRecords(records: OtlpRecord[]): OtelCall[] {
         model: g.model,
         endpoint: `otel:codex:tool_result:${g.tool}`,
         scanText: [g.tool, ...g.args, g.output].filter(Boolean).join("\n"),
-        // Full output — the daemon clamps it to DISPLAY_RESULT_CAP after
-        // redaction. Clamping here ran before the scrub, so a secret straddling
-        // the cap left its raw prefix in the stored transcript.
+        // Two cards — the command the agent RAN, then its output — so a codex
+        // tool row reads like a pi one (a call paired with its result) instead
+        // of a single one-sided "tool: output" blob that buried the command.
+        // Both carry callId: it pairs the two cards for the viewer and, in B2,
+        // links this row to the turn that issued the call. NOT `detail`: a
+        // Mode-B mapper that sets detail reopens a raw-through redaction hole
+        // (the daemon's note at the display_messages build), and callId is a
+        // pure label carrying no content.
         //
-        // "Full" means the WHOLE reassembled output, not just the tail chunk.
-        // The scan surface above is every chunk, so a value matched across a
-        // seam has to be a substring of the display text or the derived
-        // redaction cannot line it up — and rendering one chunk of a
-        // multi-chunk result silently dropped the rest of what the agent saw.
-        display: {
-          role: "tool", content: `${g.tool}: ${g.output}`,
-          tool: sanitizeTool(g.tool), kind: "result",
-        },
+        // The output card keeps the FULL reassembled output — the daemon clamps
+        // it to DISPLAY_RESULT_CAP AFTER redaction (clamping here would leave a
+        // secret straddling the cap with its raw prefix in the transcript), and
+        // "full" is the whole multi-chunk stream, not the tail chunk (the scan
+        // surface is every chunk, so a value matched across a seam must be a
+        // substring of the display text or the derived redaction can't line it
+        // up). The command card is the deduped `arguments` blob(s).
+        // An args-less group (output-only records) keeps the single result
+        // card — an empty command card would render a blank box (the hook
+        // mapper makes the same call for an input-less payload).
+        display: [
+          ...(g.args.length
+            ? [{
+                role: "tool", content: g.args.join("\n"),
+                tool: sanitizeTool(g.tool), kind: "call" as const, callId: g.callId,
+              }]
+            : []),
+          {
+            role: "tool", content: g.output,
+            tool: sanitizeTool(g.tool), kind: "result", callId: g.callId,
+          },
+        ],
       }),
     });
   }
@@ -583,6 +616,7 @@ export function buildCodexOtelEnv(runToken: string): Record<string, string | und
 
 interface HookPayload {
   session_id?: string;
+  prompt_id?: string;
   tool_name?: string;
   tool_input?: unknown;
   tool_response?: unknown;
@@ -607,6 +641,19 @@ export function mapHookToCall(payload: unknown, ctx: OtlpContext): OtelCall | nu
     // The scanned surface: tool name + input + output, raw, so a secret in the
     // command OR its result is caught.
     const scanText = `${toolName}\n${toolInput}\n${toolResponse}`;
+    // Two cards — the command, then its output — same shape as the codex
+    // tool_result mapper, so a hook row reads like a pi call/result pair
+    // instead of an output-only blob that buried the command. An input-less
+    // payload keeps the single result card (an empty call card would render a
+    // blank box). No `detail` (the Mode-B raw-through hole); the hook carries
+    // no tool_use id, so these cards have no callId — pairing within the row
+    // is positional, which is exact here (one call, one result).
+    const cards: DisplayMessage[] = toolInput
+      ? [
+          { role: "tool", content: toolInput, tool: sanitizeTool(toolName), kind: "call" },
+          { role: "tool", content: toolResponse, tool: sanitizeTool(toolName), kind: "result" },
+        ]
+      : [{ role: "tool", content: toolResponse, tool: sanitizeTool(toolName), kind: "result" }];
     return {
       id: ulid(ts),
       runId: "otel",
@@ -618,14 +665,19 @@ export function mapHookToCall(payload: unknown, ctx: OtlpContext): OtelCall | nu
         bodyBytes: new TextEncoder().encode(scanText),
         // Full output; the daemon clamps to DISPLAY_RESULT_CAP after redaction
         // (see the codex tool_result mapper above for why not here).
-        messages: [{
-          role: "tool", content: `${toolName}: ${toolResponse}`,
-          tool: sanitizeTool(toolName), kind: "result",
-        }] as DisplayMessage[],
+        messages: cards,
       },
       response: { text: "", bodyBytes: new Uint8Array() },
       meta: { tsRequest: ts, tsResponse: ts },
       convId: typeof p.session_id === "string" ? p.session_id : undefined,
+      // The turn this tool ran in — prompt.id, the same value the turn rows
+      // store as their prompt_key. Rides its OWN field, never promptId: the
+      // daemon persists promptId into prompt_key, which is the response-stitch
+      // TARGET key — a hook row carrying it would become an attach candidate,
+      // and a re-delivered assistant_response partial could hang the turn's
+      // answer on a tool-output row. turnRef is written to the turn_link side
+      // table instead, leaving attach semantics untouched.
+      turnRef: typeof p.prompt_id === "string" && p.prompt_id !== "" ? { promptKey: p.prompt_id } : undefined,
     };
   } catch {
     return null;

@@ -142,17 +142,20 @@ export interface SessionView {
 // One session as a conversation. Reuses buildDetail per call so the transcript
 // shows the same parsed messages/response/leak highlights as the detail view.
 export function buildSessionTurns(store: Store, sessionId: string, cap = 200): SessionView {
-  const ids = store.queryAll<{ id: string }>(
-    `SELECT id FROM exchanges WHERE session_id = ? ORDER BY ts_request ASC, id ASC LIMIT ?`,
+  const ids = store.queryAll<{ id: string; endpoint: string | null; prompt_key: string | null }>(
+    `SELECT id, endpoint, prompt_key FROM exchanges WHERE session_id = ? ORDER BY ts_request ASC, id ASC LIMIT ?`,
     [sessionId, cap + 1],
   );
   const truncated = ids.length > cap;
   const turns: SessionTurn[] = [];
+  // Row facts the Mode B fold below keys on; SessionTurn itself stays the
+  // render shape (the client has no use for endpoints).
+  const rowMeta = new Map<SessionTurn, { endpoint: string; promptKey: string | null }>();
   let system: string | null = null;
   let prevWire: Message[] = [];
   let prevResponseText: string | null = null;
   let lastWireTurn: SessionTurn | undefined;
-  for (const { id } of ids.slice(0, cap)) {
+  for (const { id, endpoint, prompt_key } of ids.slice(0, cap)) {
     const call = store.getCall(id);
     if (!call) continue;
     const d = buildDetail(call, leakSpansFor(store, id));
@@ -245,6 +248,7 @@ export function buildSessionTurns(store: Store, sessionId: string, cap = 200): S
       responseLeaks: [],
     };
     turns.push(turn);
+    rowMeta.set(turn, { endpoint: endpoint ?? "", promptKey: prompt_key });
     if (d.source === "wire") lastWireTurn = turn;
   }
   // Backward leak propagation (R7): a secret inside a response (tool args,
@@ -270,7 +274,103 @@ export function buildSessionTurns(store: Store, sessionId: string, cap = 200): S
         [sessionId],
       )[0]?.u,
     );
-  return { sessionId, system, turns, truncated, utility };
+  return { sessionId, system, turns: foldModeBTurns(store, sessionId, turns, rowMeta), truncated, utility };
+}
+
+// ---- Mode B turn folding ----
+//
+// Codex and Claude subscription capture split one user turn across rows: the
+// turn row (prompt + response), plus one row per tool execution (codex
+// tool_result / the Claude PostToolUse hook). Content-wise that is complete;
+// arrangement-wise it reads as a pile of loose one-card turns. This fold
+// regroups them the way a wire session reads: each tool row's cards move under
+// the turn that ran them, resolved through the turn_link table (written by the
+// codex rollout tailer and the Claude hook path — see the schema note).
+//
+// Display-only and fail-safe by construction: an unlinked tool row (rollout
+// lagging or absent, old Claude version, legacy data) stays a standalone turn
+// — folding degrades to today's view, capture is never hidden. Folded cards
+// carry sourceId so their own row's detail/raw view stays one click away.
+const TURN_ENDPOINTS = new Set(["otel:claude_code.turn", "otel:codex:user_prompt"]);
+const isToolRow = (endpoint: string) =>
+  endpoint.startsWith("otel:tool_output:") || endpoint.startsWith("otel:codex:tool_result:");
+
+function foldModeBTurns(
+  store: Store,
+  sessionId: string,
+  turns: SessionTurn[],
+  rowMeta: Map<SessionTurn, { endpoint: string; promptKey: string | null }>,
+): SessionTurn[] {
+  const links = new Map<string, { promptKey: string; ordinal: number; seq: number }>();
+  for (const r of store.queryAll<{ link_key: string; prompt_key: string; ordinal: number; seq: number }>(
+    `SELECT link_key, prompt_key, ordinal, seq FROM turn_link WHERE session_id = ?`,
+    [sessionId],
+  )) {
+    links.set(r.link_key, { promptKey: r.prompt_key, ordinal: r.ordinal, seq: r.seq });
+  }
+  // Turn index: the Nth turn row per prompt_key, in ts order — the SAME
+  // all-turns counting the rollout links use, so the two sides can't drift.
+  // Claude prompt ids are unique (links always say ordinal 0); codex keys are
+  // hash-of-prompt, so repeated identical prompts need the occurrence number.
+  const occurrence = new Map<string, number>();
+  const index = new Map<string, SessionTurn>();
+  for (const t of turns) {
+    const m = rowMeta.get(t);
+    if (!m?.promptKey || !TURN_ENDPOINTS.has(m.endpoint)) continue;
+    const n = occurrence.get(m.promptKey) ?? 0;
+    occurrence.set(m.promptKey, n + 1);
+    index.set(`${m.promptKey}#${n}`, t);
+  }
+  const dropped = new Set<SessionTurn>();
+  // Appends are collected then applied so ordering is explicit: codex cards
+  // sort by their rollout seq (authoritative call order); claude cards keep
+  // arrival order, offset past any seq so the two schemes never interleave
+  // wrongly within one turn (a turn is single-agent anyway).
+  const appends = new Map<SessionTurn, Array<{ cards: DisplayMessage[]; leaks: DetailLeak[]; order: number }>>();
+  const append = (target: SessionTurn, from: SessionTurn, order: number) => {
+    const cards = from.messages.map((c) => ({ ...c, sourceId: from.id }));
+    const list = appends.get(target) ?? [];
+    list.push({ cards, leaks: from.leaks, order });
+    appends.set(target, list);
+    dropped.add(from);
+  };
+  let arrival = 0;
+  for (const t of turns) {
+    const m = rowMeta.get(t);
+    if (!m) continue;
+    arrival++;
+    // Claude batch partials: a turn whose tool_result events arrived in their
+    // own OTLP batch lands as an extra claude_code.turn row sharing the exact
+    // prompt.id. Merge it into the question turn. Safe ONLY because claude's
+    // prompt_key is a real unique id — never do this for codex's hash keys.
+    if (m.endpoint === "otel:claude_code.turn" && m.promptKey) {
+      const target = index.get(`${m.promptKey}#0`);
+      if (target && target !== t) {
+        // An attach-miss response partial (rare fallback insert) carries the
+        // turn's reply — move it home rather than dropping it with the row.
+        if (!target.responseText && t.responseText) target.responseText = t.responseText;
+        append(target, t, 1e9 + arrival);
+      }
+      continue;
+    }
+    if (!isToolRow(m.endpoint)) continue;
+    // row:<id> first (claude, exact); else the row's own callId → call:<id>
+    // (codex, via the rollout).
+    const link = links.get(`row:${t.id}`) ?? t.messages.reduce<
+      { promptKey: string; ordinal: number; seq: number } | null
+    >((got, c) => got ?? (c.callId ? links.get(`call:${c.callId}`) ?? null : null), null);
+    const target = link && index.get(`${link.promptKey}#${link.ordinal}`);
+    if (!target || target === t) continue;
+    append(target, t, links.has(`row:${t.id}`) ? 1e9 + arrival : link!.seq);
+  }
+  for (const [target, list] of appends) {
+    list.sort((a, b) => a.order - b.order);
+    for (const a of list) {
+      target.messages.push(...a.cards);
+      target.leaks.push(...a.leaks);
+    }
+  }
+  return dropped.size ? turns.filter((t) => !dropped.has(t)) : turns;
 }
 
 // Where does this request's NEW content start, given the previous wire call's

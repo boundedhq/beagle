@@ -839,3 +839,91 @@ describe("ulid", () => {
     expect(many.size).toBe(1000);
   });
 });
+
+// Display grouping (turn_link) — the side table that folds Mode B tool rows
+// under their turn. Deliberately NOT exchanges.prompt_key (see the schema
+// note): these are grouping metadata with their own lifecycle.
+describe("turn_link (linkTurns + cleanup)", () => {
+  let dir: string;
+  beforeEach(() => (dir = tmpRoot()));
+  const rows = (s: Store) =>
+    s.queryAll<{ session_id: string; link_key: string; prompt_key: string; ordinal: number; seq: number }>(
+      `SELECT session_id, link_key, prompt_key, ordinal, seq FROM turn_link ORDER BY link_key`,
+    );
+
+  test("upsert is idempotent and re-links update in place", () => {
+    const store = Store.open(dir);
+    store.linkTurns("sess-1", [
+      { linkKey: "call:c1", promptKey: "k1", ordinal: 0, seq: 0 },
+      { linkKey: "call:c2", promptKey: "k1", ordinal: 0, seq: 1 },
+    ]);
+    // The codex tailer re-emits links across its retry window — byte-identical
+    // re-delivery must not error or duplicate…
+    store.linkTurns("sess-1", [{ linkKey: "call:c1", promptKey: "k1", ordinal: 0, seq: 0 }]);
+    expect(rows(store).length).toBe(2);
+    // …and a grown/corrected link for the same key replaces its row.
+    store.linkTurns("sess-1", [{ linkKey: "call:c1", promptKey: "k2", ordinal: 1, seq: 3 }]);
+    expect(rows(store).find((r) => r.link_key === "call:c1")).toMatchObject({ prompt_key: "k2", ordinal: 1, seq: 3 });
+    store.close();
+  });
+
+  test("purging a session removes its links; other sessions keep theirs", () => {
+    const store = Store.open(dir);
+    store.insertCall(fakeCall({ sessionId: "sess-a" }));
+    store.insertCall(fakeCall({ sessionId: "sess-b" }));
+    store.linkTurns("sess-a", [{ linkKey: "call:a1", promptKey: "k", ordinal: 0, seq: 0 }]);
+    store.linkTurns("sess-b", [{ linkKey: "call:b1", promptKey: "k", ordinal: 0, seq: 0 }]);
+    store.purge({ kind: "session", sessionId: "sess-a" });
+    expect(rows(store).map((r) => r.session_id)).toEqual(["sess-b"]);
+    store.close();
+  });
+
+  test("a row-keyed link dies with its row, even while the session lives on", () => {
+    // Claude hook links are keyed row:<exchange id>. Retention can evict the
+    // tool row while the session keeps newer rows — the link must not outlive
+    // the row it annotates.
+    const store = Store.open(dir);
+    const t0 = Date.now();
+    const old = fakeCall({ id: ulid(t0 - 60_000), tsRequest: t0 - 60_000 });
+    const fresh = fakeCall({ id: ulid(t0), tsRequest: t0 });
+    store.insertCall(old);
+    store.insertCall(fresh);
+    store.linkTurns("sess-1", [
+      { linkKey: `row:${old.id}`, promptKey: "p", ordinal: 0, seq: 0 },
+      { linkKey: `row:${fresh.id}`, promptKey: "p", ordinal: 0, seq: 0 },
+    ]);
+    store.purge({ kind: "before", ts: t0 - 30_000 });
+    expect(rows(store).map((r) => r.link_key)).toEqual([`row:${fresh.id}`]);
+    store.close();
+  });
+
+  test("purge-all leaves no links behind", () => {
+    const store = Store.open(dir);
+    store.insertCall(fakeCall({ sessionId: "sess-1" }));
+    store.linkTurns("sess-1", [{ linkKey: "call:c1", promptKey: "k", ordinal: 0, seq: 0 }]);
+    store.purge({ kind: "all" });
+    expect(rows(store)).toEqual([]);
+    store.close();
+  });
+});
+
+describe("updateSession recency", () => {
+  let dir: string;
+  beforeEach(() => (dir = tmpRoot()));
+
+  test("last_ts only moves forward — a historical re-emit never rewinds recency", () => {
+    // Rollout re-emits (answers, turn links) carry frozen historical stamps
+    // through the resolver; before this guard one rewound last_ts and dropped
+    // a live session down the sessions list.
+    const store = Store.open(dir);
+    store.insertSession({ id: "s1", firstTs: 1000, lastTs: 5000 });
+    store.updateSession("s1", { lastTs: 2000 }); // older — must not rewind
+    expect(store.queryAll<{ t: number }>(`SELECT last_ts AS t FROM sessions WHERE id='s1'`)[0]!.t).toBe(5000);
+    store.updateSession("s1", { lastTs: 9000 }); // newer — moves forward
+    expect(store.queryAll<{ t: number }>(`SELECT last_ts AS t FROM sessions WHERE id='s1'`)[0]!.t).toBe(9000);
+    // A no-ts update (convId/headHash only) leaves recency alone.
+    store.updateSession("s1", { convId: "c" });
+    expect(store.queryAll<{ t: number }>(`SELECT last_ts AS t FROM sessions WHERE id='s1'`)[0]!.t).toBe(9000);
+    store.close();
+  });
+});

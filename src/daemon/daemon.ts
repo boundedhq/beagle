@@ -997,6 +997,25 @@ export class Daemon {
         convId: call.convId,
         messages: call.request.messages,
       });
+      // Rollout-derived turn links (origin='codex-rollout', both sides empty):
+      // grouping metadata — opaque call ids, no content — so they write to
+      // turn_link and stop here, never reaching the scan/alert/insert path. A
+      // link is not a captured call and must not become a row. Best-effort by
+      // the same rule that makes folding fail open: a store error here must
+      // not abort the batch. Today the tailer emits answers BEFORE links, so a
+      // thrown link would cost only the links behind it — but that ordering is
+      // the tailer's, not this loop's, and nothing else stops a links-first
+      // batch from taking answer stitches down with it. The catch makes the
+      // invariant local: cosmetic writes cannot abort capture, full stop.
+      if (call.toolLinks?.length) {
+        try {
+          this.store.linkTurns(
+            resolution.sessionId,
+            call.toolLinks.map((l) => ({ linkKey: `call:${l.callId}`, promptKey: l.promptKey, ordinal: l.ordinal, seq: l.seq })),
+          );
+        } catch { /* unlinked rows render standalone */ }
+        continue;
+      }
       const scanResult = await this.scanHost.scan(call.request.bodyBytes, {});
       // Same protocol-identity noise filter as the wire path.
       scanResult.findings = dropIdentityFieldNoise(call.request.bodyBytes, scanResult.findings);
@@ -1119,22 +1138,28 @@ export class Daemon {
       // is at i, not the wire path's i + 1. Kept separate from the transcript's
       // copy below, which honours redact-on-capture where this must not.
       const summaryMessages = messages.map((m, i) => ({ ...m, content: derived.outbound[i]! }));
+      // The same backstop the wire path keeps, reaching the same two cases and
+      // carrying the same 8-char limit — see there. And picked the same way:
+      // `redaction.values` is already the union of these two (the body
+      // findings it spliced, plus derived.values as extraValues), so listing
+      // them again would only re-scan every message for strings the first
+      // pass has already replaced.
+      const secretVals = redaction ? redaction.values : [...bodyValues, ...derived.values];
       const summary = redaction?.heldOut
         ? "[REDACTION INCOMPLETE: content withheld]"
-        : buildSummary(
-            { model: call.model, messages: summaryMessages } as ParsedRequest,
-            // The scrubbed headline when this turn has one (a narrating rollout
-            // answer), else the whole response — see OtelCall.responseHeadline.
-            derived.inbound[0],
-            undefined,
-            // The same backstop the wire path keeps, reaching the same two
-            // cases and carrying the same 8-char limit — see there. And picked
-            // the same way: `redaction.values` is already the union of these
-            // two (the body findings it spliced, plus derived.values as
-            // extraValues), so listing them again would only re-scan every
-            // message for strings the first pass has already replaced.
-            redaction ? redaction.values : [...bodyValues, ...derived.values],
-          );
+        : // A tool row (codex tool_result / Claude hook: a command card and its
+          // output card) reads in wire order like a pi line — `ran \`cmd\` →
+          // output` — instead of the output's first line, which for codex is
+          // exec-harness chunk noise. Everything else keeps buildSummary.
+          (buildToolRowSummary(summaryMessages, secretVals) ??
+            buildSummary(
+              { model: call.model, messages: summaryMessages } as ParsedRequest,
+              // The scrubbed headline when this turn has one (a narrating rollout
+              // answer), else the whole response — see OtelCall.responseHeadline.
+              derived.inbound[0],
+              undefined,
+              secretVals,
+            ));
       const scanState =
         redaction?.heldOut || derived.incomplete ? "incomplete" : scanResult.state;
       // One answer for the row, shared by both writers below (the stitch and
@@ -1168,8 +1193,12 @@ export class Daemon {
               // setting `detail` (otlp-map sets none today) reopens that hole.
               ...m,
               role: m.role,
+              // Both TOOL card kinds clamp, for the cap's own reason: the
+              // scanned body already holds the full text, and a `cat` heredoc
+              // in a command is as unbounded as one in an output. Post-scrub,
+              // as always. Plain messages (the user's prompt) stay whole.
               content:
-                (m as DisplayMessage).kind === "result"
+                (m as DisplayMessage).kind === "result" || (m as DisplayMessage).kind === "call"
                   ? clampRedacted(content, DISPLAY_RESULT_CAP)
                   : content,
             };
@@ -1273,6 +1302,19 @@ export class Daemon {
         searchText,
         promptKey: call.promptId,
       });
+      // A row that names its own turn (the Claude hook's prompt_id): record the
+      // display grouping. Row-keyed, ordinal 0 — prompt ids are unique, unlike
+      // codex's hash-of-prompt keys. Written AFTER the insert so a link can
+      // never point at a row that failed to land — and best-effort, because it
+      // sits between the insert and this row's ALERT pass: a cosmetic write
+      // must never be the reason a scanned secret goes unreported.
+      if (call.turnRef) {
+        try {
+          this.store.linkTurns(resolution.sessionId, [
+            { linkKey: `row:${call.id}`, promptKey: call.turnRef.promptKey, ordinal: 0, seq: 0 },
+          ]);
+        } catch { /* the row renders standalone */ }
+      }
       this.alertEngine.process(
         {
           id: call.id,
@@ -1675,6 +1717,49 @@ function summarizeActions(actions: ToolAction[], compact = false): string {
   const extra = parts.length - Math.min(parts.length, cap);
   if (!shown) return `${actions.length} tool calls`;
   return extra > 0 ? `${shown} +${extra}` : shown;
+}
+
+// A Mode B tool row's feed line: `ran \`sed -n '1,240p' …\` → <output head>`.
+// Fires only for the shape the codex tool_result and Claude hook mappers emit —
+// a lone command card, optionally followed by its output card — and returns
+// null for everything else so buildSummary keeps every other row. Same scrub
+// discipline as buildSummary: the value backstop runs on the WHOLE halves
+// before any truncation (a secret cut by a cap no longer literal-matches), on
+// top of the offset-scrubbed parts the caller passes in.
+export function buildToolRowSummary(
+  messages: DisplayMessage[],
+  secretValues: Array<{ value: string; type: string }>,
+): string | null {
+  const [call, result, extra] = messages;
+  if (!call || extra || call.kind !== "call" || (result && result.kind !== "result")) return null;
+  const scrub = (s: string) => (secretValues.length ? redactValuesInText(s, secretValues) : s);
+  const cmd = scrub(call.content);
+  const sent = summarizeActions([{ tool: call.tool ?? "tool", detail: toolCallDetail(cmd) || undefined }]);
+  const got = result ? firstLine(scrub(result.content), 80) : "";
+  return clampLine(got ? `${sent} → ${got}` : sent, SUMMARY_CAP);
+}
+
+// The human command inside a tool card's arguments, for the summary's sent
+// half. Runs on ALREADY-SCRUBBED text (see caller) so a placeholder rides
+// through intact. Three shapes, all display-only heuristics: a JSON object
+// with a conventional key (claude tool_input, codex exec_command), a JS
+// snippet embedding cmd:"…" (codex exec), else the raw text; a JSON object
+// with NO conventional key (codex wait's {"cell_id":…}) yields "" so the
+// summary shows the bare verb instead of argument noise.
+function toolCallDetail(argsText: string): string {
+  const text = argsText.trim();
+  if (text.startsWith("{")) {
+    try {
+      const o = JSON.parse(text) as Record<string, unknown>;
+      for (const k of ["cmd", "command", "file_path", "path", "pattern", "url", "query", "prompt"]) {
+        if (typeof o[k] === "string" && o[k]) return o[k] as string;
+      }
+      return "";
+    } catch { /* not JSON after all — fall through */ }
+  }
+  const m = /(?:cmd|command)\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(text);
+  if (m) return m[1]!.replace(/\\(["\\])/g, "$1");
+  return text;
 }
 
 // Bound a single line to `max` for display. Every caller clamps text

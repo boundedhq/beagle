@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { buildSummary, composeStitchSummary } from "../src/daemon/daemon";
+import { buildSummary, buildToolRowSummary, composeStitchSummary } from "../src/daemon/daemon";
 import { redactionPlaceholder } from "../src/transform/redact";
-import type { ParsedRequest } from "../src/parsers/parsers";
+import type { DisplayMessage, ParsedRequest } from "../src/parsers/parsers";
 
 // Regression for the Mode B display bug: rows whose only message wasn't from
 // the user (a tool output, an assistant-only turn) summarized to a bare
@@ -321,5 +321,78 @@ describe("composeStitchSummary", () => {
     // The plain Mode B path: the row holds only its question, no answer yet.
     expect(composeStitchSummary("a bare question", false, "the answer"))
       .toBe('"a bare question" → the answer');
+  });
+});
+
+// A Mode B tool row — the codex tool_result / Claude hook two-card shape —
+// summarizes as `verb \`cmd\` → output head`, never as the output's first line
+// (codex exec-harness noise: "Chunk ID: a7c2ec"). Non-tool shapes return null
+// so buildSummary keeps every other row.
+describe("buildToolRowSummary (Mode B tool rows)", () => {
+  const card = (kind: "call" | "result", content: string, tool = "exec_command"): DisplayMessage =>
+    ({ role: "tool", content, tool, kind });
+
+  test("codex exec_command: JSON args → ran `cmd` → output head", () => {
+    const s = buildToolRowSummary(
+      [card("call", '{"cmd":"sed -n \'1,240p\' SKILL.md","yield_time_ms":10000}'),
+       card("result", "Chunk ID: a7c2ec\nWall time: 0.0 seconds")],
+      [],
+    );
+    expect(s).toBe("ran `sed -n '1,240p' SKILL.md` → Chunk ID: a7c2ec");
+  });
+
+  test("codex exec: the cmd inside a JS snippet is extracted", () => {
+    const s = buildToolRowSummary(
+      [card("call", 'const r = await tools.exec_command({cmd:"node fetch.mjs",workdir:"/x"}); text(r.output);', "exec"),
+       card("result", "Script completed\nWall time 0.2 seconds")],
+      [],
+    );
+    expect(s).toBe("ran `node fetch.mjs` → Script completed");
+  });
+
+  test("codex wait: args with no command key show the bare verb, not JSON noise", () => {
+    const s = buildToolRowSummary(
+      [card("call", '{"cell_id":"3","yield_time_ms":20000}', "wait"),
+       card("result", "Script completed\nOutput:")],
+      [],
+    );
+    expect(s).toBe("wait → Script completed");
+  });
+
+  test("claude Read: file_path becomes the read label", () => {
+    const s = buildToolRowSummary(
+      [card("call", '{"file_path":"/Users/v/.claude/memory/MEMORY.md"}', "Read"),
+       card("result", '{"type":"text","file":{"filePath":"/Users/v/.claude/memory/MEMORY.md"}}')],
+      [],
+    );
+    expect(s).toContain("read MEMORY.md");
+    expect(s).toContain(" → ");
+  });
+
+  test("a secret in the command is scrubbed BEFORE truncation (value backstop)", () => {
+    // The key sits past the 40-char detail cap; a truncate-then-scrub order
+    // would cut it in half and the scrub would find nothing.
+    const key = "AKIAZQ3DRSTUVWXY2345";
+    const cmd = `{"cmd":"curl -H 'x-key: ${key}' https://api.example.com/very/long/path"}`;
+    const s = buildToolRowSummary(
+      [card("call", cmd), card("result", `sent ${key} ok`)],
+      [{ value: key, type: "aws-access-key-id" }],
+    )!;
+    expect(s).not.toContain(key);
+    expect(s).toContain(redactionPlaceholder("aws-access-key-id", key).slice(0, 12));
+  });
+
+  test("a call-only row (claude batch partial shape) shows the sent half alone", () => {
+    expect(buildToolRowSummary([card("call", '{"command":"ls -la"}', "Bash")], [])).toBe("ran `ls -la`");
+  });
+
+  test("non-tool-pair shapes return null so buildSummary handles them", () => {
+    expect(buildToolRowSummary([card("result", "output only")], [])).toBe(null);
+    expect(buildToolRowSummary([{ role: "user", content: "hi" }], [])).toBe(null);
+    expect(buildToolRowSummary([card("call", "a"), card("call", "b")], [])).toBe(null);
+    expect(buildToolRowSummary(
+      [card("call", "a"), card("result", "b"), card("result", "c")], []), // three cards — not the pair
+    ).toBe(null);
+    expect(buildToolRowSummary([], [])).toBe(null);
   });
 });

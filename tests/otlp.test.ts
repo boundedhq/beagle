@@ -429,9 +429,12 @@ describe("Codex OTLP → Call mapping (Codex Mode B, codex.* schema)", () => {
       codexLogs([codexEvent("codex.tool_result", { "conversation.id": "c", tool_name: "exec_command", output: big })]),
     )[0]!;
     const hookCall = mapHookToCall({ session_id: "s", tool_name: "Bash", tool_response: big }, ctx)!;
-    for (const [tool, call] of [["exec_command", codex], ["Bash", hookCall]] as const) {
+    for (const call of [codex, hookCall]) {
+      // Output-only input (no command captured) → the single result card, not
+      // a result trailing an EMPTY command card that renders as a blank box.
+      expect(call.request.messages!.length).toBe(1);
       const m = call.request.messages![0]! as DisplayMessage;
-      expect(m.content).toBe(`${tool}: ${big}`); // the whole output rides through
+      expect(m.content).toBe(big); // the whole output rides through
       expect(m.kind).toBe("result"); // what the daemon keys the clamp on
     }
   });
@@ -570,7 +573,15 @@ describe("Codex OTLP → Call mapping (Codex Mode B, codex.* schema)", () => {
     expect(scanned).not.toContain("AKIAZQ3DRS\nTUVWXY2345"); // no separator AT the seam
     // The display copy carries the reassembly too, or the value scrub has no
     // whole value to find and the transcript keeps the key (daemon-level test).
-    expect((calls[0]!.request.messages![0]! as DisplayMessage).content).toContain("AKIAZQ3DRSTUVWXY2345");
+    // Two cards now — the command, then the output; the reassembled stream is
+    // the RESULT card's content.
+    const cards = calls[0]!.request.messages! as DisplayMessage[];
+    expect(cards.map((m) => m.kind)).toEqual(["call", "result"]);
+    expect(cards[0]!.content).toBe('{"cmd":"cat key.txt"}');
+    expect(cards[1]!.content).toContain("AKIAZQ3DRSTUVWXY2345");
+    // Both halves of one execution share the id that pairs them.
+    expect(cards[0]!.callId).toBe("call-7");
+    expect(cards[1]!.callId).toBe("call-7");
     expect(scanned.match(/cat key\.txt/g)?.length).toBe(1); // repeated arguments deduped
     // distinct call_ids stay distinct rows
     const two = mapCodexOtlpToCalls(
@@ -854,6 +865,36 @@ describe("mapHookToCall — PostToolUse hook tool-OUTPUT capture (Mode B gap fix
     expect(mapHookToCall(null, ctx)).toBeNull();
     expect(mapHookToCall("not json", ctx)).toBeNull();
     expect(mapHookToCall(12345, ctx)).toBeNull();
+  });
+
+  test("two cards: the command, then its output — a pi-like call/result pair", () => {
+    const c = mapHookToCall(hook(), ctx)!;
+    const cards = c.request.messages! as DisplayMessage[];
+    expect(cards.map((m) => m.kind)).toEqual(["call", "result"]);
+    expect(cards[0]!.content).toBe('{"command":"cat secrets.env"}');
+    expect(cards[1]!.content).toBe("export AWS_SECRET=AKIAZQ3DRSTUVWXY2345\n");
+    // No detail (the Mode-B raw-through hole), no invented callId (the hook
+    // carries no tool_use id — pairing within the row is positional).
+    expect(cards.every((m) => m.detail === undefined && m.callId === undefined)).toBe(true);
+  });
+
+  test("an input-less payload keeps the single result card, not an empty command card", () => {
+    const c = mapHookToCall(hook({ tool_input: undefined }), ctx)!;
+    expect((c.request.messages! as DisplayMessage[]).map((m) => m.kind)).toEqual(["result"]);
+  });
+
+  test("prompt_id rides as turnRef — the display grouping key, NOT promptId", () => {
+    // promptId would be persisted into prompt_key, the response-stitch TARGET
+    // key: a hook row carrying it could catch a re-delivered answer partial.
+    const c = mapHookToCall(hook({ prompt_id: "prompt-uuid-9" }), ctx)!;
+    expect(c.turnRef).toEqual({ promptKey: "prompt-uuid-9" });
+    expect(c.promptId).toBeUndefined();
+  });
+
+  test("no / empty / non-string prompt_id → no turnRef (older Claude versions fold gracefully out)", () => {
+    expect(mapHookToCall(hook(), ctx)!.turnRef).toBeUndefined();
+    expect(mapHookToCall(hook({ prompt_id: "" }), ctx)!.turnRef).toBeUndefined();
+    expect(mapHookToCall(hook({ prompt_id: 42 }), ctx)!.turnRef).toBeUndefined();
   });
 });
 

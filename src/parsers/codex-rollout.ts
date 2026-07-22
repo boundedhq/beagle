@@ -46,9 +46,22 @@ export interface RolloutAnswer {
   ordinal: number;
 }
 
+/** A turn's tool calls, for display grouping (turn_link). Grows as the turn
+ *  runs, like answers: each new call re-yields the turn's list-so-far. */
+export interface RolloutTurnLinks {
+  promptKey: string;
+  /** Nth REAL user prompt with this key — ALL turns, answered or not, because
+   *  the viewer counts prompt rows the same way. Deliberately not
+   *  RolloutAnswer.ordinal, which counts answered turns only (the shipped
+   *  attach semantics; see that field's note). */
+  ordinal: number;
+  /** call_ids in rollout order — seq is the index. */
+  callIds: string[];
+}
+
 interface RolloutItem {
   type?: string;
-  payload?: { type?: string; role?: string; content?: unknown };
+  payload?: { type?: string; role?: string; content?: unknown; call_id?: unknown };
   timestamp?: string;
 }
 
@@ -73,6 +86,18 @@ function assistantText(item: RolloutItem): string | null {
   const p = item.payload;
   if (item.type === "response_item" && p?.type === "message" && p?.role === "assistant") return messageText(p);
   return null;
+}
+
+// A tool call the turn made: custom_tool_call / function_call / any future
+// `*_call` item carrying a call_id — the same generic suffix rule the wire
+// Responses parser uses (parsers.ts responsesItem). Outputs (`*_call_output`)
+// are excluded FIRST: they share the suffix and the call_id, and counting both
+// halves would double every call's seq.
+function toolCallId(item: RolloutItem): string | null {
+  const p = item.payload;
+  if (item.type !== "response_item" || typeof p?.type !== "string") return null;
+  if (p.type.endsWith("_call_output") || !p.type.endsWith("_call")) return null;
+  return typeof p.call_id === "string" && p.call_id !== "" ? p.call_id : null;
 }
 
 // Defensive JSONL parse: a blank or malformed line is skipped, never thrown (R3
@@ -111,14 +136,33 @@ function parseRollout(text: string): RolloutItem[] {
 export class RolloutPairing {
   private currentKey: string | null = null;
   private open: RolloutAnswer | null = null; // the current turn's merged answer so far
-  private readonly turns = new Map<string, number>(); // promptKey → same-key turns seen
-  push(text: string): RolloutAnswer[] {
+  private readonly turns = new Map<string, number>(); // promptKey → ANSWERED same-key turns seen
+  private readonly allTurns = new Map<string, number>(); // promptKey → ALL same-key turns seen (links)
+  private openLinks: RolloutTurnLinks | null = null; // the current turn's calls so far
+  push(text: string): { answers: RolloutAnswer[]; links: RolloutTurnLinks[] } {
     const out: RolloutAnswer[] = [];
+    const links: RolloutTurnLinks[] = [];
     for (const item of parseRollout(text)) {
       const prompt = realPromptText(item);
       if (prompt !== null) {
         this.currentKey = codexPromptKey(prompt);
         this.open = null; // a new turn — never merge across prompts
+        // Links get their turn ordinal HERE, at the prompt, counting every
+        // turn — a tool-only turn has links but no answer, and counting only
+        // answered turns would land its calls on the wrong same-text row.
+        const ordinal = this.allTurns.get(this.currentKey) ?? 0;
+        this.allTurns.set(this.currentKey, ordinal + 1);
+        this.openLinks = { promptKey: this.currentKey, ordinal, callIds: [] };
+        continue;
+      }
+      const callId = toolCallId(item);
+      if (callId && this.openLinks) {
+        // Copy-on-grow, like answers: the tailer content-hashes each yielded
+        // state, so growing a yielded object in place would mutate its key.
+        const grown = { ...this.openLinks, callIds: [...this.openLinks.callIds, callId] };
+        if (links.length && links[links.length - 1] === this.openLinks) links[links.length - 1] = grown;
+        else links.push(grown);
+        this.openLinks = grown;
         continue;
       }
       const answer = assistantText(item);
@@ -147,10 +191,14 @@ export class RolloutPairing {
         }
       }
     }
-    return out;
+    return { answers: out, links };
   }
 }
 
 export function answersFromText(text: string): RolloutAnswer[] {
-  return new RolloutPairing().push(text);
+  return new RolloutPairing().push(text).answers;
+}
+
+export function linksFromText(text: string): RolloutTurnLinks[] {
+  return new RolloutPairing().push(text).links;
 }

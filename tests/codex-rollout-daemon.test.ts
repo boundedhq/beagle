@@ -6,6 +6,7 @@ import { Daemon } from "../src/daemon/daemon";
 import { controlRequest } from "../src/daemon/control";
 import { Store } from "../src/core/store/store";
 import { listCalls } from "../src/viewer/feed-query";
+import { buildSessionTurns } from "../src/viewer/session-view";
 import { codexPromptKey } from "../src/parsers/codex-rollout";
 
 // A codex.user_prompt OTLP body — the shape the mapper self-labels as codex
@@ -29,6 +30,25 @@ function codexPrompt(convId: string, prompt: string, tsMs = Date.now()) {
 }
 
 const msg = (role: string, text: string) => ({ type: "message", role, content: [{ type: "output_text", text }] });
+
+// A codex.tool_result OTLP body — how a tool execution reaches the daemon
+// live, independent of (and usually before) the rollout's record of it.
+function codexToolResult(convId: string, callId: string, args: string, output: string, tsMs = Date.now()) {
+  return {
+    resourceLogs: [{ scopeLogs: [{ scope: { name: "codex_otel.log_only" }, logRecords: [{
+      timeUnixNano: "0",
+      observedTimeUnixNano: String(tsMs * 1e6),
+      attributes: [
+        { key: "event.name", value: { stringValue: "codex.tool_result" } },
+        { key: "conversation.id", value: { stringValue: convId } },
+        { key: "call_id", value: { stringValue: callId } },
+        { key: "tool_name", value: { stringValue: "exec_command" } },
+        { key: "arguments", value: { stringValue: args } },
+        { key: "output", value: { stringValue: output } },
+      ],
+    }] }] }],
+  };
+}
 // Line timestamps default to NOW, as in a live session: the stale-attach bound
 // compares them to the turn rows' OTel record times, so a fixed date here would
 // make every stitch look stale once the wall clock passed it.
@@ -315,6 +335,88 @@ describe("Codex rollout response capture end-to-end", () => {
       const summary = s.getCall(s.searchLiteral(prompt)[0]!.callId)!.summary!;
       expect(summary).toContain("[REDACTED:aws-access-key-id:");
       expect(summary).not.toContain("AKIAZQ3DRSTUVWXY2345");
+    });
+  }, 15_000);
+
+  test("rollout links fold the live tool rows under their turn; the feed reads one line", async () => {
+    // The full shape: the prompt and the tool execution arrive LIVE over OTLP
+    // (scanned/alerted in real time, untouched by this feature); the rollout
+    // then supplies the answer (stitched, shipped earlier) and the call_id →
+    // turn links (turn_link) that let the viewer regroup the loose tool rows.
+    const conv = "conv-fold";
+    const prompt = "list the repo files";
+    const t0 = Date.now();
+    writeRollout(codexRoot, conv, [
+      jline("turn_context", { turn_id: "t", model: "gpt-5.6-sol" }, t0 - 4000),
+      jline("response_item", msg("user", prompt), t0 - 4000),
+      jline("response_item", { type: "custom_tool_call", call_id: "call-f1", name: "exec", input: '{"cmd":"ls"}' }, t0 - 3000),
+      jline("response_item", { type: "custom_tool_call_output", call_id: "call-f1", output: [{ type: "input_text", text: "README.md" }] }, t0 - 2000),
+      jline("response_item", msg("assistant", "One file: README.md"), t0 - 1000),
+    ].join("\n") + "\n");
+    await post(codexPrompt(conv, prompt, t0 - 5000));
+    await post(codexToolResult(conv, "call-f1", '{"cmd":"ls"}', "README.md", t0 - 3000));
+
+    // The answer stitches and the links land (order between them is free).
+    await waitFor(
+      () => readStore((s) => {
+        const hit = s.searchLiteral(prompt)[0];
+        const call = hit && s.getCall(hit.callId);
+        if (!call?.responseBody?.byteLength) return false;
+        return s.queryAll(`SELECT 1 FROM turn_link WHERE link_key='call:call-f1'`).length === 1;
+      }),
+      "the answer to stitch and the links to land",
+    );
+
+    readStore((s) => {
+      const promptRow = s.getCall(s.searchLiteral(prompt)[0]!.callId)!;
+      const toolRow = s.getCall(s.searchLiteral("README.md")[0]!.callId)!;
+      // The tool row is intact and live-captured — its summary reads the command…
+      expect(toolRow.summary).toBe("ran `ls` → README.md");
+      expect(toolRow.promptKey).toBeUndefined(); // never an attach target
+      // …the transcript folds the session to ONE turn: prompt → cards → answer…
+      const view = buildSessionTurns(s, promptRow.sessionId);
+      expect(view.turns.length).toBe(1);
+      const turn = view.turns[0]!;
+      expect(turn.id).toBe(promptRow.id);
+      expect(turn.responseText).toBe("One file: README.md");
+      expect(turn.messages.map((m) => m.kind ?? "text")).toEqual(["text", "call", "result"]);
+      expect(turn.messages.at(-1)!.sourceId).toBe(toolRow.id);
+      // …and the feed shows the turn line only.
+      const ids = listCalls(s, 20).map((r) => r.id);
+      expect(ids).toContain(promptRow.id);
+      expect(ids).not.toContain(toolRow.id);
+    });
+  }, 15_000);
+
+  test("a failing link write never costs the ANSWER stitch — links and answers share a batch", async () => {
+    // Pins the batch-level invariant, not one code path: links and answers
+    // ride one tailer emit, and the answer must attach no matter what the
+    // link write does. Today two things independently protect it — the tailer
+    // emits answers before links, AND the daemon catches link-write errors —
+    // and this holds whichever of the two a future change removes.
+    (daemon as unknown as { store: { linkTurns: () => void } }).store.linkTurns = () => {
+      throw new Error("disk full");
+    };
+    const conv = "conv-linkfail";
+    const prompt = "does the answer survive a link failure?";
+    const t0 = Date.now();
+    writeRollout(codexRoot, conv, [
+      jline("response_item", msg("user", prompt), t0 - 3000),
+      jline("response_item", { type: "custom_tool_call", call_id: "call-lf", name: "exec", input: '{"cmd":"true"}' }, t0 - 2000),
+      jline("response_item", msg("assistant", "IT SURVIVES"), t0 - 1000),
+    ].join("\n") + "\n");
+    await post(codexPrompt(conv, prompt, t0 - 4000));
+    await waitFor(
+      () => readStore((s) => {
+        const hit = s.searchLiteral(prompt)[0];
+        const call = hit && s.getCall(hit.callId);
+        return !!call?.responseBody && new TextDecoder().decode(call.responseBody).includes("IT SURVIVES");
+      }),
+      "the answer to stitch despite the link write throwing",
+    );
+    readStore((s) => {
+      expect(s.queryAll(`SELECT 1 FROM turn_link`)).toEqual([]); // links lost, and only links
+      expect(listCalls(s, 50).length).toBe(1);
     });
   }, 15_000);
 
