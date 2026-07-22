@@ -6,9 +6,12 @@ export const AGENT_REQUEST_URL = "https://github.com/boundedhq/beagle/issues/154
 export interface UnsupportedAgentSpec {
   displayName: string;
   commands: string[];
+  /** Known executable locations outside PATH (for example, `gh copilot`). */
+  executablePaths?: (home: string, xdgDataHome: string | undefined) => string[];
   /** Desktop application bundles that do not expose the supported CLI's
-   *  per-process capture controls. */
-  applications?: string[];
+   *  per-process capture controls. Bundle IDs prevent same-named directories
+   *  from becoming false positives. */
+  applications?: Array<{ name: string; bundleId: string }>;
   /** Local configuration directories that are useful evidence even when the
    *  agent is a service rather than an interactive CLI. */
   configDirs?: (home: string) => string[];
@@ -17,24 +20,32 @@ export interface UnsupportedAgentSpec {
 
 // Known agent names are deliberately separate from AGENTS: recognition must
 // never make an unsupported command runnable. Detection is local-only (PATH or
-// a configuration directory) and sends no usage signal anywhere.
+// known application/configuration paths) and sends no usage signal anywhere.
 export const UNSUPPORTED_AGENTS: Record<string, UnsupportedAgentSpec> = {
   aider: { displayName: "Aider", commands: ["aider"] },
   gemini: { displayName: "Gemini CLI", commands: ["gemini"] },
-  copilot: { displayName: "GitHub Copilot CLI", commands: ["copilot"] },
+  copilot: {
+    displayName: "GitHub Copilot CLI",
+    // A PATH executable alone is ambiguous: AWS Copilot uses the same name.
+    commands: [],
+    executablePaths: (home, xdgDataHome) => [
+      join(xdgDataHome ?? join(home, ".local", "share"), "gh", "copilot", "copilot"),
+    ],
+    configDirs: (home) => [join(home, ".copilot")],
+  },
   amp: { displayName: "Amp", commands: ["amp"] },
   "cursor-agent": { displayName: "Cursor Agent", commands: ["cursor-agent"] },
   hermes: { displayName: "Hermes Agent", commands: ["hermes"] },
   "claude-desktop": {
     displayName: "Claude Desktop",
     commands: [],
-    applications: ["Claude.app"],
+    applications: [{ name: "Claude.app", bundleId: "com.anthropic.claudefordesktop" }],
     note: "Claude Code sessions in the desktop app need a separate integration",
   },
   "codex-desktop": {
     displayName: "Codex desktop app",
     commands: [],
-    applications: ["Codex.app"],
+    applications: [{ name: "Codex.app", bundleId: "com.openai.codex" }],
     note: "desktop sessions need a separate integration",
   },
   openclaw: {

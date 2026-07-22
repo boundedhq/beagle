@@ -878,6 +878,7 @@ export function cmdDetect(opts: {
   home?: string;
   extraLocations?: Array<{ agent: string; path: string }>;
   systemApplicationsDir?: string;
+  xdgDataHome?: string;
 } = {}): string {
   const home = opts.home ?? homedir();
   const pathDirs = opts.pathDirs ?? pathDirsFromEnv(process.env.PATH);
@@ -889,6 +890,7 @@ export function cmdDetect(opts: {
     pathDirs,
     home,
     systemApplicationsDir: opts.systemApplicationsDir ?? "/Applications",
+    xdgDataHome: opts.xdgDataHome ?? process.env.XDG_DATA_HOME,
   });
   if (found.length === 0 && unsupported.length === 0) {
     return (

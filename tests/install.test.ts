@@ -548,28 +548,59 @@ describe("agent detection", () => {
   test("recognizes executable unsupported agents without making them supported", () => {
     const home = tmp();
     const bin = join(home, "bin");
+    const xdgDataHome = join(home, "xdg-data");
     mkdirSync(bin, { recursive: true });
-    for (const name of ["aider", "gemini", "copilot"]) {
+    for (const name of ["aider", "gemini"]) {
       const p = join(bin, name);
       writeFileSync(p, "#!/bin/sh\n");
       chmodSync(p, 0o755);
     }
-    // A bare `gh` does not prove the Copilot CLI is installed, and a stray
-    // non-executable name is not an installation.
+    // Neither a bare `gh` nor an ambiguous `copilot` executable proves the
+    // GitHub CLI is installed: AWS Copilot uses the latter command too.
     writeFileSync(join(bin, "gh"), "#!/bin/sh\n", { mode: 0o755 });
+    writeFileSync(join(bin, "copilot"), "#!/bin/sh\n", { mode: 0o755 });
     writeFileSync(join(bin, "amp"), "not executable\n", { mode: 0o644 });
 
-    const found = detectUnsupportedAgents({ pathDirs: [bin], home, systemApplicationsDir: join(home, "system-apps") });
+    const ghCopilot = join(xdgDataHome, "gh", "copilot", "copilot");
+    mkdirSync(join(xdgDataHome, "gh", "copilot"), { recursive: true });
+    writeFileSync(ghCopilot, "#!/bin/sh\n", { mode: 0o755 });
+
+    const found = detectUnsupportedAgents({
+      pathDirs: [bin], home, systemApplicationsDir: join(home, "system-apps"), xdgDataHome,
+    });
     expect(found.map((f) => f.agent)).toEqual(["aider", "gemini", "copilot"]);
     expect(found.every((f) => f.evidence === "executable")).toBe(true);
     expect(detectAgents({ pathDirs: [bin], extraLocations: [] })).toEqual([]);
 
+    const defaultHome = tmp();
+    const defaultGhCopilot = join(defaultHome, ".local", "share", "gh", "copilot", "copilot");
+    mkdirSync(join(defaultHome, ".local", "share", "gh", "copilot"), { recursive: true });
+    writeFileSync(defaultGhCopilot, "#!/bin/sh\n", { mode: 0o755 });
+    expect(detectUnsupportedAgents({
+      pathDirs: [], home: defaultHome, systemApplicationsDir: join(defaultHome, "system-apps"),
+    }).find((f) => f.agent === "copilot")?.evidence).toBe("executable");
+
     const ghOnly = join(home, "gh-only");
     mkdirSync(ghOnly);
     writeFileSync(join(ghOnly, "gh"), "#!/bin/sh\n", { mode: 0o755 });
+    writeFileSync(join(ghOnly, "copilot"), "#!/bin/sh\n", { mode: 0o755 });
     expect(detectUnsupportedAgents({
       pathDirs: [ghOnly], home, systemApplicationsDir: join(home, "system-apps"),
+      xdgDataHome: join(home, "empty-xdg-data"),
     }).map((f) => f.agent)).not.toContain("copilot");
+  });
+
+  test("GitHub Copilot CLI configuration is evidence without a PATH command", () => {
+    const home = tmp();
+    mkdirSync(join(home, ".copilot"));
+    expect(detectUnsupportedAgents({
+      pathDirs: [], home, systemApplicationsDir: join(home, "system-apps"),
+      xdgDataHome: join(home, "xdg-data"),
+    }).find((f) => f.agent === "copilot")).toEqual({
+      agent: "copilot",
+      displayName: "GitHub Copilot CLI",
+      evidence: "configuration",
+    });
   });
 
   test("OpenClaw configuration is reported conservatively", () => {
@@ -596,8 +627,14 @@ describe("agent detection", () => {
   test("recognizes Claude and Codex desktop apps separately from their supported CLIs", () => {
     const home = tmp();
     const applications = join(home, "Applications");
-    mkdirSync(join(applications, "Claude.app"), { recursive: true });
-    mkdirSync(join(applications, "Codex.app"));
+    const writeBundle = (name: string, bundleId: string) => {
+      const contents = join(applications, name, "Contents");
+      mkdirSync(contents, { recursive: true });
+      writeFileSync(join(contents, "Info.plist"),
+        `<?xml version="1.0"?><plist><dict><key>CFBundleIdentifier</key><string>${bundleId}</string></dict></plist>`);
+    };
+    writeBundle("Claude.app", "com.anthropic.claudefordesktop");
+    writeBundle("Codex.app", "com.openai.codex");
 
     const found = detectUnsupportedAgents({
       pathDirs: [], home, systemApplicationsDir: join(home, "system-apps"),
@@ -618,11 +655,14 @@ describe("agent detection", () => {
     ]);
     expect(detectAgents({ pathDirs: [], extraLocations: [] })).toEqual([]);
 
-    const fileHome = tmp();
-    mkdirSync(join(fileHome, "Applications"));
-    writeFileSync(join(fileHome, "Applications", "Claude.app"), "not an app bundle\n");
+    const fakeHome = tmp();
+    mkdirSync(join(fakeHome, "Applications", "Claude.app"), { recursive: true });
+    const wrongContents = join(fakeHome, "Applications", "Codex.app", "Contents");
+    mkdirSync(wrongContents, { recursive: true });
+    writeFileSync(join(wrongContents, "Info.plist"),
+      "<plist><dict><key>CFBundleIdentifier</key><string>com.example.codex</string></dict></plist>");
     expect(detectUnsupportedAgents({
-      pathDirs: [], home: fileHome, systemApplicationsDir: join(fileHome, "system-apps"),
+      pathDirs: [], home: fakeHome, systemApplicationsDir: join(fakeHome, "system-apps"),
     })).toEqual([]);
   });
 });

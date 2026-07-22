@@ -180,6 +180,19 @@ function isDirectory(path: string): boolean {
   }
 }
 
+function isApplicationBundle(root: string, app: { name: string; bundleId: string }): boolean {
+  const bundle = join(root, app.name);
+  const info = join(bundle, "Contents", "Info.plist");
+  try {
+    if (!statSync(bundle).isDirectory() || !statSync(info).isFile()) return false;
+    // Both XML and binary plists retain the bundle identifier bytes. Checking
+    // the marker avoids executing the app (or a platform-specific plist tool).
+    return readFileSync(info).includes(Buffer.from(app.bundleId));
+  } catch {
+    return false;
+  }
+}
+
 // A candidate that is Beagle's OWN shim is never "the agent": listing it in
 // `beagle detect` misreports, and resolving it as the real binary writes a
 // self-exec'ing shim (fork bomb) or double-wraps `beagle run`. Content-based,
@@ -216,14 +229,16 @@ export function detectUnsupportedAgents(opts: {
   pathDirs: string[];
   home: string;
   systemApplicationsDir: string;
+  xdgDataHome?: string;
 }): DetectedUnsupportedAgent[] {
   const found: DetectedUnsupportedAgent[] = [];
   for (const [agent, spec] of Object.entries(UNSUPPORTED_AGENTS)) {
     const executable = spec.commands.some((name) =>
-      opts.pathDirs.some((dir) => isRealAgentBinary(join(dir, name))));
-    const application = !executable && spec.applications?.some((name) =>
-      isDirectory(join(opts.home, "Applications", name)) ||
-      isDirectory(join(opts.systemApplicationsDir, name)));
+      opts.pathDirs.some((dir) => isRealAgentBinary(join(dir, name)))) ||
+      spec.executablePaths?.(opts.home, opts.xdgDataHome).some(isRealAgentBinary) === true;
+    const application = !executable && spec.applications?.some((app) =>
+      isApplicationBundle(join(opts.home, "Applications"), app) ||
+      isApplicationBundle(opts.systemApplicationsDir, app));
     const configured = !executable && !application && spec.configDirs?.(opts.home).some(isDirectory);
     if (!executable && !application && !configured) continue;
     found.push({

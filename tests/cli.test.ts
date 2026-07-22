@@ -882,6 +882,13 @@ describe("cmdUninstall (safe full teardown)", () => {
 });
 
 describe("beagle help / detect surfaces", () => {
+  function writeAppBundle(home: string, name: string, bundleId: string): void {
+    const contents = join(home, "Applications", name, "Contents");
+    mkdirSyncDetect(contents, { recursive: true });
+    writeFileSync(join(contents, "Info.plist"),
+      `<?xml version="1.0"?><plist><dict><key>CFBundleIdentifier</key><string>${bundleId}</string></dict></plist>`);
+  }
+
   test("'beagle help' prints the command list and exits 0 (not the unknown-command path)", () => {
     for (const arg of ["help", "--help", "-h"]) {
       const run = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "cli", "main.ts"), arg]);
@@ -921,11 +928,12 @@ describe("beagle help / detect surfaces", () => {
       writeFileSync(p, "#!/bin/sh\n");
       chmodSync(p, 0o755);
     }
-    mkdirSyncDetect(join(home, "Applications", "Claude.app"), { recursive: true });
-    mkdirSyncDetect(join(home, "Applications", "Codex.app"));
+    writeAppBundle(home, "Claude.app", "com.anthropic.claudefordesktop");
+    writeAppBundle(home, "Codex.app", "com.openai.codex");
 
     const out = cmdDetect({
       pathDirs: [bin], home, extraLocations: [], systemApplicationsDir: join(home, "system-apps"),
+      xdgDataHome: join(home, "xdg-data"),
     });
     expect(out).toContain("Found 1 supported agent");
     expect(out).toContain("→ beagle run opencode");
@@ -948,6 +956,7 @@ describe("beagle help / detect surfaces", () => {
 
     const out = cmdDetect({
       pathDirs: [bin], home, extraLocations: [], systemApplicationsDir: join(home, "system-apps"),
+      xdgDataHome: join(home, "xdg-data"),
     });
     expect(out).toContain("Beagle found 1 recognized agent, but can't capture it yet");
     expect(out).not.toContain("No supported agents found");
@@ -958,6 +967,7 @@ describe("beagle help / detect surfaces", () => {
     const home = mkdtempSync(join(tmpdir(), "beagle-detect-"));
     const out = cmdDetect({
       pathDirs: [], home, extraLocations: [], systemApplicationsDir: join(home, "system-apps"),
+      xdgDataHome: join(home, "xdg-data"),
     });
     expect(out).toContain("No supported agents found on your PATH");
     expect(out).not.toContain("can't capture yet");
