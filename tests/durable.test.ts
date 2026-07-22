@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadJsonFile, writeFileAtomic } from "../src/core/fs/durable";
@@ -56,12 +56,12 @@ describe("writeFileAtomic — temp → fsync → rename; 0600; never partial", (
     expect(new Uint8Array(readFileSync(p))).toEqual(key);
   });
 
-  test("an interrupted write cannot corrupt the live file into a silent default", () => {
-    // Model a crash mid-write: the atomic writer stages bytes in a temp file and
-    // only renames on success. A process killed before the rename orphans the
-    // temp and leaves the LIVE file untouched. Readers only ever open the target,
-    // so a stray temp is inert and the previous good file still loads intact — a
-    // plain in-place writeFileSync would instead have truncated it on the way.
+  test("an interrupted write leaves the previous good file loadable (a stray temp is inert)", () => {
+    // Models the aftermath of a crash mid-write: the atomic writer only renames on
+    // success, so a process killed before the rename orphans the temp and leaves
+    // the LIVE file untouched. Readers open only the target, so the stray temp is
+    // inert and the previous good file still loads — an in-place writeFileSync
+    // would instead have truncated it on the way.
     const dir = mkdtempSync(join(tmpdir(), "beagle-durable-"));
     const p = join(dir, "cfg.json");
     writeFileAtomic(p, JSON.stringify({ payloadWindowDays: 30 })); // the good file
@@ -69,5 +69,26 @@ describe("writeFileAtomic — temp → fsync → rename; 0600; never partial", (
     const r = loadJsonFile(p);
     expect(r.status).toBe("ok");
     expect((r as { value: { payloadWindowDays: number } }).value.payloadWindowDays).toBe(30);
+  });
+
+  test("a failed write unlinks its temp and rethrows — no orphaned scratch, target untouched", () => {
+    // Force a failure AFTER the temp is written: renaming a file onto an existing
+    // directory throws. The catch must unlink the scratch file and rethrow.
+    const dir = mkdtempSync(join(tmpdir(), "beagle-durable-"));
+    const target = join(dir, "iamdir");
+    mkdirSync(target); // target is a directory → renameSync(tmp, target) fails
+    expect(() => writeFileAtomic(target, "data")).toThrow();
+    expect(readdirSync(dir).filter((n) => n.endsWith(".tmp"))).toEqual([]); // cleaned up
+  });
+
+  test("a large payload is written whole (guards the writeSync short-write footgun)", () => {
+    // writeSync issues one syscall and may short-write; writeFileSync loops. A
+    // multi-MB round-trip that parses back intact would catch a regression to the
+    // single-syscall form.
+    const dir = mkdtempSync(join(tmpdir(), "beagle-durable-"));
+    const p = join(dir, "big.json");
+    const big = { blob: "x".repeat(5_000_000) };
+    writeFileAtomic(p, JSON.stringify(big));
+    expect(JSON.parse(readFileSync(p, "utf8")).blob.length).toBe(5_000_000);
   });
 });

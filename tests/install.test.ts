@@ -78,12 +78,14 @@ describe("ChangeManifest", () => {
     expect(m.list()).toEqual([]);
   });
 
-  test("recording onto a corrupt ledger quarantines the bad file, then writes a fresh one", () => {
+  test("recording onto a corrupt ledger quarantines the bad file (bytes preserved), then writes fresh", () => {
     writeFileSync(join(dir, "changes.json"), "corrupt-bytes-not-json");
     const m = new ChangeManifest(dir);
     m.record({ kind: "shim", agent: "claude", path: join(dir, "shims", "claude"), backup: null });
-    // The corrupt record is preserved for recovery, not destroyed by the overwrite.
-    expect(readdirSync(join(dir, "quarantine")).some((n) => n.endsWith("-changes.json"))).toBe(true);
+    // The corrupt record is preserved VERBATIM for recovery, not destroyed.
+    const q = readdirSync(join(dir, "quarantine")).filter((n) => n.endsWith("-changes.json"));
+    expect(q.length).toBe(1);
+    expect(readFileSync(join(dir, "quarantine", q[0]!), "utf8")).toBe("corrupt-bytes-not-json");
     // …and the live ledger is now valid, holds the new entry, and is 0600.
     const reloaded = new ChangeManifest(dir);
     expect(reloaded.corrupt).toBe(false);

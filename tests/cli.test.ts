@@ -928,6 +928,27 @@ describe("cmdStatus — daemon wording + service health", () => {
     expect(existsSync(join(dir, "quarantine"))).toBe(false); // a mere check never quarantines
   });
 
+  test("a quarantined ledger keeps status from restoring 'modified nothing' after a heal", () => {
+    // Reproduces the unwatch-on-corrupt regression: a mutating command quarantined
+    // the corrupt ledger and wrote a fresh empty one — status must still not claim
+    // beagle changed nothing, because it reverted nothing and the shims remain.
+    const dir = mkdtempSync(join(tmpdir(), "beagle-status-qtrail-"));
+    mkdirSync(join(dir, "quarantine"), { recursive: true });
+    writeFileSync(join(dir, "quarantine", "01ABCDEF-changes.json"), "corrupt-bytes");
+    writeFileSync(join(dir, "changes.json"), "[]"); // valid, empty — the "healed" ledger
+    const s = cmdStatus(dir, null, () => true);
+    expect(s).not.toContain("modified nothing on this system");
+    expect(s).toContain("quarantined");
+  });
+
+  test("a wrong-shape config.json (valid JSON, not an object) is surfaced, not shown as saved settings", () => {
+    // Symmetric with the changes.json ledger: null/[]/scalar load as all-defaults,
+    // which must not pass for the user's real settings.
+    const dir = mkdtempSync(join(tmpdir(), "beagle-status-cfgshape-"));
+    writeFileSync(join(dir, "config.json"), "[]");
+    expect(cmdStatus(dir, null, () => true)).toContain("config.json is corrupt");
+  });
+
   test("search on a fresh install doesn't claim 'never sent' — nothing was captured", () => {
     const dir = mkdtempSync(join(tmpdir(), "beagle-search-fresh-"));
     const out = cmdSearch(dir, "anything");

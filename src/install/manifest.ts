@@ -1,7 +1,7 @@
 // Change manifest (design §6.12): every persistent mutation recorded at apply
 // time, before the mutation. The trust strip reads it; unwatch and uninstall
 // revert from it. Without this, "what did Beagle touch" is guesswork.
-import { existsSync, mkdirSync, renameSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { loadJsonFile, writeFileAtomic } from "../core/fs/durable";
 import { ulid } from "../core/store/ulid";
@@ -97,13 +97,19 @@ export class ChangeManifest {
   private persist(): void {
     // Only mutating callers reach here (record/revert/removeFor) — `beagle
     // status` never persists, so the read-only trust surface still writes
-    // nothing. If the ledger we loaded was corrupt, quarantine it first so the
-    // record is recoverable rather than destroyed by this overwrite.
+    // nothing. If the ledger we loaded was corrupt, preserve a COPY in
+    // quarantine/ (same layout as quarantineCorruptDb: 0700 dir, `<ulid>-<name>`)
+    // before the overwrite, so the record stays recoverable. We copy rather than
+    // move so changes.json is never momentarily absent: a crash before the atomic
+    // rewrite below leaves the corrupt file in place, re-detected as corrupt next
+    // load instead of read as an empty "modified nothing". `beagle status` also
+    // surfaces the quarantined copy, so the corruption stays visible even after
+    // a command that reverts nothing rewrites a fresh empty ledger here.
     if (this.corrupt) {
       if (existsSync(this.path)) {
         const qdir = join(this.stateDir, "quarantine");
         mkdirSync(qdir, { recursive: true, mode: 0o700 });
-        renameSync(this.path, join(qdir, `${ulid()}-changes.json`));
+        copyFileSync(this.path, join(qdir, `${ulid()}-changes.json`));
       }
       this.corrupt = false;
     }
