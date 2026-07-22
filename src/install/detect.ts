@@ -1,7 +1,9 @@
 // Agent detection (design §6.12): resolve each supported agent the way the
 // user's shell would (PATH walk) plus known install locations (e.g.
 // ~/.claude/local). R1's negative case is a specified experience.
-import { existsSync, readFileSync, statSync } from "node:fs";
+import {
+  accessSync, constants as fsConstants, existsSync, readFileSync, statSync,
+} from "node:fs";
 import { join } from "node:path";
 import { AGENTS } from "../cli/agents";
 import { isBeagleShim } from "./shim";
@@ -155,7 +157,9 @@ export interface DetectOptions {
 
 function isExecutable(path: string): boolean {
   try {
-    return statSync(path).isFile();
+    if (!statSync(path).isFile()) return false;
+    accessSync(path, fsConstants.X_OK);
+    return true;
   } catch {
     return false;
   }

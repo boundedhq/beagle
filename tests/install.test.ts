@@ -494,6 +494,21 @@ describe("agent detection", () => {
     expect(found.find((f) => f.agent === "claude")).toBeDefined();
   });
 
+  test("ignores a non-executable agent-shaped file on PATH", () => {
+    const bin = join(tmp(), "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "claude"), "not a program\n", { mode: 0o644 });
+    expect(detectAgents({ pathDirs: [bin], extraLocations: [] })).toEqual([]);
+  });
+
+  test("ignores a non-executable file at a known install location", () => {
+    const local = join(tmp(), ".claude", "local");
+    const p = join(local, "claude");
+    mkdirSync(local, { recursive: true });
+    writeFileSync(p, "not a program\n", { mode: 0o644 });
+    expect(detectAgents({ pathDirs: [], extraLocations: [{ agent: "claude", path: p }] })).toEqual([]);
+  });
+
   test("reports nothing found cleanly", () => {
     const found = detectAgents({ pathDirs: [tmp()], extraLocations: [] });
     expect(found).toEqual([]);
