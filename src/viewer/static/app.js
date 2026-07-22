@@ -35,21 +35,28 @@ async function bootstrap() {
   let saved = null;
   try { saved = sessionStorage.getItem(SESSION_CREDENTIAL_KEY); } catch { /* unavailable */ }
   if (!boot && !saved) return false;
-  const r = boot
-    ? await fetch("/api/session", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ boot }),
-      })
-    : await fetch("/api/session", {
-        method: "POST",
-        headers: { "x-beagle-token": saved },
-      });
+  // Send a saved credential AND (if present) the boot body in one request: the
+  // server checks the x-beagle-token header before the boot body, so a live tab
+  // credential keeps the session even when a stale one-time link is re-opened
+  // beside it — never dropping a working session or needlessly spending the
+  // boot token. Boot is the fallback when there is no saved credential (first
+  // load) or the server rejects it. A rejected fetch (viewer stopped) throws
+  // out of here and the caller renders the notice — not a blank page.
+  const headers = {};
+  let body;
+  if (saved) headers["x-beagle-token"] = saved;
+  if (boot) { headers["content-type"] = "application/json"; body = JSON.stringify({ boot }); }
+  const r = await fetch("/api/session", { method: "POST", headers, body });
   if (!r.ok) {
-    if (!boot) { try { sessionStorage.removeItem(SESSION_CREDENTIAL_KEY); } catch { /* unavailable */ } }
+    // A saved credential the server rejected is stale (viewer restarted/rotated)
+    // — drop it so the next load doesn't retry a dead value. A rejected fetch
+    // (unreachable) never reaches here, so an offline reload keeps the credential
+    // to retry once the viewer is back.
+    if (saved) { try { sessionStorage.removeItem(SESSION_CREDENTIAL_KEY); } catch { /* unavailable */ } }
     return false;
   }
-  credential = (await r.json()).credential;
+  credential = await r.json().then((d) => d?.credential).catch(() => null);
+  if (!credential) return false; // never persist/authorize an empty or non-JSON credential
   try { sessionStorage.setItem(SESSION_CREDENTIAL_KEY, credential); } catch { /* unavailable */ }
   return true;
 }
@@ -1185,13 +1192,19 @@ function groupedBy(tier) {
 const tok = (n) => (n == null ? "?" : n.toLocaleString());
 
 // ---- mount ----
-bootstrap().then((ok) => {
+bootstrap().catch(() => false).then((ok) => {
   const root = document.getElementById("app");
   if (!ok) {
+    // Reached for every non-success: a used/absent link, a rejected credential,
+    // OR the viewer no longer running (fetch rejected). `beagle ui` is the fix
+    // for all of them, so keep the copy accurate rather than only naming the
+    // used-link case. The .catch above guarantees this renders instead of a
+    // blank page even if bootstrap throws unexpectedly.
     render(
       html`<div class="empty">
-        This viewer session has expired (the one-time link was already used).<br />
-        Run <code>beagle ui</code> to get a fresh link.
+        This viewer session is no longer active — the one-time link was already used,
+        or the viewer has stopped.<br />
+        Run <code>beagle ui</code> to open a fresh dashboard.
       </div>`,
       root,
     );
