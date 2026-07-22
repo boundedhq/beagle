@@ -4,8 +4,9 @@
 // real config with the baseURL pointed at the proxy, and points the agent at
 // it via its config-path override env — the user's real config stays untouched.
 // Non-core.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { writeFileAtomic } from "../core/fs/durable";
 
 export function deepSet(obj: Record<string, any>, path: string[], value: unknown): void {
   let cur = obj;
@@ -47,10 +48,8 @@ export function writeRedirectConfig(
   agent: string,
   config: Record<string, unknown>,
 ): string {
-  const dir = join(stateDir, "agent-config");
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const path = join(dir, `${agent}.json`);
-  writeFileSync(path, JSON.stringify(config, null, 2), { mode: 0o600 });
+  const path = join(stateDir, "agent-config", `${agent}.json`);
+  writeFileAtomic(path, JSON.stringify(config, null, 2));
   return path;
 }
 
@@ -71,9 +70,7 @@ export function buildExtensionRedirect(provider: string, baseUrl: string): strin
 
 /** Write the Beagle-owned extension into the state dir (0600); return its path. */
 export function writeRedirectExtension(stateDir: string, agent: string, source: string): string {
-  const dir = join(stateDir, "agent-config");
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const path = join(dir, `${agent}.ts`);
-  writeFileSync(path, source, { mode: 0o600 });
+  const path = join(stateDir, "agent-config", `${agent}.ts`);
+  writeFileAtomic(path, source);
   return path;
 }

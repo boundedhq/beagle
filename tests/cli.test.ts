@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, cmdUninstall, countPossibleLeaksSince, detectLine, interpretAskAnswer, isLoopbackHookEndpoint, otelCallsArrivedSince, parseRunArgs, readCodexApiKey, resolveRunMode, runCallsArrived } from "../src/cli/commands";
@@ -941,6 +941,48 @@ describe("cmdStatus — daemon wording + service health", () => {
     const s = cmdStatus(dir, null, () => true);
     expect(existsSync(join(dir, "config.json"))).toBe(false);
     expect(s).toContain("beagle has modified nothing on this system");
+  });
+
+  test("a corrupt config.json is surfaced loudly — and status still writes nothing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-status-cfgcorrupt-"));
+    writeFileSync(join(dir, "config.json"), "{ truncated");
+    const before = readFileSync(join(dir, "config.json"), "utf8");
+    const s = cmdStatus(dir, null, () => true);
+    expect(s).toContain("config.json is corrupt");
+    expect(s).toContain("safe DEFAULTS");
+    // Read-only invariant holds even on the corrupt path: no repair, no quarantine.
+    expect(readFileSync(join(dir, "config.json"), "utf8")).toBe(before);
+    expect(existsSync(join(dir, "quarantine"))).toBe(false);
+  });
+
+  test("a corrupt changes.json makes status DROP 'modified nothing' for a loud warning", () => {
+    const dir = mkdtempSync(join(tmpdir(), "beagle-status-chgcorrupt-"));
+    writeFileSync(join(dir, "changes.json"), "[ {bad");
+    const s = cmdStatus(dir, null, () => true);
+    expect(s).toContain("changes.json is CORRUPT");
+    expect(s).not.toContain("modified nothing on this system"); // the dangerous false claim
+    expect(existsSync(join(dir, "quarantine"))).toBe(false); // a mere check never quarantines
+  });
+
+  test("a quarantined ledger keeps status from restoring 'modified nothing' after a heal", () => {
+    // Reproduces the unwatch-on-corrupt regression: a mutating command quarantined
+    // the corrupt ledger and wrote a fresh empty one — status must still not claim
+    // beagle changed nothing, because it reverted nothing and the shims remain.
+    const dir = mkdtempSync(join(tmpdir(), "beagle-status-qtrail-"));
+    mkdirSync(join(dir, "quarantine"), { recursive: true });
+    writeFileSync(join(dir, "quarantine", "01ABCDEF-changes.json"), "corrupt-bytes");
+    writeFileSync(join(dir, "changes.json"), "[]"); // valid, empty — the "healed" ledger
+    const s = cmdStatus(dir, null, () => true);
+    expect(s).not.toContain("modified nothing on this system");
+    expect(s).toContain("quarantined");
+  });
+
+  test("a wrong-shape config.json (valid JSON, not an object) is surfaced, not shown as saved settings", () => {
+    // Symmetric with the changes.json ledger: null/[]/scalar load as all-defaults,
+    // which must not pass for the user's real settings.
+    const dir = mkdtempSync(join(tmpdir(), "beagle-status-cfgshape-"));
+    writeFileSync(join(dir, "config.json"), "[]");
+    expect(cmdStatus(dir, null, () => true)).toContain("config.json is corrupt");
   });
 
   test("search on a fresh install doesn't claim 'never sent' — nothing was captured", () => {

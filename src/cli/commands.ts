@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { Store, StoreVersionError } from "../core/store/store";
 import { loadConfig, readConfig, saveConfig } from "../core/config/config";
+import { loadJsonFile } from "../core/fs/durable";
 import { controlRequest, openLease } from "../daemon/control";
 import { Notifier, stripControlChars } from "../notifier/notifier";
 import { GraduationTracker } from "../install/graduation";
@@ -313,13 +314,43 @@ export function cmdStatus(
   lines.push(
     row("retention", `payloads ${cfg.payloadWindowDays} days / ${cfg.sizeCapMB} MB · leak events ${cfg.eventWindowDays} days`),
   );
+  // A damaged config.json loads as safe defaults so the daemon never crashes —
+  // but the user must not mistake those defaults for their saved settings.
+  // "Damaged" is both unparseable JSON AND valid-JSON-of-the-wrong-shape
+  // (null/scalar/array), which sanitizeConfig silently flattens to all-defaults;
+  // the shape test mirrors that guard so config matches the ledger's treatment.
+  const cfgLoad = loadJsonFile(join(stateDir, "config.json"));
+  const configDamaged =
+    cfgLoad.status === "corrupt" ||
+    (cfgLoad.status === "ok" &&
+      (cfgLoad.value === null || typeof cfgLoad.value !== "object" || Array.isArray(cfgLoad.value)));
+  if (configDamaged) {
+    lines.push(cont("▲ config.json is corrupt — the retention/redaction above are safe DEFAULTS, not your"));
+    lines.push(cont("  saved settings; remove the file, or run `beagle config …` to rewrite it"));
+  }
   lines.push("");
 
+  // The ledger's corruption must stay visible even after a mutating command
+  // quarantined the bad file and wrote a fresh one — otherwise `beagle unwatch`
+  // on a corrupt ledger reverts nothing yet restores the reassuring "modified
+  // nothing". A quarantined `*-changes.json` is that lasting signal.
+  const qdir = join(stateDir, "quarantine");
+  const quarantinedLedgers = existsSync(qdir)
+    ? readdirSync(qdir).filter((n) => n.endsWith("-changes.json")).length
+    : 0;
   lines.push(
-    row("changes", manifest.list().length === 0
-      ? "none — beagle has modified nothing on this system"
-      : `${manifest.summary()} — \`beagle unwatch <agent>\` reverts them`),
+    row("changes", manifest.corrupt
+      ? "▲ changes.json is CORRUPT — cannot account for what beagle changed on this system"
+      : manifest.list().length > 0
+        ? `${manifest.summary()} — \`beagle unwatch <agent>\` reverts them`
+        : quarantinedLedgers > 0
+          ? "▲ change ledger was corrupt and quarantined — cannot vouch beagle changed nothing"
+          : "none — beagle has modified nothing on this system"),
   );
+  if (manifest.corrupt || quarantinedLedgers > 0) {
+    lines.push(cont("  a corrupt change record was found — `beagle uninstall`/`unwatch` may not fully"));
+    lines.push(cont("  reverse prior changes; check PATH shims and any service unit by hand"));
+  }
   lines.push(row("privacy", "local only — outbound traffic is just your agents' own model calls"));
   lines.push(cont("no telemetry · viewer off until requested"));
   return lines.join("\n");
