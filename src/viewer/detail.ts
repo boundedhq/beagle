@@ -254,7 +254,10 @@ function storedProjection(call: CallRecord): StoredProjection | null {
 // but do not repeat it in the readable projection.
 function detailProjection(call: CallRecord): StoredProjection | null {
   const stored = storedProjection(call);
-  if (call.source !== "otel" || call.agent !== "claude" || !stored) return stored;
+  // Endpoint names are the schema discriminator. `agent` is nullable in the
+  // store (including older rows), so using it as a second gate would make two
+  // otherwise-identical Claude captures render differently.
+  if (call.source !== "otel" || !stored) return stored;
 
   if (call.endpoint === "otel:claude_code.turn") {
     const callCards = stored.messages.filter((m) => m.kind === "call");

@@ -94,19 +94,23 @@ describe("buildDetail — response reassembly (UI fix 1)", () => {
     const invocation = { role: "tool" as const, content: '{"query":"beagle"}', tool: "WebSearch", kind: "call" as const };
     const result = { role: "tool" as const, content: '{"results":["found"]}', tool: "WebSearch", kind: "result" as const };
 
-    const turn = buildCallDetail(
-      call({
-        source: "otel", agent: "claude", endpoint: "otel:claude_code.turn",
-        requestBody: enc('{"query":"beagle"}'),
-        displayMessages: [{ role: "user", content: "search for beagle" }, invocation],
-      }),
-      [],
-    );
+    const turnCall = call({
+      source: "otel", agent: undefined, endpoint: "otel:claude_code.turn",
+      requestBody: enc('{"query":"beagle"}'),
+      displayMessages: [{ role: "user", content: "search for beagle" }, invocation],
+    });
+    const turn = buildCallDetail(turnCall, []);
     expect(turn.messages).toEqual([{ role: "user", content: "search for beagle" }]);
     expect(turn.requestStructured).toBe(true);
     expect(turn.responseCalls).toEqual([
       { tool: "WebSearch", args: '{"query":"beagle"}', detail: undefined, callId: undefined },
     ]);
+    // The session sequencer consumes the original cards and performs its own
+    // cross-row placement; call-feed correction must never pre-empt it.
+    expect(buildDetail(turnCall, []).messages).toEqual([
+      { role: "user", content: "search for beagle" }, invocation,
+    ]);
+    expect(buildDetail(turnCall, []).responseCalls).toEqual([]);
 
     const hook = buildCallDetail(
       call({

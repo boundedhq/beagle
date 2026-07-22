@@ -867,6 +867,8 @@ function Detail({ id, refresh, onSession, find }) {
   const system = detail.system;
   const leaks = detail.leaks ?? [];
   const responseCalls = detail.responseCalls ?? [];
+  const claudeToolCapture = detail.source === "otel" &&
+    detail.endpoint?.startsWith("otel:tool_output:");
   // The server diffed this request against the previous call in the session:
   // newFrom marks where NEW content starts. null → no truthful claim (first
   // call, rewritten history, Mode B) → fall back to the naive last-message
@@ -973,18 +975,23 @@ function Detail({ id, refresh, onSession, find }) {
         </div>
         ${showRaw &&
         html`<span class="viewhint">${detail.source === "wire"
-          ? "the exact request and response Beagle saw on the wire"
-          : "the request and response the agent reported sending"}</span>`}
+          ? "the stored request and response text, without readable projection"
+          : "the stored scan text derived from the agent's report"}</span>`}
       </div>`}
       ${showRaw
-        ? html`
-            <div class="dir-label sent">⇢ request</div>
-            <${RawBody} body=${detail.requestRaw} leaks=${leaks} find=${find} />
-            <div class="dir-label recv">⇠ response</div>
-            <${RawBody} body=${detail.responseRaw} leaks=${leaks} find=${find} />
-            ${detail.sseRaw &&
-            html`<h4>raw stream (as received)</h4><pre>${detail.sseRaw}</pre>`}
-          `
+        ? claudeToolCapture
+          ? html`
+              <div class="dir-label sent">captured tool name + input + result</div>
+              <${RawBody} body=${detail.requestRaw} leaks=${leaks} find=${find} />
+            `
+          : html`
+              <div class="dir-label sent">⇢ request</div>
+              <${RawBody} body=${detail.requestRaw} leaks=${leaks} find=${find} />
+              <div class="dir-label recv">⇠ response</div>
+              <${RawBody} body=${detail.responseRaw} leaks=${leaks} find=${find} />
+              ${detail.sseRaw &&
+              html`<h4>raw stream (as received)</h4><pre>${detail.sseRaw}</pre>`}
+            `
         : html`
             ${system != null &&
             html`<${Chip} label="system prompt" body=${system} find=${find} />`}
