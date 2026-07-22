@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { codexPromptKey, answersFromText, RolloutPairing } from "../src/parsers/codex-rollout";
+import { codexPromptKey, answersFromText, linksFromText, RolloutPairing } from "../src/parsers/codex-rollout";
 
 // A minimal, controlled 2-turn rollout — the exact shape captured in the
 // Phase-0 spike against Codex 0.144.6: a session_meta, developer
@@ -157,9 +157,9 @@ describe("answersFromText", () => {
     test("each incremental push carries the newest message as `latest`", () => {
       const pairing = new RolloutPairing();
       const lines = MULTI.split("\n");
-      const first = pairing.push(lines.slice(0, 2).join("\n") + "\n");
+      const first = pairing.push(lines.slice(0, 2).join("\n") + "\n").answers;
       expect(first[0]!.latest).toBe("I’m checking the docs first."); // all there is yet
-      const rest = pairing.push(lines.slice(2).join("\n") + "\n");
+      const rest = pairing.push(lines.slice(2).join("\n") + "\n").answers;
       expect(rest[0]!.latest).toBe("Codex has three memory-like layers: …the real answer…");
       expect(first[0]!.latest).toBe("I’m checking the docs first."); // snapshot not mutated
     });
@@ -170,9 +170,9 @@ describe("answersFromText", () => {
       // Earlier snapshots must stay intact (the tailer keys them by content).
       const pairing = new RolloutPairing();
       const lines = MULTI.split("\n");
-      const first = pairing.push(lines.slice(0, 2).join("\n") + "\n");
+      const first = pairing.push(lines.slice(0, 2).join("\n") + "\n").answers;
       expect(first.map((a) => a.answer)).toEqual(["I’m checking the docs first."]);
-      const rest = pairing.push(lines.slice(2).join("\n") + "\n");
+      const rest = pairing.push(lines.slice(2).join("\n") + "\n").answers;
       expect(rest.map((a) => a.answer)).toEqual([MERGED]);
       expect(first[0]!.answer).toBe("I’m checking the docs first."); // snapshot not mutated
       expect(MERGED.startsWith(first[0]!.answer)).toBe(true); // grow-only prefix invariant
@@ -209,5 +209,74 @@ describe("answersFromText", () => {
         ["done", 0],
       ]);
     });
+  });
+});
+
+// Turn links: the display-grouping half of the rollout (which call_ids belong
+// to which turn). Sibling of the answers, with ONE deliberate divergence — the
+// ordinal counts ALL turns, because a tool-only turn has links but no answer,
+// and the viewer counts prompt rows (all turns) the same way.
+describe("linksFromText / RolloutPairing links", () => {
+  const toolCall = (callId: string, name = "exec") =>
+    line("response_item", { type: "custom_tool_call", call_id: callId, name, input: '{"cmd":"ls"}' });
+  const fnCall = (callId: string) =>
+    line("response_item", { type: "function_call", call_id: callId, name: "wait", arguments: "{}" });
+  const toolOut = (callId: string) =>
+    line("response_item", { type: "custom_tool_call_output", call_id: callId, output: [{ type: "input_text", text: "out" }] });
+
+  test("collects a turn's call_ids in order; outputs and reasoning never count", () => {
+    const links = linksFromText([
+      line("response_item", msg("user", "do the thing")),
+      toolCall("c1"),
+      toolOut("c1"),
+      line("response_item", { type: "reasoning", encrypted_content: "gAAAA…" }),
+      fnCall("c2"),
+      toolOut("c2"),
+      line("response_item", msg("assistant", "done")),
+    ].join("\n"));
+    expect(links.length).toBe(1);
+    expect(links[0]!.promptKey).toBe(codexPromptKey("do the thing"));
+    expect(links[0]!.ordinal).toBe(0);
+    expect(links[0]!.callIds).toEqual(["c1", "c2"]);
+  });
+
+  test("the link ordinal counts ALL same-key turns; the answer ordinal counts answered ones", () => {
+    // Turn 1 ("continue") is tool-only — no assistant message. Turn 2 repeats
+    // the same text and answers. The links must land on ordinals 0 and 1,
+    // while the answer path (shipped attach semantics, deliberately untouched)
+    // gives that answer ordinal 0. Pinned TOGETHER so the divergence is a
+    // stated fact, not a surprise.
+    const text = [
+      line("response_item", msg("user", "continue")),
+      toolCall("t1-call"),
+      line("response_item", msg("user", "continue")),
+      toolCall("t2-call"),
+      line("response_item", msg("assistant", "the answer")),
+    ].join("\n");
+    const { answers, links } = new RolloutPairing().push(text);
+    expect(links.map((l) => [l.ordinal, ...l.callIds])).toEqual([[0, "t1-call"], [1, "t2-call"]]);
+    expect(answers.length).toBe(1);
+    expect(answers[0]!.ordinal).toBe(0); // answered-only counting — see RolloutAnswer.ordinal
+  });
+
+  test("fed incrementally, a turn's links grow without mutating earlier snapshots", () => {
+    const pairing = new RolloutPairing();
+    const first = pairing.push(line("response_item", msg("user", "q")) + "\n" + toolCall("c1") + "\n");
+    expect(first.links.map((l) => l.callIds)).toEqual([["c1"]]);
+    const second = pairing.push(toolCall("c2") + "\n");
+    expect(second.links.map((l) => l.callIds)).toEqual([["c1", "c2"]]);
+    expect(second.links[0]!.ordinal).toBe(first.links[0]!.ordinal); // same turn
+    expect(first.links[0]!.callIds).toEqual(["c1"]); // snapshot intact (content-addressed keys)
+  });
+
+  test("a call before any real prompt, or with no call_id, yields nothing", () => {
+    expect(linksFromText([
+      line("response_item", msg("user", "<environment_context>\n</environment_context>")),
+      toolCall("orphan"), // only the injected env block precedes it — not a real turn
+    ].join("\n"))).toEqual([]);
+    expect(linksFromText([
+      line("response_item", msg("user", "q")),
+      line("response_item", { type: "custom_tool_call", name: "exec", input: "{}" }), // no call_id
+    ].join("\n"))).toEqual([]);
   });
 });

@@ -59,13 +59,23 @@ export interface FeedRow {
 }
 
 export function listCalls(store: Store, limit: number): FeedRow[] {
+  // Mode B tool rows (codex tool_result, claude hook output) fold under their
+  // turn in the transcript, and the feed reads one line per turn the same way
+  // a wire session does — so leak-FREE tool rows are hidden here. A row that
+  // leaked ALWAYS shows: hiding a leak-bearing call from the feed would be
+  // Beagle hiding a leak. The rows themselves are untouched — still captured,
+  // scanned, in the transcript (folded or standalone) and reachable by id.
   return store
     .queryAll<Record<string, unknown>>(
       `SELECT e.id, e.session_id, e.agent, e.provider, e.model, e.ts_request,
               e.status, e.summary,
               e.scan_state, e.capture_state, e.session_tier, e.source,
               EXISTS(SELECT 1 FROM leak_occurrences lo WHERE lo.exchange_id = e.id) AS has_leak
-       FROM exchanges e ORDER BY e.ts_request DESC LIMIT ?`,
+       FROM exchanges e
+       WHERE (e.endpoint IS NULL
+              OR (e.endpoint NOT LIKE 'otel:tool_output:%' AND e.endpoint NOT LIKE 'otel:codex:tool_result:%'))
+          OR EXISTS(SELECT 1 FROM leak_occurrences lo WHERE lo.exchange_id = e.id)
+       ORDER BY e.ts_request DESC LIMIT ?`,
       [limit],
     )
     .map((r) => ({

@@ -47,8 +47,13 @@ export interface CallRecord {
   sseRaw: Uint8Array | null;
   /** Pre-flattened display messages (Mode B's self-report structure, and the
    *  wire path's redacted projection). `detail` is redacted like `content` and
-   *  is typed here so a reader can't silently skip a masked surface. */
-  displayMessages?: Array<{ role: string; content: string; detail?: string }> | null;
+   *  is typed here so a reader can't silently skip a masked surface. The
+   *  label fields (tool/kind/callId) mirror parsers.DisplayMessage — spelled
+   *  out rather than imported so core stays dependency-free. */
+  displayMessages?: Array<{
+    role: string; content: string; detail?: string;
+    tool?: string; kind?: string; callId?: string;
+  }> | null;
   searchText: string;
 }
 
@@ -356,6 +361,23 @@ export class Store {
     });
   }
 
+  /** Record which turn some Mode B tool rows belong to (turn_link — see the
+   *  schema note for why this is not exchanges.prompt_key). Idempotent upsert:
+   *  the codex tailer re-emits links content-addressed, and a re-delivered
+   *  link must never error or duplicate. */
+  linkTurns(sessionId: string, links: Array<{ linkKey: string; promptKey: string; ordinal: number; seq: number }>): void {
+    this.inTx(() => {
+      for (const l of links) {
+        this.db.run(
+          `INSERT INTO turn_link (session_id, link_key, prompt_key, ordinal, seq) VALUES (?,?,?,?,?)
+           ON CONFLICT(session_id, link_key) DO UPDATE SET
+             prompt_key=excluded.prompt_key, ordinal=excluded.ordinal, seq=excluded.seq`,
+          [sessionId, l.linkKey, l.promptKey, l.ordinal, l.seq],
+        );
+      }
+    });
+  }
+
   getCall(idOrPrefix: string): CallRecord | null {
     const rows = this.db.all<Record<string, unknown>>(
       `SELECT e.*, p.request_body, p.request_headers, p.response_body,
@@ -621,7 +643,15 @@ export class Store {
       `DELETE FROM exchanges_fts WHERE exchange_id IN (SELECT id FROM exchanges WHERE ${where})`,
       params,
     );
+    // turn_link cleanup, in two halves: row-keyed links die with their row
+    // (resolved BEFORE the rows go), and call-keyed links are session-scoped,
+    // so they go when their session's last row does (resolved after).
+    this.db.run(
+      `DELETE FROM turn_link WHERE link_key IN (SELECT 'row:' || id FROM exchanges WHERE ${where})`,
+      params,
+    );
     this.db.run(`DELETE FROM exchanges WHERE ${where}`, params);
+    this.db.run(`DELETE FROM turn_link WHERE session_id NOT IN (SELECT DISTINCT session_id FROM exchanges)`);
   }
 }
 

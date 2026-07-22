@@ -6,6 +6,7 @@ import { Daemon } from "../src/daemon/daemon";
 import { controlRequest } from "../src/daemon/control";
 import { Store } from "../src/core/store/store";
 import { listCalls, listLeakEvents } from "../src/viewer/feed-query";
+import { buildSessionTurns } from "../src/viewer/session-view";
 import { compileRules, scan } from "../src/core/scanner/engine";
 import { loadRuleFile } from "../src/core/scanner/rules";
 import type { AlertEvent } from "../src/core/alert/engine";
@@ -359,19 +360,20 @@ describe("Mode B end-to-end through the daemon", () => {
   });
 
   test("a secret straddling the transcript's length cap leaves no raw prefix", async () => {
-    // A codex tool result is stored as `${tool}: ${output}` clamped to
-    // DISPLAY_RESULT_CAP. Clamping in the mapper ran BEFORE the scrub, so a key
+    // A codex tool result's output card is clamped to DISPLAY_RESULT_CAP at
+    // store time. Clamping in the mapper ran BEFORE the scrub, so a key
     // sitting across the cap was cut in half: the scrub looked for the whole
     // value, found nothing, and the first characters of the key rode into
     // display_messages — in the viewer's transcript, while the body beside it
     // was correctly redacted and the leak fired. The cap now lands after the
     // redaction instead.
     await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
-    // The display line is `exec_command: ${output}` — a 14-char prefix — so
-    // 3976 chars of filler start the key at 3990, putting its first ten
-    // characters inside the cap and the rest beyond it. The filler ends in a
-    // space because the rule is \b-anchored and would not match mid-word.
-    const output = "f".repeat(3976 - 1) + " AKIAZQ3DRSTUVWXY2345 trailing";
+    // The output card's display content IS the output (the command rides its
+    // own card), so 3990 chars of filler start the key at 3990, putting its
+    // first ten characters inside the cap and the rest beyond it. The filler
+    // ends in a space because the rule is \b-anchored and would not match
+    // mid-word.
+    const output = "f".repeat(3990 - 1) + " AKIAZQ3DRSTUVWXY2345 trailing";
     await post({
       resourceLogs: [{
         scopeLogs: [{
@@ -477,10 +479,12 @@ describe("Mode B end-to-end through the daemon", () => {
     await settled(daemon.socketPath);
     const store = Store.openReadOnly(stateDir);
     const call = store.getCall(store.searchLiteral("cat build.log")[0]!.callId)!;
-    // No placeholder to overshoot, so the clamp is exact — the whole display
-    // line, label included, is what DISPLAY_RESULT_CAP bounds.
-    const content = call.displayMessages![0]!.content;
-    expect(content).toBe(`exec_command: ${output}`.slice(0, 4000));
+    // Two cards now: the command card stays whole (it is the outbound half and
+    // small); the OUTPUT card is what DISPLAY_RESULT_CAP bounds, and with no
+    // placeholder to overshoot the clamp is exact.
+    expect(call.displayMessages!.length).toBe(2);
+    expect(call.displayMessages![0]!.content).toBe('{"cmd":"cat build.log"}');
+    expect(call.displayMessages![1]!.content).toBe(output.slice(0, 4000));
     store.close();
   });
 
@@ -837,6 +841,50 @@ describe("Mode B tool-output capture (PostToolUse hook)", () => {
     // a tool row carries — was scanned but unfindable.
     const store = Store.openReadOnly(stateDir);
     expect(store.searchLiteral("cat secrets.env").length).toBe(1);
+    store.close();
+  });
+
+  test("a hook row carrying prompt_id folds under its claude turn; the feed reads one line", async () => {
+    const conv = "sess-fold";
+    // The turn, as claude's OTel export reports it (prompt.id "prompt-x" — the
+    // otlpBody fixture's stamp — plus the assistant response)…
+    await fetch(`http://127.0.0.1:${otlpPort}/v1/logs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-beagle-run": token },
+      body: JSON.stringify(otlpBody(token, "show my memory files", conv, "here they are")),
+    });
+    await settled(daemon.socketPath, 1);
+    // …then the tool's output via the hook, naming the same turn.
+    await fetch(`http://127.0.0.1:${otlpPort}/v1/hook`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-beagle-run": token },
+      body: JSON.stringify({
+        session_id: conv, prompt_id: "prompt-x", hook_event_name: "PostToolUse",
+        tool_name: "Read", tool_input: { file_path: "/m/MEMORY.md" }, tool_response: "the memory file body",
+      }),
+    });
+    await settled(daemon.socketPath, 2);
+
+    const store = Store.openReadOnly(stateDir);
+    const hookRow = store.getCall(store.searchLiteral("the memory file body")[0]!.callId)!;
+    // The link is row-keyed in turn_link; the ROW's prompt_key stays NULL so it
+    // can never become a response-stitch attach target.
+    expect(hookRow.promptKey).toBeUndefined();
+    expect(store.queryAll(`SELECT link_key, prompt_key FROM turn_link WHERE session_id=?`, [hookRow.sessionId]))
+      .toEqual([{ link_key: `row:${hookRow.id}`, prompt_key: "prompt-x" }]);
+    // The transcript folds to ONE turn: prompt → Read call/result cards → answer.
+    const view = buildSessionTurns(store, hookRow.sessionId);
+    expect(view.turns.length).toBe(1);
+    const turn = view.turns[0]!;
+    expect(turn.responseText).toBe("here they are");
+    expect(turn.messages.map((m) => m.kind ?? "text")).toEqual(["text", "call", "result"]);
+    expect(turn.messages.at(-1)!.sourceId).toBe(hookRow.id); // raw stays reachable
+    // The feed shows the turn line, not the tool row — and the tool row's
+    // summary (were it ever shown, e.g. on a leak) reads the command.
+    const feed = listCalls(store, 20);
+    expect(feed.map((r) => r.id)).toContain(turn.id);
+    expect(feed.map((r) => r.id)).not.toContain(hookRow.id);
+    expect(hookRow.summary).toBe("read MEMORY.md → the memory file body");
     store.close();
   });
 });

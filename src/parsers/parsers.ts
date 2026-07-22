@@ -15,6 +15,11 @@ export interface DisplayMessage extends Message {
   kind?: "call" | "result" | "response" | "response-call";
   callId?: string;
   detail?: string; // the originating call's short detail, shown in result headers
+  /** Viewer-only: the exchange row a FOLDED card came from (Mode B turn
+   *  folding, session-view), so the transcript can still reach that row's own
+   *  detail/raw view — folding must never make captured bytes unreachable.
+   *  Stamped at read time; never written into display_messages. */
+  sourceId?: string;
 }
 
 /** How much of a tool RESULT's text the stored transcript keeps — a `cat` of a

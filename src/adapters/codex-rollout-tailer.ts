@@ -12,7 +12,7 @@ import { closeSync, lstatSync, openSync, readdirSync, readSync, statSync } from 
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { ulid } from "../core/store/ulid";
-import { RolloutPairing, type RolloutAnswer } from "../parsers/codex-rollout";
+import { RolloutPairing, type RolloutAnswer, type RolloutTurnLinks } from "../parsers/codex-rollout";
 import type { OtelCall } from "../parsers/otlp-map";
 
 const POLL_MS = 1500; // ~the OTel batch cadence, so the answer stitches a beat after its turn's batch
@@ -135,6 +135,29 @@ function buildResponseCall(convId: string, ans: RolloutAnswer, fallbackTs: numbe
   };
 }
 
+/** A metadata-only call carrying a turn's `call_id → turn` links. Both sides
+ *  empty on purpose: the daemon writes turn_link and ingests nothing else, so
+ *  this must never look like content. Timestamps reuse the answer path's
+ *  fallback stamp; they only feed the ulid and session-activity bookkeeping. */
+function buildLinkCall(convId: string, link: RolloutTurnLinks, ts: number): OtelCall {
+  return {
+    id: ulid(ts),
+    runId: "otel",
+    source: "otel",
+    origin: "codex-rollout",
+    agent: "codex",
+    provider: "openai",
+    endpoint: "otel:codex:rollout_links",
+    request: { bodyBytes: new Uint8Array(), messages: [] },
+    response: { text: "", bodyBytes: new Uint8Array() },
+    meta: { tsRequest: ts, tsResponse: ts },
+    convId,
+    toolLinks: link.callIds.map((callId, seq) => ({
+      callId, promptKey: link.promptKey, ordinal: link.ordinal, seq,
+    })),
+  };
+}
+
 export interface TailerOptions {
   convId: string;
   /** Explicit file (tests). In production omit it and pass sessionsRoot — the
@@ -167,6 +190,7 @@ export class CodexRolloutTailer {
    *  keeps its original discovery stamp. */
   private readonly tsFallback = new Map<string, number>();
   private answers: Array<{ ans: RolloutAnswer; key: string }> = []; // grows with the file; rebuilt on reset
+  private links: Array<{ link: RolloutTurnLinks; key: string }> = []; // turn links, same lifecycle as answers
   private pairing = new RolloutPairing();
   private readOffset = 0; // file bytes consumed (into parsed lines or carry)
   private carry: Buffer = Buffer.alloc(0); // partial trailing line, as BYTES — a UTF-8 char can split across reads
@@ -265,6 +289,19 @@ export class CodexRolloutTailer {
       }
       if (now - seen <= window) due.push(buildResponseCall(this.opts.convId, ans, this.tsFallback.get(key) ?? seen));
     }
+    // Turn links ride the same window. The store upsert is idempotent, so the
+    // re-emits cost a few redundant writes — and buy the same race coverage
+    // answers get (a link emitted while the daemon was paused mid-window still
+    // lands once capture resumes).
+    for (const { link, key } of this.links) {
+      let seen = this.firstSeen.get(key);
+      if (seen === undefined) {
+        seen = now;
+        this.firstSeen.set(key, seen);
+        this.tsFallback.set(key, Math.floor(st.mtimeMs));
+      }
+      if (now - seen <= window) due.push(buildLinkCall(this.opts.convId, link, this.tsFallback.get(key) ?? seen));
+    }
     if (due.length) this.opts.emit(due);
     this.checkRetire(now);
   }
@@ -289,6 +326,7 @@ export class CodexRolloutTailer {
   private resetReadState(): void {
     this.pairing = new RolloutPairing();
     this.answers = [];
+    this.links = [];
     this.readOffset = 0;
     this.carry = Buffer.alloc(0);
     this.lastSize = -1;
@@ -348,9 +386,18 @@ export class CodexRolloutTailer {
   }
 
   private ingest(text: string): void {
-    for (const ans of this.pairing.push(text)) {
+    const { answers, links } = this.pairing.push(text);
+    for (const ans of answers) {
       const hash = createHash("sha256").update(ans.answer).digest("hex").slice(0, 16);
       this.answers.push({ ans, key: `${this.answers.length}:${ans.promptKey}:${hash}` });
+    }
+    // Same content-addressed lifecycle as answers: a grown list is new content
+    // (fresh key → fresh emit window); a re-read identical state stays settled.
+    // The `L:` namespace keeps a link state from ever colliding with an answer
+    // key in the shared firstSeen map.
+    for (const link of links) {
+      const hash = createHash("sha256").update(link.callIds.join("\n")).digest("hex").slice(0, 16);
+      this.links.push({ link, key: `L:${link.ordinal}:${link.promptKey}:${hash}` });
     }
   }
 

@@ -685,7 +685,7 @@ function TMsg({ m, leaks }) {
   const hasLeak = (leaks ?? []).some((l) => l.value && content.includes(l.value));
   if (m.role === "tool" || m.role === "request") {
     return html`<${ToolCard} role=${m.role} content=${content} leaks=${leaks} hasLeak=${hasLeak}
-      tool=${m.tool} kind=${m.kind} detail=${m.detail} />`;
+      tool=${m.tool} kind=${m.kind} detail=${m.detail} sourceId=${m.sourceId} />`;
   }
   // user / response / assistant-history / any future role: same card shell.
   // The turn's ⇢ request / ⇠ response group labels already carry direction, so
@@ -712,9 +712,12 @@ function TMsg({ m, leaks }) {
 // start collapsed — unless they carry a secret, which forces them open.
 // Enriched rows (parser-labeled tool/kind) get an explicit call vs result
 // header; legacy rows keep the display-only "Name: payload" sniff, unchanged.
-function ToolCard({ role, content, leaks, hasLeak, tool, kind, detail, hint }) {
+function ToolCard({ role, content, leaks, hasLeak, tool, kind, detail, hint, sourceId }) {
   const startOpen = hasLeak || content.length <= 240;
   const [open, setOpen] = useState(startOpen);
+  // A FOLDED card (a Mode B tool row regrouped under its turn) keeps a path to
+  // the row it came from — folding must never make captured bytes unreachable.
+  const [showSource, setShowSource] = useState(false);
   const isRequest = role === "request";
   // Display-only parse of the "Name: payload" convention the mappers write.
   // Hostile content can at most mislabel its own card — never inject markup.
@@ -747,12 +750,16 @@ function ToolCard({ role, content, leaks, hasLeak, tool, kind, detail, hint }) {
         ${kind && detail && html`<span class="mc-detail">${detail}</span>`}
         ${!open && html`<span class="mc-preview">${payload.slice(0, 200)}</span>`}
         ${hasLeak && html`<span class="chip leak">secret</span>`}
+        ${sourceId &&
+        html`<button class="chip" title="this card was captured as its own call — open that call's detail (raw bytes, sizes)"
+          onClick=${(e) => { e.stopPropagation(); setShowSource(!showSource); }}>${showSource ? "▾" : "▸"} call</button>`}
         ${collapsible && html`<span class="mc-chev" aria-hidden="true">${open ? "▾" : "▸"}</span>`}
       </div>
       ${open &&
       html`<div class="mc-body scroll">
         <${JsonBody} content=${payload} leaks=${leaks} threshold=${1e9} hasLeak=${hasLeak} />
       </div>`}
+      ${showSource && html`<${Detail} id=${sourceId} />`}
     </div>
   `;
 }

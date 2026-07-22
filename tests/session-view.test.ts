@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store, type CallRecord } from "../src/core/store/store";
 import { buildSessionTurns, listSessions } from "../src/viewer/session-view";
+import { listCalls } from "../src/viewer/feed-query";
 import { ulid } from "../src/core/store/ulid";
 
 const enc = (s: string) => new TextEncoder().encode(s);
@@ -554,6 +555,190 @@ describe("buildSessionTurns — the conversation delta", () => {
     expect(v.turns[0]!.leaks).toEqual([
       { value: secret, secretType: "aws-access-key-id", tier: "structured" },
     ]);
+    store.close();
+  });
+});
+
+// ---- Mode B turn folding ----
+// Codex/Claude subscription capture lands one row per tool execution beside
+// the turn row. The fold regroups them under their turn via turn_link, so a
+// Mode B session reads like a wire one: prompt → tool cards → answer.
+describe("buildSessionTurns — Mode B folding", () => {
+  const toolCards = (callId: string | undefined, cmd: string, out: string) => [
+    { role: "tool", content: cmd, tool: "exec", kind: "call" as const, ...(callId ? { callId } : {}) },
+    { role: "tool", content: out, tool: "exec", kind: "result" as const, ...(callId ? { callId } : {}) },
+  ];
+  const codexPrompt = (overrides: Partial<CallRecord> = {}) =>
+    call({
+      source: "otel", endpoint: "otel:codex:user_prompt", agent: "codex",
+      promptKey: "hashA", displayMessages: [{ role: "user", content: "how does memory work?" }],
+      requestBody: enc("how does memory work?"), responseBody: enc("the stitched answer"),
+      ...overrides,
+    });
+  const codexTool = (callId: string, overrides: Partial<CallRecord> = {}) =>
+    call({
+      source: "otel", endpoint: "otel:codex:tool_result:exec", agent: "codex",
+      promptKey: undefined, displayMessages: toolCards(callId, `{"cmd":"ls ${callId}"}`, `out ${callId}`),
+      requestBody: enc(`exec\nls ${callId}\nout ${callId}`), responseBody: null, tsResponse: undefined,
+      ...overrides,
+    });
+
+  test("codex: linked tool rows fold under their turn in rollout seq order", () => {
+    const store = Store.open(dir);
+    const t0 = Date.now();
+    const prompt = codexPrompt({ id: ulid(t0), tsRequest: t0 });
+    const tool1 = codexTool("c1", { id: ulid(t0 + 1000), tsRequest: t0 + 1000 });
+    const tool2 = codexTool("c2", { id: ulid(t0 + 2000), tsRequest: t0 + 2000 });
+    store.insertCall(prompt);
+    store.insertCall(tool1);
+    store.insertCall(tool2);
+    // The rollout says c2 ran FIRST (seq 0) — seq is authoritative over row ts.
+    store.linkTurns("sess-1", [
+      { linkKey: "call:c1", promptKey: "hashA", ordinal: 0, seq: 1 },
+      { linkKey: "call:c2", promptKey: "hashA", ordinal: 0, seq: 0 },
+    ]);
+    const view = buildSessionTurns(store, "sess-1");
+    expect(view.turns.length).toBe(1); // 3 rows → 1 turn
+    const turn = view.turns[0]!;
+    expect(turn.id).toBe(prompt.id);
+    expect(turn.responseText).toBe("the stitched answer");
+    expect(turn.messages.map((m) => [m.kind ?? "user", m.callId ?? "-"])).toEqual([
+      ["user", "-"],
+      ["call", "c2"], ["result", "c2"], // seq 0 first
+      ["call", "c1"], ["result", "c1"],
+    ]);
+    // Folding must never make the tool rows' own detail unreachable.
+    expect(turn.messages.filter((m) => m.callId === "c1").every((m) => m.sourceId === tool1.id)).toBe(true);
+    store.close();
+  });
+
+  test("an UNLINKED tool row stays a standalone turn — folding degrades, never hides", () => {
+    const store = Store.open(dir);
+    const t0 = Date.now();
+    store.insertCall(codexPrompt({ id: ulid(t0), tsRequest: t0 }));
+    store.insertCall(codexTool("c9", { id: ulid(t0 + 1000), tsRequest: t0 + 1000 }));
+    // no linkTurns — rollout lagging or absent
+    const view = buildSessionTurns(store, "sess-1");
+    expect(view.turns.length).toBe(2);
+    expect(view.turns[1]!.messages.map((m) => m.kind)).toEqual(["call", "result"]);
+    store.close();
+  });
+
+  test("repeated identical prompts: the ordinal routes each turn's tools to ITS row", () => {
+    const store = Store.open(dir);
+    const t0 = Date.now();
+    const first = codexPrompt({ id: ulid(t0), tsRequest: t0 });
+    const second = codexPrompt({ id: ulid(t0 + 5000), tsRequest: t0 + 5000 }); // same promptKey "hashA"
+    const tool = codexTool("c2", { id: ulid(t0 + 6000), tsRequest: t0 + 6000 });
+    store.insertCall(first);
+    store.insertCall(second);
+    store.insertCall(tool);
+    store.linkTurns("sess-1", [{ linkKey: "call:c2", promptKey: "hashA", ordinal: 1, seq: 0 }]);
+    const view = buildSessionTurns(store, "sess-1");
+    expect(view.turns.length).toBe(2);
+    expect(view.turns[0]!.messages.length).toBe(1); // turn 1 untouched
+    expect(view.turns[1]!.id).toBe(second.id);
+    expect(view.turns[1]!.messages.map((m) => m.kind ?? "user")).toEqual(["user", "call", "result"]);
+    store.close();
+  });
+
+  test("claude: hook rows fold by row link, batch partials merge by exact prompt id", () => {
+    const store = Store.open(dir);
+    const t0 = Date.now();
+    const turnRow = call({
+      source: "otel", endpoint: "otel:claude_code.turn", agent: "claude",
+      promptKey: "prompt-uuid-1",
+      displayMessages: [
+        { role: "user", content: "show my memory files" },
+        { role: "tool", content: "Read: {}", tool: "Read", kind: "call" },
+      ],
+      requestBody: enc("show my memory files"), responseBody: enc("here they are"),
+      id: ulid(t0), tsRequest: t0,
+    });
+    const hookRow = call({
+      source: "otel", endpoint: "otel:tool_output:Read", agent: "claude",
+      promptKey: undefined,
+      displayMessages: toolCards(undefined, '{"file_path":"/m/MEMORY.md"}', "the file body"),
+      requestBody: enc('Read\n{"file_path":"/m/MEMORY.md"}\nthe file body'),
+      responseBody: null, tsResponse: undefined,
+      id: ulid(t0 + 500), tsRequest: t0 + 500,
+    });
+    // A tool_result batch split: an extra claude_code.turn row, same prompt id.
+    const partial = call({
+      source: "otel", endpoint: "otel:claude_code.turn", agent: "claude",
+      promptKey: "prompt-uuid-1",
+      displayMessages: [{ role: "tool", content: "Bash: ls", tool: "Bash", kind: "call" }],
+      requestBody: enc("Bash: ls"), responseBody: null, tsResponse: undefined,
+      id: ulid(t0 + 900), tsRequest: t0 + 900,
+    });
+    store.insertCall(turnRow);
+    store.insertCall(hookRow);
+    store.insertCall(partial);
+    store.linkTurns("sess-1", [{ linkKey: `row:${hookRow.id}`, promptKey: "prompt-uuid-1", ordinal: 0, seq: 0 }]);
+    const view = buildSessionTurns(store, "sess-1");
+    expect(view.turns.length).toBe(1);
+    const turn = view.turns[0]!;
+    expect(turn.id).toBe(turnRow.id);
+    expect(turn.responseText).toBe("here they are");
+    // Arrival order: the turn's own cards, then the hook pair (the fixture
+    // helper labels them "exec"), then the merged partial's card.
+    expect(turn.messages.map((m) => `${m.tool ?? "user"}:${m.kind ?? "text"}`)).toEqual([
+      "user:text", "Read:call", "exec:call", "exec:result", "Bash:call",
+    ]);
+    expect(turn.messages.at(-1)!.sourceId).toBe(partial.id);
+    store.close();
+  });
+
+  test("a folded row's leaks ride along, so its secret still highlights (R7)", () => {
+    const store = Store.open(dir);
+    const t0 = Date.now();
+    const prompt = codexPrompt({ id: ulid(t0), tsRequest: t0 });
+    const secret = "AKIAZQ3DRSTUVWXY2345";
+    const body = `exec\ncurl -H 'x: ${secret}'\nok`;
+    const tool = codexTool("c1", {
+      id: ulid(t0 + 1000), tsRequest: t0 + 1000,
+      displayMessages: toolCards("c1", `curl -H 'x: ${secret}'`, "ok"),
+      requestBody: enc(body),
+    });
+    store.insertCall(prompt);
+    store.insertCall(tool);
+    store.upsertLeakEvent({
+      fingerprint: "fp-fold", sessionId: "sess-1", detector: "aws-access-key-id",
+      secretType: "aws-access-key-id", severity: "high", confidenceTier: "structured",
+      destination: "openai", callId: tool.id, ts: t0 + 1000,
+      spanStart: body.indexOf(secret), spanEnd: body.indexOf(secret) + secret.length,
+    });
+    store.linkTurns("sess-1", [{ linkKey: "call:c1", promptKey: "hashA", ordinal: 0, seq: 0 }]);
+    const view = buildSessionTurns(store, "sess-1");
+    expect(view.turns.length).toBe(1);
+    expect(view.turns[0]!.leaks.some((l) => l.value === secret)).toBe(true);
+    store.close();
+  });
+});
+
+// The feed's half of the same story: one line per turn, so leak-free tool
+// rows hide — but a row that LEAKED always shows (never hide a leak).
+describe("listCalls — Mode B tool rows fold out of the feed", () => {
+  test("leak-free tool rows are hidden; the turn row and leak-bearing rows show", () => {
+    const store = Store.open(dir);
+    const t0 = Date.now();
+    const prompt = call({ source: "otel", endpoint: "otel:codex:user_prompt", id: ulid(t0), tsRequest: t0, summary: '"q" → a' });
+    const cleanTool = call({ source: "otel", endpoint: "otel:codex:tool_result:exec", id: ulid(t0 + 1000), tsRequest: t0 + 1000 });
+    const hookTool = call({ source: "otel", endpoint: "otel:tool_output:Read", id: ulid(t0 + 2000), tsRequest: t0 + 2000 });
+    const leakyTool = call({ source: "otel", endpoint: "otel:codex:tool_result:exec", id: ulid(t0 + 3000), tsRequest: t0 + 3000 });
+    const wire = call({ id: ulid(t0 + 4000), tsRequest: t0 + 4000 }); // wire rows never fold
+    for (const c of [prompt, cleanTool, hookTool, leakyTool, wire]) store.insertCall(c);
+    store.upsertLeakEvent({
+      fingerprint: "fp-feed", sessionId: "sess-1", detector: "d", secretType: "t",
+      severity: "high", confidenceTier: "structured", destination: "openai",
+      callId: leakyTool.id, ts: t0 + 3000,
+    });
+    const ids = listCalls(store, 50).map((r) => r.id);
+    expect(ids).toContain(prompt.id);
+    expect(ids).toContain(leakyTool.id); // leaked → stays visible
+    expect(ids).toContain(wire.id);
+    expect(ids).not.toContain(cleanTool.id);
+    expect(ids).not.toContain(hookTool.id);
     store.close();
   });
 });
