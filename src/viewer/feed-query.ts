@@ -1,7 +1,8 @@
 // Viewer feed projection (non-core): the dashboard's Layer-0 row shape. Kept
 // out of the core Store so display queries don't count against the R9
 // security-path budget — reads a read-only handle via Store.queryAll.
-import type { Store } from "../core/store/store";
+import { escapeLike, type Store } from "../core/store/store";
+import { detailLeaks, leakSpansFor, type DetailLeak } from "./detail";
 
 export interface LeakEvent {
   id: string;
@@ -93,6 +94,132 @@ export function listCalls(store: Store, limit: number): FeedRow[] {
       source: r.source as string,
       hasLeak: Boolean(r.has_leak),
     }));
+}
+
+// ---- literal search over what was SENT --------------------------------------
+// The dashboard's search view: each hit ships with real context snippets, so
+// the result panel can show WHERE the term appeared without a second fetch —
+// and without depending on the feed's 500-row window at all.
+
+const SNIPPET_PRE = 60; // context chars kept before a match
+const SNIPPET_POST = 100; // and after (answers lead the question that follows)
+const MAX_SNIPPETS = 3;
+
+export interface SearchSnippet {
+  pre: string; // context before the match ("…"-prefixed when clipped)
+  match: string; // the matched text as it appears in the content (original case)
+  post: string; // context after ("…"-suffixed when clipped)
+}
+
+export interface SearchCall {
+  callId: string;
+  sessionId: string;
+  tsRequest: number;
+  agent?: string;
+  model?: string;
+  source: string;
+  summary?: string;
+  hasLeak: boolean;
+  matchCount: number;
+  snippets: SearchSnippet[];
+  /** Detected secret values on this call (empty when clean), so snippets can
+   *  red-mark them — R7 follows the content onto the search surface. */
+  leaks: DetailLeak[];
+}
+
+// ASCII-only lowercase, length-preserving — the same case model as SQLite's
+// LIKE, so offsets found on the folded copy slice the ORIGINAL text exactly
+// (full Unicode folding can change length: "İ".toLowerCase() is two chars).
+function asciiLower(s: string): string {
+  return s.replace(/[A-Z]/g, (c) => c.toLowerCase());
+}
+
+// Snippets are display projections: collapse whitespace runs so a match deep
+// inside pretty-printed JSON still reads as one line in the results list.
+const collapse = (s: string): string => s.replace(/\s+/g, " ");
+
+function snip(
+  content: string,
+  term: string,
+  leakValues: string[],
+): { matchCount: number; snippets: SearchSnippet[] } {
+  const hay = asciiLower(content);
+  const needle = asciiLower(term);
+  const snippets: SearchSnippet[] = [];
+  let matchCount = 0;
+  let windowEnd = -1;
+  for (let i = hay.indexOf(needle); i !== -1; i = hay.indexOf(needle, i + needle.length)) {
+    matchCount++;
+    // A match inside the previous snippet's window is already on screen —
+    // don't mint a near-duplicate snippet for it (the count still tells all).
+    if (snippets.length >= MAX_SNIPPETS || i < windowEnd) continue;
+    let start = Math.max(0, i - SNIPPET_PRE);
+    let end = Math.min(content.length, i + needle.length + SNIPPET_POST);
+    // Never bisect a detected secret at a window edge: a half-shown value
+    // can't be red-marked (the client highlights by whole-value match), so a
+    // straddled one widens the window instead. One pass per value — the
+    // residual (a value straddling another value's extension) is vanishing,
+    // and the row's leak chip + the expanded detail still carry it.
+    for (const v of leakValues) {
+      for (let j = content.indexOf(v); j !== -1 && j < end; j = content.indexOf(v, j + 1)) {
+        if (j < start && j + v.length > start) start = j;
+        if (j < end && j + v.length > end) end = j + v.length;
+      }
+    }
+    windowEnd = end;
+    snippets.push({
+      pre: (start > 0 ? "…" : "") + collapse(content.slice(start, i)),
+      match: collapse(content.slice(i, i + needle.length)),
+      post: collapse(content.slice(i + needle.length, end)) + (end < content.length ? "…" : ""),
+    });
+  }
+  return { matchCount, snippets };
+}
+
+// Literal, case-insensitive (ASCII, like LIKE) search over the outbound index.
+// Newest first; one row over the cap is fetched purely to set `truncated`.
+export function searchCalls(
+  store: Store,
+  term: string,
+  limit = 200,
+): { hits: SearchCall[]; truncated: boolean } {
+  if (term === "") return { hits: [], truncated: false }; // '%%' matches every row
+  const rows = store.queryAll<Record<string, unknown>>(
+    `SELECT e.id, e.session_id, e.agent, e.model, e.ts_request, e.summary, e.source,
+            f.content,
+            EXISTS(SELECT 1 FROM leak_occurrences lo WHERE lo.exchange_id = e.id) AS has_leak
+     FROM exchanges_fts f JOIN exchanges e ON e.id = f.exchange_id
+     WHERE f.content LIKE ? ESCAPE '\\'
+     ORDER BY e.ts_request DESC, e.id DESC LIMIT ?`,
+    ["%" + escapeLike(term) + "%", limit + 1],
+  );
+  const truncated = rows.length > limit;
+  const hits = rows.slice(0, limit).map((r) => {
+    const id = r.id as string;
+    // Leak values ride only on flagged rows (rare), where they cost one call
+    // fetch each — the price of never rendering a detected secret unmarked.
+    const call = r.has_leak ? store.getCall(id) : null;
+    const leaks = call ? detailLeaks(call, leakSpansFor(store, id)) : [];
+    const { matchCount, snippets } = snip(
+      String(r.content ?? ""),
+      term,
+      leaks.map((l) => l.value),
+    );
+    return {
+      callId: id,
+      sessionId: r.session_id as string,
+      tsRequest: r.ts_request as number,
+      agent: (r.agent as string) ?? undefined,
+      model: (r.model as string) ?? undefined,
+      source: r.source as string,
+      summary: (r.summary as string) ?? undefined,
+      hasLeak: Boolean(r.has_leak),
+      matchCount,
+      snippets,
+      leaks,
+    };
+  });
+  return { hits, truncated };
 }
 
 // Whole-store totals for the header stat cards. The feed above is a 500-row

@@ -6,7 +6,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { Store } from "../core/store/store";
 import { listenReady } from "../core/net/listen";
-import { feedStats, listCalls, listLeakEvents } from "./feed-query";
+import { feedStats, listCalls, listLeakEvents, searchCalls } from "./feed-query";
 import { buildDetail, detailLeaks, detailMessages, leakSpansFor } from "./detail";
 import { buildSessionTurns, listSessions, wireDeltaIndex } from "./session-view";
 // Statics embedded at build time (ships-what's-in-repo, and the compiled
@@ -285,7 +285,9 @@ export class ViewerServer {
         void this.readJson(req).then((body) => {
           try {
             const term = String((body as { term?: string })?.term ?? "");
-            this.json(res, 200, term ? store.searchLiteral(term) : []);
+            // Rich hits (snippets + metadata) so the search view stands alone;
+            // searchCalls itself refuses the match-everything empty term.
+            this.json(res, 200, searchCalls(store, term));
           } finally {
             store.close();
           }

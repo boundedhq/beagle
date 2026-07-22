@@ -25,10 +25,15 @@ declare module "*/app.js" {
 declare module "*.module.js" {
   const text: string;
   export default text;
-  // render-json.module.js is also imported as a REAL module by tests; its one
-  // pure (non-render) export is typed here. Harmless for the text-import case.
+  // render-json.module.js is also imported as a REAL module by tests; its
+  // pure (non-render) exports are typed here. Harmless for the text-import case.
   export function parseSegments(
     content: string,
     leaks: Array<{ value?: string }> | undefined,
   ): Array<{ kind: "text"; text: string } | { kind: "tree"; head: string | null; value: unknown }> | null;
+  export function findRuns(
+    text: string | null | undefined,
+    find: string | null | undefined,
+  ): Array<{ text: string; hit: boolean }>;
+  export function hasFind(text: unknown, find: string | null | undefined): boolean;
 }

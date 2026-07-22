@@ -3,19 +3,63 @@
 // invariants: (§6.8) captured text is only ever interpolated as a text node,
 // never markup; (R7) a detected secret is always visibly highlighted — no fold
 // or clamp ever hides one. Everything that shows a stored body goes through
-// JsonBody (readable) or RawBody (raw); those are the only RENDER exports
-// (parseSegments is also exported, but it is a pure parser returning plain
-// data for tests — it never touches the DOM).
+// JsonBody (readable), RawBody (raw), or Highlighted (search snippets — flat
+// text that still owes both invariants); those are the only RENDER exports
+// (parseSegments, findRuns, and hasFind are also exported, but they are pure
+// functions returning plain data — they never touch the DOM).
 import { h } from "preact";
 import { useMemo, useState } from "preact/hooks";
 import htm from "htm";
 
 const html = htm.bind(h);
 
+// ASCII-only lowercase, length-preserving — matches the store's LIKE matching
+// (which made the call a search hit), and keeps folded offsets valid on the
+// original text (full Unicode folding can change length: "İ" → "i̇").
+const asciiLower = (s) => s.replace(/[A-Z]/g, (c) => c.toLowerCase());
+
+// Pure splitter behind the search-term marks: runs of text, hit or not, for a
+// literal ASCII-case-insensitive term. Exported for tests (no DOM).
+export function findRuns(text, find) {
+  const whole = [{ text: text ?? "", hit: false }];
+  if (!find || typeof text !== "string" || text === "") return whole;
+  const hay = asciiLower(text);
+  const needle = asciiLower(find);
+  const runs = [];
+  let pos = 0;
+  for (let i = hay.indexOf(needle); i !== -1; i = hay.indexOf(needle, pos)) {
+    if (i > pos) runs.push({ text: text.slice(pos, i), hit: false });
+    runs.push({ text: text.slice(i, i + needle.length), hit: true });
+    pos = i + needle.length;
+  }
+  if (runs.length === 0) return whole;
+  if (pos < text.length) runs.push({ text: text.slice(pos), hit: false });
+  return runs;
+}
+
+// Does the text contain the searched term at all? (Same fold as findRuns —
+// used for "start this fold open" decisions, so a match is never hidden.)
+export function hasFind(text, find) {
+  if (!find || typeof text !== "string") return false;
+  return asciiLower(text).includes(asciiLower(find));
+}
+
+// A text run with its search-term matches wrapped in an amber <mark> — text
+// nodes only (§6.8). Display-only: never consulted for parse/fold decisions.
+function findMarked(text, find) {
+  if (!find || !hasFind(text, find)) return text;
+  return findRuns(text, find).map((r) => (r.hit ? html`<mark class="find">${r.text}</mark>` : r.text));
+}
+
 // Renders text, wrapping each detected secret value in a red <mark>. Splits on
-// values and builds text nodes only — never raw-HTML injection (§6.8).
-function Highlighted({ text, leaks }) {
-  if (!leaks || leaks.length === 0 || typeof text !== "string") return text ?? "";
+// values and builds text nodes only — never raw-HTML injection (§6.8). The
+// searched term (find) gets an amber mark on the runs BETWEEN leak marks — a
+// secret's red mark always wins whole, never fragmented by a search overlap.
+// Exported for the search view's snippets, which render captured text outside
+// a JsonBody and owe it the same two invariants.
+export function Highlighted({ text, leaks, find }) {
+  if (!leaks || leaks.length === 0 || typeof text !== "string")
+    return typeof text === "string" ? html`${findMarked(text, find)}` : (text ?? "");
   // value → tier, so each mark is colored by confidence. The louder
   // "structured" tier wins if the same value was flagged under both.
   const tierOf = new Map();
@@ -38,8 +82,8 @@ function Highlighted({ text, leaks }) {
       // strict <: at an equal position the earlier (longer) value already won
       if (i !== -1 && (at === -1 || i < at)) { at = i; hit = v; }
     }
-    if (at === -1) { out.push(rest); break; }
-    if (at > 0) out.push(rest.slice(0, at));
+    if (at === -1) { out.push(findMarked(rest, find)); break; }
+    if (at > 0) out.push(findMarked(rest.slice(0, at), find));
     // Structured = red (loud, alerted); possible = amber (lower confidence,
     // logged but never alerted) — the distinction the user can't get otherwise.
     const possible = tierOf.get(hit) === "possible";
@@ -234,25 +278,26 @@ function parseSseEvents(content, leaks) {
   return events;
 }
 
-function JsonNode({ k, v, leaks, depth }) {
+function JsonNode({ k, v, leaks, depth, find }) {
   const isObj = v !== null && typeof v === "object";
   // Highlight the KEY too, not just values: a structured detector can match a
   // secret sitting in a key position (e.g. {"AKIA…": …}), and parseForTree
   // counts keys as highlightable — so they must actually carry the mark (R7).
   const key = k !== undefined &&
-    html`<span class="jt-k"><${Highlighted} text=${String(k)} leaks=${leaks} /></span><span class="jt-p">: </span>`;
+    html`<span class="jt-k"><${Highlighted} text=${String(k)} leaks=${leaks} find=${find} /></span><span class="jt-p">: </span>`;
   if (!isObj) {
     return html`<div class="jt-row">
       ${key}${typeof v === "string"
-        ? html`<span class="jt-p">"</span><span class="jt-s"><${Highlighted} text=${v} leaks=${leaks} /></span><span class="jt-p">"</span>`
+        ? html`<span class="jt-p">"</span><span class="jt-s"><${Highlighted} text=${v} leaks=${leaks} find=${find} /></span><span class="jt-p">"</span>`
         : html`<span class="jt-v">${JSON.stringify(v)}</span>`}
     </div>`;
   }
   const entries = Array.isArray(v) ? v.map((x, i) => [i, x]) : Object.entries(v);
   const json = JSON.stringify(v);
-  // A subtree carrying a secret must not start folded (R7).
+  // A subtree carrying a secret must not start folded (R7). One carrying the
+  // searched term starts open too — the user came here to see that match.
   const holdsLeak = (leaks ?? []).some((l) => l.value && json.includes(l.value));
-  const [open, setOpen] = useState(holdsLeak || depth === 0 || json.length <= 160);
+  const [open, setOpen] = useState(holdsLeak || hasFind(json, find) || depth === 0 || json.length <= 160);
   const [o, c] = Array.isArray(v) ? ["[", "]"] : ["{", "}"];
   if (entries.length === 0) return html`<div class="jt-row">${key}<span class="jt-p">${o}${c}</span></div>`;
   return html`<div>
@@ -263,7 +308,7 @@ function JsonNode({ k, v, leaks, depth }) {
     </div>
     ${open && html`
       <div class="jt-kids">
-        ${entries.map(([ck, cv]) => html`<${JsonNode} key=${String(ck)} k=${ck} v=${cv} leaks=${leaks} depth=${depth + 1} />`)}
+        ${entries.map(([ck, cv]) => html`<${JsonNode} key=${String(ck)} k=${ck} v=${cv} leaks=${leaks} depth=${depth + 1} find=${find} />`)}
       </div>
       <div class="jt-row"><span class="jt-p">${c}</span></div>`}
   </div>`;
@@ -271,14 +316,16 @@ function JsonNode({ k, v, leaks, depth }) {
 
 // Long-content guard: a CSS max-height clamp with a fade + expander. The text
 // itself is never sliced, so Highlighted always sees the full content and a
-// secret can never be bisected by a truncation point.
-function ClampedText({ content, leaks, threshold, hasLeak }) {
-  const [expanded, setExpanded] = useState(false);
+// secret can never be bisected by a truncation point. Content holding the
+// searched term starts expanded — the fold must not hide the match the user
+// came for (they can still collapse it).
+function ClampedText({ content, leaks, threshold, hasLeak, find }) {
+  const [expanded, setExpanded] = useState(hasFind(content, find));
   const clampable = content.length > threshold && !hasLeak;
-  if (!clampable) return html`<${Highlighted} text=${content} leaks=${leaks} />`;
+  if (!clampable) return html`<${Highlighted} text=${content} leaks=${leaks} find=${find} />`;
   return html`
     <div class=${expanded ? "clamp" : "clamp clamped"}>
-      <${Highlighted} text=${content} leaks=${leaks} />
+      <${Highlighted} text=${content} leaks=${leaks} find=${find} />
     </div>
     <button class="expander" onClick=${() => setExpanded(!expanded)}>
       ${expanded ? "▴ collapse" : "▾ show all"}
@@ -288,16 +335,17 @@ function ClampedText({ content, leaks, threshold, hasLeak }) {
 
 // Mixed prose+JSON body: prose renders as flat highlighted text, each JSON
 // line as its own foldable tree. Clamping matches ClampedText exactly — the
-// leak-bearing case never clamps (R7), and the text is never sliced.
-function MixedBody({ segments, content, leaks, threshold, hasLeak }) {
-  const [expanded, setExpanded] = useState(false);
+// leak-bearing case never clamps (R7), the find-bearing case starts expanded,
+// and the text is never sliced.
+function MixedBody({ segments, content, leaks, threshold, hasLeak, find }) {
+  const [expanded, setExpanded] = useState(hasFind(content, find));
   const clampable = content.length > threshold && !hasLeak;
   const body = segments.map((s, i) =>
     s.kind === "text"
-      ? html`<div key=${i}><${Highlighted} text=${s.text} leaks=${leaks} /></div>`
+      ? html`<div key=${i}><${Highlighted} text=${s.text} leaks=${leaks} find=${find} /></div>`
       : html`<div class="jt" key=${i}>
           ${s.head != null && html`<div class="jt-head">${s.head}</div>`}
-          <${JsonNode} v=${s.value} leaks=${leaks} depth=${0} />
+          <${JsonNode} v=${s.value} leaks=${leaks} depth=${0} find=${find} />
         </div>`,
   );
   if (!clampable) return html`${body}`;
@@ -311,8 +359,11 @@ function MixedBody({ segments, content, leaks, threshold, hasLeak }) {
 
 // The one entry point every readable body goes through: tree when the content
 // is a single JSON document, mixed prose+trees when JSON lines are embedded in
-// other text, today's flat highlighted text otherwise.
-export function JsonBody({ content, leaks, threshold, hasLeak }) {
+// other text, today's flat highlighted text otherwise. `find` (the searched
+// term, when the user arrived from search) only marks and unfolds — it is
+// never an input to the parse decisions, so a view with and without it shows
+// the same structure.
+export function JsonBody({ content, leaks, threshold, hasLeak, find }) {
   // Memoized: with the 1MB cap a parse is no longer trivially cheap, and every
   // SSE-driven refresh re-renders the whole transcript (and every JsonBody in
   // it). content/leaks come from stable fetched view state, so this only
@@ -325,15 +376,15 @@ export function JsonBody({ content, leaks, threshold, hasLeak }) {
   if (tree) {
     return html`<div class="jt">
       ${tree.head != null && html`<div class="jt-head">${tree.head}</div>`}
-      <${JsonNode} v=${tree.value} leaks=${leaks} depth=${0} />
+      <${JsonNode} v=${tree.value} leaks=${leaks} depth=${0} find=${find} />
     </div>`;
   }
   if (segments) {
     return html`<${MixedBody} segments=${segments} content=${content} leaks=${leaks}
-      threshold=${threshold ?? 2500} hasLeak=${hasLeak} />`;
+      threshold=${threshold ?? 2500} hasLeak=${hasLeak} find=${find} />`;
   }
   return html`<${ClampedText} content=${prettyContent(content, leaks)} leaks=${leaks}
-    threshold=${threshold ?? 2500} hasLeak=${hasLeak} />`;
+    threshold=${threshold ?? 2500} hasLeak=${hasLeak} find=${find} />`;
 }
 
 // The raw view's request/response body: the exact captured bytes, folded as a
@@ -343,7 +394,7 @@ export function JsonBody({ content, leaks, threshold, hasLeak }) {
 // so the raw view never tucks anything behind a "show all". R7 rides along:
 // JsonBody starts every leak-bearing subtree expanded, and if a secret can't
 // survive the structural split it falls back to flat highlighted text.
-export function RawBody({ body, leaks }) {
+export function RawBody({ body, leaks, find }) {
   // A streamed response is an SSE event stream, not one JSON doc — fold each
   // event's data on its own; a single JSON body (or anything else) goes straight
   // through JsonBody (tree or flat). Memoized for the same reason JsonBody is.
@@ -353,8 +404,8 @@ export function RawBody({ body, leaks }) {
     ${events
       ? events.map((ev, i) => html`<div class="sse-ev" key=${i}>
           ${ev.type != null && html`<div class="sse-ev-type">${ev.type}</div>`}
-          <${JsonBody} content=${ev.data} leaks=${leaks} threshold=${1e9} />
+          <${JsonBody} content=${ev.data} leaks=${leaks} threshold=${1e9} find=${find} />
         </div>`)
-      : html`<${JsonBody} content=${body} leaks=${leaks} threshold=${1e9} />`}
+      : html`<${JsonBody} content=${body} leaks=${leaks} threshold=${1e9} find=${find} />`}
   </div>`;
 }
