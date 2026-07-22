@@ -119,6 +119,9 @@ export interface SessionTurn {
   status?: number;
   messages: DisplayMessage[]; // only what this turn ADDED (see delta note above)
   responseText: string | null;
+  /** Original capture row when a late-stitched Claude response is displayed
+   *  on a later request boundary. Keeps that response's raw bytes reachable. */
+  responseSourceId?: string;
   /** Tool calls the model made in THIS turn's response — the "what was sent
    *  back" half the transcript used to show one turn late (as request echoes). */
   responseCalls: ToolAction[];
@@ -529,13 +532,15 @@ function sequenceModeBTurns(
     for (const candidate of out) {
       if (
         candidate.tsRequest <= source.tsRequest || candidate.tsRequest > m.responseTs ||
-        candidate.responseText !== null || claudePrompt(candidate) !== m.promptKey
+        candidate.responseText !== null || candidate.responseCalls.length > 0 ||
+        claudePrompt(candidate) !== m.promptKey
       ) continue;
       target = candidate;
     }
     if (!target) continue;
     target.responseText = source.responseText;
-    target.model ??= source.model;
+    target.responseSourceId = source.id;
+    target.model = source.model ?? target.model;
     source.responseText = null;
   }
   return out;
