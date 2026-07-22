@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, cmdUninstall, countPossibleLeaksSince, detectLine, interpretAskAnswer, isLoopbackHookEndpoint, otelCallsArrivedSince, parseRunArgs, readCodexApiKey, resolveRunMode, runCallsArrived } from "../src/cli/commands";
+import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, cmdUninstall, countPossibleLeaksSince, detectLine, interpretAskAnswer, isLoopbackHookEndpoint, otelCallsArrivedSince, parseRunArgs, readCodexApiKey, resolveRunMode, runCallsArrived, watchForFirstCapture, wireCaptureLive } from "../src/cli/commands";
 import { buildRunEnv, AGENTS } from "../src/cli/agents";
 import { Store, type CallRecord } from "../src/core/store/store";
 import { ulid } from "../src/core/store/ulid";
@@ -915,6 +915,114 @@ describe("runCallsArrived (the wire zero-capture tripwire's predicate)", () => {
     });
     store2.close();
     expect(await otelCallsArrivedSince(stateDir, Date.now() - 1000, 400)).toBe(true);
+  });
+});
+
+describe("watchForFirstCapture + wireCaptureLive (the early 'capture active' confirmation)", () => {
+  const stops: Array<() => void> = [];
+  const dirs: string[] = [];
+  // Stop every armed interval and remove every temp store even if an assertion
+  // throws mid-test — a leaked unref'd poller won't hang bun:test, but it would
+  // churn the store under later tests. Also keeps the timing tests store-free.
+  const arm = (enabled: boolean, check: () => boolean, onActive: () => void, ms: number): (() => void) => {
+    const stop = watchForFirstCapture(enabled, check, onActive, ms);
+    stops.push(stop);
+    return stop;
+  };
+  const tmp = (prefix: string): string => {
+    const d = mkdtempSync(join(tmpdir(), prefix));
+    dirs.push(d);
+    return d;
+  };
+  const seedWire = (stateDir: string, runId: string, tsRequest: number): void => {
+    const store = Store.open(stateDir);
+    store.insertCall({
+      id: ulid(), sessionId: "s1", runId, source: "wire", agent: "codex",
+      provider: "openai", endpoint: "/v1/responses", tsRequest,
+      scanState: "ok", captureState: "ok", sessionTier: "run",
+      requestBody: null, requestHeaders: null, responseBody: null,
+      responseHeaders: null, sseRaw: null, searchText: "x",
+    });
+    store.close();
+  };
+  afterEach(() => {
+    for (const s of stops) s();
+    stops.length = 0;
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+    dirs.length = 0;
+  });
+
+  // --- the watcher mechanism, driven by a deterministic synchronous check (no
+  // store I/O, so the timing assertions can't flake on a loaded CI disk) ---
+  test("fires onActive exactly once when the check turns true — never re-fires", async () => {
+    let live = false;
+    let fires = 0;
+    arm(true, () => live, () => { fires++; }, 10);
+    await Bun.sleep(40);
+    expect(fires).toBe(0); // check false → silence
+    live = true;
+    await Bun.sleep(60); // many ticks now see true, but the latch fires once
+    expect(fires).toBe(1);
+    live = false; // even if the row later "vanished", it stays fired-once
+    await Bun.sleep(30);
+    expect(fires).toBe(1);
+  });
+
+  test("enabled=false arms no poll at all — never fires even when the check is always true", async () => {
+    let fires = 0;
+    arm(false, () => true, () => { fires++; }, 10);
+    await Bun.sleep(40);
+    expect(fires).toBe(0);
+  });
+
+  test("stop() blocks a confirmation that would otherwise land after the agent exits", async () => {
+    let captured = false;
+    let fires = 0;
+    const stop = arm(true, () => captured, () => { fires++; }, 10);
+    stop(); // agent exited before anything was captured
+    captured = true; // a call would now satisfy the check…
+    await Bun.sleep(40);
+    expect(fires).toBe(0); // …but the watcher is already stopped
+  });
+
+  test("a throwing check is swallowed — never fires, never disrupts the run", async () => {
+    let fires = 0;
+    arm(true, () => { throw new Error("store hiccup"); }, () => { fires++; }, 10);
+    await Bun.sleep(40);
+    expect(fires).toBe(0);
+  });
+
+  // --- wireCaptureLive: the run-scoped, fail-closed, index-bounded predicate ---
+  test("true once a wire row for this run lands at/after t0; false before", () => {
+    const stateDir = tmp("beagle-cap-");
+    const t0 = Date.now();
+    Store.open(stateDir).close(); // materialize an empty store
+    expect(wireCaptureLive(stateDir, "run-A", t0)).toBe(false);
+    seedWire(stateDir, "run-A", t0 + 1);
+    expect(wireCaptureLive(stateDir, "run-A", t0)).toBe(true);
+  });
+
+  test("run-scoped: a concurrent run's captured call never trips this run's confirmation", () => {
+    const stateDir = tmp("beagle-cap-");
+    const t0 = Date.now();
+    seedWire(stateDir, "run-OTHER", t0 + 1); // a different run captured a call
+    expect(wireCaptureLive(stateDir, "run-MINE", t0)).toBe(false);
+  });
+
+  test("ignores rows older than t0 — a prior run's leftover can't fake a positive", () => {
+    const stateDir = tmp("beagle-cap-");
+    const t0 = Date.now();
+    seedWire(stateDir, "run-A", t0 - 5_000); // same runId, but before this run started
+    expect(wireCaptureLive(stateDir, "run-A", t0)).toBe(false);
+  });
+
+  test("fails CLOSED on an absent store — the deliberate opposite of the fail-open tripwire", async () => {
+    const stateDir = tmp("beagle-cap-empty-");
+    // A positive signal must never affirm on uncertainty:
+    expect(wireCaptureLive(stateDir, "run-A", Date.now())).toBe(false);
+    // …whereas runCallsArrived (the end-of-run tripwire) deliberately returns
+    // true for an absent store — don't cry wolf. This asymmetry is the fix.
+    expect(await runCallsArrived(stateDir, "run-A", 0)).toBe(true);
   });
 });
 
