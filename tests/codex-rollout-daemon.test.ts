@@ -388,6 +388,38 @@ describe("Codex rollout response capture end-to-end", () => {
     });
   }, 15_000);
 
+  test("a failing link write never costs the ANSWER stitch — links and answers share a batch", async () => {
+    // Pins the batch-level invariant, not one code path: links and answers
+    // ride one tailer emit, and the answer must attach no matter what the
+    // link write does. Today two things independently protect it — the tailer
+    // emits answers before links, AND the daemon catches link-write errors —
+    // and this holds whichever of the two a future change removes.
+    (daemon as unknown as { store: { linkTurns: () => void } }).store.linkTurns = () => {
+      throw new Error("disk full");
+    };
+    const conv = "conv-linkfail";
+    const prompt = "does the answer survive a link failure?";
+    const t0 = Date.now();
+    writeRollout(codexRoot, conv, [
+      jline("response_item", msg("user", prompt), t0 - 3000),
+      jline("response_item", { type: "custom_tool_call", call_id: "call-lf", name: "exec", input: '{"cmd":"true"}' }, t0 - 2000),
+      jline("response_item", msg("assistant", "IT SURVIVES"), t0 - 1000),
+    ].join("\n") + "\n");
+    await post(codexPrompt(conv, prompt, t0 - 4000));
+    await waitFor(
+      () => readStore((s) => {
+        const hit = s.searchLiteral(prompt)[0];
+        const call = hit && s.getCall(hit.callId);
+        return !!call?.responseBody && new TextDecoder().decode(call.responseBody).includes("IT SURVIVES");
+      }),
+      "the answer to stitch despite the link write throwing",
+    );
+    readStore((s) => {
+      expect(s.queryAll(`SELECT 1 FROM turn_link`)).toEqual([]); // links lost, and only links
+      expect(listCalls(s, 50).length).toBe(1);
+    });
+  }, 15_000);
+
   test("an answer whose prompt has no turn row is DROPPED, not orphaned", async () => {
     const conv = "conv-drop";
     // The rollout's prompt differs from the OTel prompt, so the answer's key

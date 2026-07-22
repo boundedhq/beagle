@@ -466,9 +466,12 @@ export class Store {
 
   // Absent fields keep their stored value (callers only ever set, never null).
   updateSession(id: string, f: { lastTs?: number; convId?: string; headHash?: string }): void {
+    // Recency only moves FORWARD: rollout re-emits (answers and turn links)
+    // carry their frozen historical stamps through the resolver, and letting
+    // one rewind last_ts dropped a live session down the sessions list.
     this.db.run(
-      `UPDATE sessions SET last_ts=COALESCE(?,last_ts), conv_id=COALESCE(?,conv_id),
-         head_hash=COALESCE(?,head_hash) WHERE id=?`,
+      `UPDATE sessions SET last_ts=MAX(COALESCE(?,last_ts,0), COALESCE(last_ts,0)),
+         conv_id=COALESCE(?,conv_id), head_hash=COALESCE(?,head_hash) WHERE id=?`,
       [f.lastTs ?? null, f.convId ?? null, f.headHash ?? null, id],
     );
   }

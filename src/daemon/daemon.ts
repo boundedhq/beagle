@@ -1000,12 +1000,20 @@ export class Daemon {
       // Rollout-derived turn links (origin='codex-rollout', both sides empty):
       // grouping metadata — opaque call ids, no content — so they write to
       // turn_link and stop here, never reaching the scan/alert/insert path. A
-      // link is not a captured call and must not become a row.
+      // link is not a captured call and must not become a row. Best-effort by
+      // the same rule that makes folding fail open: a store error here must
+      // not abort the batch. Today the tailer emits answers BEFORE links, so a
+      // thrown link would cost only the links behind it — but that ordering is
+      // the tailer's, not this loop's, and nothing else stops a links-first
+      // batch from taking answer stitches down with it. The catch makes the
+      // invariant local: cosmetic writes cannot abort capture, full stop.
       if (call.toolLinks?.length) {
-        this.store.linkTurns(
-          resolution.sessionId,
-          call.toolLinks.map((l) => ({ linkKey: `call:${l.callId}`, promptKey: l.promptKey, ordinal: l.ordinal, seq: l.seq })),
-        );
+        try {
+          this.store.linkTurns(
+            resolution.sessionId,
+            call.toolLinks.map((l) => ({ linkKey: `call:${l.callId}`, promptKey: l.promptKey, ordinal: l.ordinal, seq: l.seq })),
+          );
+        } catch { /* unlinked rows render standalone */ }
         continue;
       }
       const scanResult = await this.scanHost.scan(call.request.bodyBytes, {});
@@ -1185,8 +1193,12 @@ export class Daemon {
               // setting `detail` (otlp-map sets none today) reopens that hole.
               ...m,
               role: m.role,
+              // Both TOOL card kinds clamp, for the cap's own reason: the
+              // scanned body already holds the full text, and a `cat` heredoc
+              // in a command is as unbounded as one in an output. Post-scrub,
+              // as always. Plain messages (the user's prompt) stay whole.
               content:
-                (m as DisplayMessage).kind === "result"
+                (m as DisplayMessage).kind === "result" || (m as DisplayMessage).kind === "call"
                   ? clampRedacted(content, DISPLAY_RESULT_CAP)
                   : content,
             };
@@ -1293,11 +1305,15 @@ export class Daemon {
       // A row that names its own turn (the Claude hook's prompt_id): record the
       // display grouping. Row-keyed, ordinal 0 — prompt ids are unique, unlike
       // codex's hash-of-prompt keys. Written AFTER the insert so a link can
-      // never point at a row that failed to land.
+      // never point at a row that failed to land — and best-effort, because it
+      // sits between the insert and this row's ALERT pass: a cosmetic write
+      // must never be the reason a scanned secret goes unreported.
       if (call.turnRef) {
-        this.store.linkTurns(resolution.sessionId, [
-          { linkKey: `row:${call.id}`, promptKey: call.turnRef.promptKey, ordinal: 0, seq: 0 },
-        ]);
+        try {
+          this.store.linkTurns(resolution.sessionId, [
+            { linkKey: `row:${call.id}`, promptKey: call.turnRef.promptKey, ordinal: 0, seq: 0 },
+          ]);
+        } catch { /* the row renders standalone */ }
       }
       this.alertEngine.process(
         {

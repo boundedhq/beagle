@@ -906,3 +906,24 @@ describe("turn_link (linkTurns + cleanup)", () => {
     store.close();
   });
 });
+
+describe("updateSession recency", () => {
+  let dir: string;
+  beforeEach(() => (dir = tmpRoot()));
+
+  test("last_ts only moves forward — a historical re-emit never rewinds recency", () => {
+    // Rollout re-emits (answers, turn links) carry frozen historical stamps
+    // through the resolver; before this guard one rewound last_ts and dropped
+    // a live session down the sessions list.
+    const store = Store.open(dir);
+    store.insertSession({ id: "s1", firstTs: 1000, lastTs: 5000 });
+    store.updateSession("s1", { lastTs: 2000 }); // older — must not rewind
+    expect(store.queryAll<{ t: number }>(`SELECT last_ts AS t FROM sessions WHERE id='s1'`)[0]!.t).toBe(5000);
+    store.updateSession("s1", { lastTs: 9000 }); // newer — moves forward
+    expect(store.queryAll<{ t: number }>(`SELECT last_ts AS t FROM sessions WHERE id='s1'`)[0]!.t).toBe(9000);
+    // A no-ts update (convId/headHash only) leaves recency alone.
+    store.updateSession("s1", { convId: "c" });
+    expect(store.queryAll<{ t: number }>(`SELECT last_ts AS t FROM sessions WHERE id='s1'`)[0]!.t).toBe(9000);
+    store.close();
+  });
+});

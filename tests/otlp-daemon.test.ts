@@ -887,6 +887,53 @@ describe("Mode B tool-output capture (PostToolUse hook)", () => {
     expect(hookRow.summary).toBe("read MEMORY.md → the memory file body");
     store.close();
   });
+
+  test("a failing link write never suppresses the row's ALERT — cosmetic writes are best-effort", async () => {
+    // The turnRef link sits between the insert and the alert pass. If it could
+    // throw, a disk hiccup on a display-grouping row would be the reason a
+    // scanned secret went unreported — the one unacceptable trade.
+    (daemon as unknown as { store: { linkTurns: () => void } }).store.linkTurns = () => {
+      throw new Error("disk full");
+    };
+    await fetch(`http://127.0.0.1:${otlpPort}/v1/hook`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-beagle-run": token },
+      body: JSON.stringify({
+        session_id: "sess-linkfail", prompt_id: "prompt-x", hook_event_name: "PostToolUse",
+        tool_name: "Bash", tool_input: { command: "cat .env" },
+        tool_response: "AWS_SECRET=AKIAZQ3DRSTUVWXY2345\n",
+      }),
+    });
+    await settled(daemon.socketPath);
+    expect(alerts.length).toBe(1); // the alert fired despite the link write throwing
+    expect(alerts[0]!.secretType).toBe("aws-access-key-id");
+    const store = Store.openReadOnly(stateDir);
+    // The row landed; only the link is missing — it renders standalone.
+    expect(store.searchLiteral("cat .env").length).toBe(1);
+    expect(store.queryAll(`SELECT 1 FROM turn_link`)).toEqual([]);
+    store.close();
+  });
+
+  test("a long tool COMMAND is clamped like a long output — the body keeps the whole text", async () => {
+    // The cap's rationale is symmetric: a `cat` heredoc in a command is as
+    // unbounded as one in an output, and the scanned body already holds it.
+    const bigCmd = "printf '" + "x".repeat(30_000) + "' > big.txt";
+    await fetch(`http://127.0.0.1:${otlpPort}/v1/hook`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-beagle-run": token },
+      body: JSON.stringify({
+        session_id: "sess-bigcmd", hook_event_name: "PostToolUse",
+        tool_name: "Bash", tool_input: { command: bigCmd }, tool_response: "ok",
+      }),
+    });
+    await settled(daemon.socketPath);
+    const store = Store.openReadOnly(stateDir);
+    const row = store.getCall(store.searchLiteral("big.txt")[0]!.callId)!;
+    expect(row.displayMessages![0]!.content.length).toBeLessThanOrEqual(4000);
+    // The full command stays in the scanned body (and the search index).
+    expect(new TextDecoder().decode(row.requestBody!)).toContain(bigCmd);
+    store.close();
+  });
 });
 
 // Codex on a ChatGPT login can't be wire-proxied; --telemetry captures it via
