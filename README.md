@@ -143,7 +143,8 @@ stitched on a beat later). The calls feed reads one line per turn, verb-first �
 ``ran `sed -n '1,240p' SKILL.md` → …`` — instead of a row of exec noise per
 tool. Grouping is cosmetic and fails open: every tool execution is still its
 own captured, scanned call underneath (each folded card links to its raw
-bytes), a row whose linkage hasn't arrived yet just shows standalone — and a
+bytes), a row the linkage can't name is grouped by time under the turn that
+was open (only one arriving before any turn shows standalone) — and a
 tool call that leaked a secret always keeps its own line in the feed. The one
 gap wire capture doesn't have: Codex encrypts its reasoning, so what the model
 was thinking between tools is the one thing a telemetry transcript can't show.

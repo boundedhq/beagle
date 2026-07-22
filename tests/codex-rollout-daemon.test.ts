@@ -355,6 +355,9 @@ describe("Codex rollout response capture end-to-end", () => {
     ].join("\n") + "\n");
     await post(codexPrompt(conv, prompt, t0 - 5000));
     await post(codexToolResult(conv, "call-f1", '{"cmd":"ls"}', "README.md", t0 - 3000));
+    // codex double-reports each execution: the inner event carries an internal
+    // id the rollout never names — no link can exist, so it must fold by TIME.
+    await post(codexToolResult(conv, "exec-3f6b1255-inner", '{"cmd":"ls"}', "README.md (inner view)", t0 - 2900));
 
     // The answer stitches and the links land (order between them is free).
     await waitFor(
@@ -373,18 +376,21 @@ describe("Codex rollout response capture end-to-end", () => {
       // The tool row is intact and live-captured — its summary reads the command…
       expect(toolRow.summary).toBe("ran `ls` → README.md");
       expect(toolRow.promptKey).toBeUndefined(); // never an attach target
-      // …the transcript folds the session to ONE turn: prompt → cards → answer…
+      // …the transcript folds the session to ONE turn: prompt → cards →
+      // answer, the link-less inner twin adopted by time beside its pair…
       const view = buildSessionTurns(s, promptRow.sessionId);
       expect(view.turns.length).toBe(1);
       const turn = view.turns[0]!;
       expect(turn.id).toBe(promptRow.id);
       expect(turn.responseText).toBe("One file: README.md");
-      expect(turn.messages.map((m) => m.kind ?? "text")).toEqual(["text", "call", "result"]);
-      expect(turn.messages.at(-1)!.sourceId).toBe(toolRow.id);
-      // …and the feed shows the turn line only.
+      expect(turn.messages.map((m) => m.kind ?? "text")).toEqual(["text", "call", "result", "call", "result"]);
+      expect(turn.messages[1]!.sourceId).toBe(toolRow.id); // linked pair first (earlier stamp)
+      expect(turn.messages[3]!.sourceId).not.toBe(toolRow.id); // the adopted twin keeps ITS row's raw access
+      // …and the feed shows the turn line only — neither tool flavor.
       const ids = listCalls(s, 20).map((r) => r.id);
       expect(ids).toContain(promptRow.id);
       expect(ids).not.toContain(toolRow.id);
+      expect(ids.length).toBe(1);
     });
   }, 15_000);
 
