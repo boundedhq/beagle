@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync as mkdirSyncDetect, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, cmdUninstall, collapseClaudeSettings, countPossibleLeaksSince, detectLine, interpretAskAnswer, isLoopbackHookEndpoint, otelCallsArrivedSince, parseRunArgs, readCodexApiKey, resolveRunMode, runCallsArrived, watchForFirstCapture, wireCaptureLive } from "../src/cli/commands";
-import { buildRunEnv, AGENTS } from "../src/cli/agents";
+import { cmdDetect, cmdLeaks, cmdSearch, cmdShow, cmdStatus, cmdUninstall, collapseClaudeSettings, countPossibleLeaksSince, detectLine, interpretAskAnswer, isLoopbackHookEndpoint, otelCallsArrivedSince, parseRunArgs, readCodexApiKey, resolveRunMode, runCallsArrived, watchForFirstCapture, wireCaptureLive } from "../src/cli/commands";
+import { AGENT_REQUEST_URL, buildRunEnv, AGENTS } from "../src/cli/agents";
 import { Store, type CallRecord } from "../src/core/store/store";
 import { ulid } from "../src/core/store/ulid";
 
@@ -910,6 +910,60 @@ describe("beagle help / detect surfaces", () => {
     expect(detectLine("codex", "unknown")).toContain("asks once");
     // the command itself is always the plain one — no flags to memorize
     expect(detectLine("codex", "unknown")).toContain("→ beagle run codex");
+  });
+
+  test("detect separates supported agents from locally recognized unsupported ones", () => {
+    const home = mkdtempSync(join(tmpdir(), "beagle-detect-"));
+    const bin = join(home, "bin");
+    mkdirSyncDetect(bin, { recursive: true });
+    for (const name of ["opencode", "aider", "gemini", "unknown-agent"]) {
+      const p = join(bin, name);
+      writeFileSync(p, "#!/bin/sh\n");
+      chmodSync(p, 0o755);
+    }
+
+    const out = cmdDetect({ pathDirs: [bin], home, extraLocations: [] });
+    expect(out).toContain("Found 1 supported agent");
+    expect(out).toContain("→ beagle run opencode");
+    expect(out).toContain("Also found 2 recognized agents Beagle can't capture yet");
+    expect(out).toContain("aider");
+    expect(out).toContain("gemini");
+    expect(out).toContain(AGENT_REQUEST_URL);
+    expect(out).not.toContain("unknown-agent");
+  });
+
+  test("detect is helpful when only a recognized unsupported agent is present", () => {
+    const home = mkdtempSync(join(tmpdir(), "beagle-detect-"));
+    const bin = join(home, "bin");
+    mkdirSyncDetect(bin, { recursive: true });
+    writeFileSync(join(bin, "aider"), "#!/bin/sh\n", { mode: 0o755 });
+
+    const out = cmdDetect({ pathDirs: [bin], home, extraLocations: [] });
+    expect(out).toContain("Beagle found 1 recognized agent, but can't capture it yet");
+    expect(out).not.toContain("No supported agents found");
+    expect(out).toContain(AGENT_REQUEST_URL);
+  });
+
+  test("detect adds no unsupported-agent section when it recognizes none", () => {
+    const home = mkdtempSync(join(tmpdir(), "beagle-detect-"));
+    const out = cmdDetect({ pathDirs: [], home, extraLocations: [] });
+    expect(out).toContain("No supported agents found on your PATH");
+    expect(out).not.toContain("can't capture yet");
+    expect(out).not.toContain(AGENT_REQUEST_URL);
+  });
+
+  test("run gives recognized and truly unknown agents distinct refusals", () => {
+    const cli = join(import.meta.dir, "..", "src", "cli", "main.ts");
+    const recognized = Bun.spawnSync(["bun", cli, "run", "aider"]);
+    expect(recognized.exitCode).toBe(2);
+    expect(recognized.stderr.toString()).toContain("recognizes Aider, but can't capture it yet");
+    expect(recognized.stderr.toString()).not.toContain("is installed");
+    expect(recognized.stderr.toString()).toContain(AGENT_REQUEST_URL);
+
+    const unknown = Bun.spawnSync(["bun", cli, "run", "some-new-agent"]);
+    expect(unknown.exitCode).toBe(2);
+    expect(unknown.stderr.toString()).toContain("unknown agent 'some-new-agent'");
+    expect(unknown.stderr.toString()).toContain(AGENT_REQUEST_URL);
   });
 });
 

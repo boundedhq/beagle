@@ -1,6 +1,35 @@
 import { join } from "node:path";
 import { opencodeAuthMode, piProvider } from "../install/detect";
 
+export const AGENT_REQUEST_URL = "https://github.com/boundedhq/beagle/issues/154";
+
+export interface UnsupportedAgentSpec {
+  displayName: string;
+  commands: string[];
+  /** Local configuration directories that are useful evidence even when the
+   *  agent is a service rather than an interactive CLI. */
+  configDirs?: (home: string) => string[];
+  note?: string;
+}
+
+// Known agent names are deliberately separate from AGENTS: recognition must
+// never make an unsupported command runnable. Detection is local-only (PATH or
+// a configuration directory) and sends no usage signal anywhere.
+export const UNSUPPORTED_AGENTS: Record<string, UnsupportedAgentSpec> = {
+  aider: { displayName: "Aider", commands: ["aider"] },
+  gemini: { displayName: "Gemini CLI", commands: ["gemini"] },
+  copilot: { displayName: "GitHub Copilot CLI", commands: ["copilot"] },
+  amp: { displayName: "Amp", commands: ["amp"] },
+  "cursor-agent": { displayName: "Cursor Agent", commands: ["cursor-agent"] },
+  hermes: { displayName: "Hermes Agent", commands: ["hermes"] },
+  openclaw: {
+    displayName: "OpenClaw",
+    commands: ["openclaw"],
+    configDirs: (home) => [join(home, ".openclaw")],
+    note: "service capture needs a different integration",
+  },
+};
+
 // The four v1 CLI agents (R2) and their redirect knobs. claude/codex honor a
 // base-URL env var; opencode is config-driven via a Beagle-owned config file;
 // pi loads a Beagle-owned extension via its per-run `-e` flag.

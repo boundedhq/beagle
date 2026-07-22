@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChangeManifest } from "../src/install/manifest";
 import { isBeagleShim, shimScript, parseCoverageVerdict } from "../src/install/shim";
-import { claudeAuthMode, codexAuthMode, detectAgents, opencodeAuthMode, piProvider } from "../src/install/detect";
+import { claudeAuthMode, codexAuthMode, detectAgents, detectUnsupportedAgents, opencodeAuthMode, piProvider } from "../src/install/detect";
 import { AGENTS } from "../src/cli/agents";
 import { GraduationTracker } from "../src/install/graduation";
 import { detectSubscriptionFor, graduationNudge, parseWatchArgs } from "../src/cli/commands";
@@ -543,6 +543,48 @@ describe("agent detection", () => {
   test("reports nothing found cleanly", () => {
     const found = detectAgents({ pathDirs: [tmp()], extraLocations: [] });
     expect(found).toEqual([]);
+  });
+
+  test("recognizes executable unsupported agents without making them supported", () => {
+    const home = tmp();
+    const bin = join(home, "bin");
+    mkdirSync(bin, { recursive: true });
+    for (const name of ["aider", "gemini", "copilot"]) {
+      const p = join(bin, name);
+      writeFileSync(p, "#!/bin/sh\n");
+      chmodSync(p, 0o755);
+    }
+    // A bare `gh` does not prove the Copilot CLI is installed, and a stray
+    // non-executable name is not an installation.
+    writeFileSync(join(bin, "gh"), "#!/bin/sh\n", { mode: 0o755 });
+    writeFileSync(join(bin, "amp"), "not executable\n", { mode: 0o644 });
+
+    const found = detectUnsupportedAgents({ pathDirs: [bin], home });
+    expect(found.map((f) => f.agent)).toEqual(["aider", "gemini", "copilot"]);
+    expect(found.every((f) => f.evidence === "executable")).toBe(true);
+    expect(detectAgents({ pathDirs: [bin], extraLocations: [] })).toEqual([]);
+
+    const ghOnly = join(home, "gh-only");
+    mkdirSync(ghOnly);
+    writeFileSync(join(ghOnly, "gh"), "#!/bin/sh\n", { mode: 0o755 });
+    expect(detectUnsupportedAgents({ pathDirs: [ghOnly], home }).map((f) => f.agent)).not.toContain("copilot");
+  });
+
+  test("OpenClaw configuration is reported conservatively", () => {
+    const home = tmp();
+    mkdirSync(join(home, ".openclaw"));
+    expect(detectUnsupportedAgents({ pathDirs: [], home })).toEqual([
+      {
+        agent: "openclaw",
+        displayName: "OpenClaw",
+        evidence: "configuration",
+        note: "service capture needs a different integration",
+      },
+    ]);
+
+    const fileHome = tmp();
+    writeFileSync(join(fileHome, ".openclaw"), "stale file\n");
+    expect(detectUnsupportedAgents({ pathDirs: [], home: fileHome })).toEqual([]);
   });
 });
 
