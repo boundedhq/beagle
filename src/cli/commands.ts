@@ -877,6 +877,7 @@ export function cmdDetect(opts: {
   pathDirs?: string[];
   home?: string;
   extraLocations?: Array<{ agent: string; path: string }>;
+  systemApplicationsDir?: string;
 } = {}): string {
   const home = opts.home ?? homedir();
   const pathDirs = opts.pathDirs ?? pathDirsFromEnv(process.env.PATH);
@@ -884,7 +885,11 @@ export function cmdDetect(opts: {
     pathDirs,
     extraLocations: opts.extraLocations ?? knownExtraLocations(home),
   });
-  const unsupported = detectUnsupportedAgents({ pathDirs, home });
+  const unsupported = detectUnsupportedAgents({
+    pathDirs,
+    home,
+    systemApplicationsDir: opts.systemApplicationsDir ?? "/Applications",
+  });
   if (found.length === 0 && unsupported.length === 0) {
     return (
       "No supported agents found on your PATH.\n" +
@@ -911,9 +916,11 @@ export function cmdDetect(opts: {
       ? `Also found ${unsupported.length} recognized agent${unsupported.length === 1 ? "" : "s"} Beagle can't capture yet:`
       : `Beagle found ${unsupported.length} recognized agent${unsupported.length === 1 ? "" : "s"}, but can't capture ${unsupported.length === 1 ? "it" : "them"} yet:`;
     const rows = unsupported.map((item) => {
-      const evidence = item.evidence === "configuration" ? "configuration found; " : "";
+      const evidence = item.evidence === "application"
+        ? "desktop app found; "
+        : item.evidence === "configuration" ? "configuration found; " : "";
       const note = item.note ? `${item.note} — ` : "support planned — ";
-      return `  ${item.agent.padEnd(14)}${evidence}${note}request or follow: ${AGENT_REQUEST_URL}`;
+      return `  ${item.agent.padEnd(16)}${evidence}${note}request or follow: ${AGENT_REQUEST_URL}`;
     });
     sections.push(
       `${heading}\n\n${rows.join("\n")}\n\n` +

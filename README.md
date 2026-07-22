@@ -47,8 +47,11 @@ exact command it prints.
 If Beagle finds local evidence of another recognized agent it cannot capture
 yet, `detect` lists it separately with a link to the
 [agent-support vote](https://github.com/boundedhq/beagle/issues/154). Detection
-only checks your local PATH and known configuration directories; it sends
-nothing anywhere.
+only checks your local PATH and known application or configuration directories;
+it sends nothing anywhere.
+
+Desktop applications are reported separately from same-named CLIs: finding
+Claude Desktop or the Codex app does not imply their sessions are captured.
 
 `beagle run` wraps **one** session. It touches none of *your* files or
 config — captures land in Beagle's own store (`~/.local/state/beagle`), and

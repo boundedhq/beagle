@@ -921,13 +921,21 @@ describe("beagle help / detect surfaces", () => {
       writeFileSync(p, "#!/bin/sh\n");
       chmodSync(p, 0o755);
     }
+    mkdirSyncDetect(join(home, "Applications", "Claude.app"), { recursive: true });
+    mkdirSyncDetect(join(home, "Applications", "Codex.app"));
 
-    const out = cmdDetect({ pathDirs: [bin], home, extraLocations: [] });
+    const out = cmdDetect({
+      pathDirs: [bin], home, extraLocations: [], systemApplicationsDir: join(home, "system-apps"),
+    });
     expect(out).toContain("Found 1 supported agent");
     expect(out).toContain("→ beagle run opencode");
-    expect(out).toContain("Also found 2 recognized agents Beagle can't capture yet");
+    expect(out).toContain("Also found 4 recognized agents Beagle can't capture yet");
     expect(out).toContain("aider");
     expect(out).toContain("gemini");
+    expect(out).toContain("claude-desktop");
+    expect(out).toContain("codex-desktop");
+    expect(out).toContain("desktop app found");
+    expect(out).toContain("claude-desktop  desktop app found");
     expect(out).toContain(AGENT_REQUEST_URL);
     expect(out).not.toContain("unknown-agent");
   });
@@ -938,7 +946,9 @@ describe("beagle help / detect surfaces", () => {
     mkdirSyncDetect(bin, { recursive: true });
     writeFileSync(join(bin, "aider"), "#!/bin/sh\n", { mode: 0o755 });
 
-    const out = cmdDetect({ pathDirs: [bin], home, extraLocations: [] });
+    const out = cmdDetect({
+      pathDirs: [bin], home, extraLocations: [], systemApplicationsDir: join(home, "system-apps"),
+    });
     expect(out).toContain("Beagle found 1 recognized agent, but can't capture it yet");
     expect(out).not.toContain("No supported agents found");
     expect(out).toContain(AGENT_REQUEST_URL);
@@ -946,7 +956,9 @@ describe("beagle help / detect surfaces", () => {
 
   test("detect adds no unsupported-agent section when it recognizes none", () => {
     const home = mkdtempSync(join(tmpdir(), "beagle-detect-"));
-    const out = cmdDetect({ pathDirs: [], home, extraLocations: [] });
+    const out = cmdDetect({
+      pathDirs: [], home, extraLocations: [], systemApplicationsDir: join(home, "system-apps"),
+    });
     expect(out).toContain("No supported agents found on your PATH");
     expect(out).not.toContain("can't capture yet");
     expect(out).not.toContain(AGENT_REQUEST_URL);
@@ -959,6 +971,11 @@ describe("beagle help / detect surfaces", () => {
     expect(recognized.stderr.toString()).toContain("recognizes Aider, but can't capture it yet");
     expect(recognized.stderr.toString()).not.toContain("is installed");
     expect(recognized.stderr.toString()).toContain(AGENT_REQUEST_URL);
+
+    const desktop = Bun.spawnSync(["bun", cli, "run", "codex-desktop"]);
+    expect(desktop.exitCode).toBe(2);
+    expect(desktop.stderr.toString()).toContain("recognizes Codex desktop app");
+    expect(desktop.stderr.toString()).toContain("separate integration");
 
     const unknown = Bun.spawnSync(["bun", cli, "run", "some-new-agent"]);
     expect(unknown.exitCode).toBe(2);

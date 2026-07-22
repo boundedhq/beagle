@@ -559,7 +559,7 @@ describe("agent detection", () => {
     writeFileSync(join(bin, "gh"), "#!/bin/sh\n", { mode: 0o755 });
     writeFileSync(join(bin, "amp"), "not executable\n", { mode: 0o644 });
 
-    const found = detectUnsupportedAgents({ pathDirs: [bin], home });
+    const found = detectUnsupportedAgents({ pathDirs: [bin], home, systemApplicationsDir: join(home, "system-apps") });
     expect(found.map((f) => f.agent)).toEqual(["aider", "gemini", "copilot"]);
     expect(found.every((f) => f.evidence === "executable")).toBe(true);
     expect(detectAgents({ pathDirs: [bin], extraLocations: [] })).toEqual([]);
@@ -567,13 +567,17 @@ describe("agent detection", () => {
     const ghOnly = join(home, "gh-only");
     mkdirSync(ghOnly);
     writeFileSync(join(ghOnly, "gh"), "#!/bin/sh\n", { mode: 0o755 });
-    expect(detectUnsupportedAgents({ pathDirs: [ghOnly], home }).map((f) => f.agent)).not.toContain("copilot");
+    expect(detectUnsupportedAgents({
+      pathDirs: [ghOnly], home, systemApplicationsDir: join(home, "system-apps"),
+    }).map((f) => f.agent)).not.toContain("copilot");
   });
 
   test("OpenClaw configuration is reported conservatively", () => {
     const home = tmp();
     mkdirSync(join(home, ".openclaw"));
-    expect(detectUnsupportedAgents({ pathDirs: [], home })).toEqual([
+    expect(detectUnsupportedAgents({
+      pathDirs: [], home, systemApplicationsDir: join(home, "system-apps"),
+    })).toEqual([
       {
         agent: "openclaw",
         displayName: "OpenClaw",
@@ -584,7 +588,42 @@ describe("agent detection", () => {
 
     const fileHome = tmp();
     writeFileSync(join(fileHome, ".openclaw"), "stale file\n");
-    expect(detectUnsupportedAgents({ pathDirs: [], home: fileHome })).toEqual([]);
+    expect(detectUnsupportedAgents({
+      pathDirs: [], home: fileHome, systemApplicationsDir: join(fileHome, "system-apps"),
+    })).toEqual([]);
+  });
+
+  test("recognizes Claude and Codex desktop apps separately from their supported CLIs", () => {
+    const home = tmp();
+    const applications = join(home, "Applications");
+    mkdirSync(join(applications, "Claude.app"), { recursive: true });
+    mkdirSync(join(applications, "Codex.app"));
+
+    const found = detectUnsupportedAgents({
+      pathDirs: [], home, systemApplicationsDir: join(home, "system-apps"),
+    });
+    expect(found.filter((f) => f.evidence === "application")).toEqual([
+      {
+        agent: "claude-desktop",
+        displayName: "Claude Desktop",
+        evidence: "application",
+        note: "Claude Code sessions in the desktop app need a separate integration",
+      },
+      {
+        agent: "codex-desktop",
+        displayName: "Codex desktop app",
+        evidence: "application",
+        note: "desktop sessions need a separate integration",
+      },
+    ]);
+    expect(detectAgents({ pathDirs: [], extraLocations: [] })).toEqual([]);
+
+    const fileHome = tmp();
+    mkdirSync(join(fileHome, "Applications"));
+    writeFileSync(join(fileHome, "Applications", "Claude.app"), "not an app bundle\n");
+    expect(detectUnsupportedAgents({
+      pathDirs: [], home: fileHome, systemApplicationsDir: join(fileHome, "system-apps"),
+    })).toEqual([]);
   });
 });
 

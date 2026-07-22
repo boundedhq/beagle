@@ -6,6 +6,9 @@ export const AGENT_REQUEST_URL = "https://github.com/boundedhq/beagle/issues/154
 export interface UnsupportedAgentSpec {
   displayName: string;
   commands: string[];
+  /** Desktop application bundles that do not expose the supported CLI's
+   *  per-process capture controls. */
+  applications?: string[];
   /** Local configuration directories that are useful evidence even when the
    *  agent is a service rather than an interactive CLI. */
   configDirs?: (home: string) => string[];
@@ -22,6 +25,18 @@ export const UNSUPPORTED_AGENTS: Record<string, UnsupportedAgentSpec> = {
   amp: { displayName: "Amp", commands: ["amp"] },
   "cursor-agent": { displayName: "Cursor Agent", commands: ["cursor-agent"] },
   hermes: { displayName: "Hermes Agent", commands: ["hermes"] },
+  "claude-desktop": {
+    displayName: "Claude Desktop",
+    commands: [],
+    applications: ["Claude.app"],
+    note: "Claude Code sessions in the desktop app need a separate integration",
+  },
+  "codex-desktop": {
+    displayName: "Codex desktop app",
+    commands: [],
+    applications: ["Codex.app"],
+    note: "desktop sessions need a separate integration",
+  },
   openclaw: {
     displayName: "OpenClaw",
     commands: ["openclaw"],

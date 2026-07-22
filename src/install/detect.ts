@@ -158,7 +158,7 @@ export interface DetectOptions {
 export interface DetectedUnsupportedAgent {
   agent: string;
   displayName: string;
-  evidence: "executable" | "configuration";
+  evidence: "executable" | "application" | "configuration";
   note?: string;
 }
 
@@ -212,17 +212,24 @@ export function detectAgents(opts: DetectOptions): DetectedAgent[] {
 /** Recognize agents Beagle does not support yet. Like supported detection,
  *  this only inspects local PATH entries/filesystem state and never executes a
  *  candidate or makes a network request. */
-export function detectUnsupportedAgents(opts: { pathDirs: string[]; home: string }): DetectedUnsupportedAgent[] {
+export function detectUnsupportedAgents(opts: {
+  pathDirs: string[];
+  home: string;
+  systemApplicationsDir: string;
+}): DetectedUnsupportedAgent[] {
   const found: DetectedUnsupportedAgent[] = [];
   for (const [agent, spec] of Object.entries(UNSUPPORTED_AGENTS)) {
     const executable = spec.commands.some((name) =>
       opts.pathDirs.some((dir) => isRealAgentBinary(join(dir, name))));
-    const configured = !executable && spec.configDirs?.(opts.home).some(isDirectory);
-    if (!executable && !configured) continue;
+    const application = !executable && spec.applications?.some((name) =>
+      isDirectory(join(opts.home, "Applications", name)) ||
+      isDirectory(join(opts.systemApplicationsDir, name)));
+    const configured = !executable && !application && spec.configDirs?.(opts.home).some(isDirectory);
+    if (!executable && !application && !configured) continue;
     found.push({
       agent,
       displayName: spec.displayName,
-      evidence: executable ? "executable" : "configuration",
+      evidence: executable ? "executable" : application ? "application" : "configuration",
       note: spec.note,
     });
   }
