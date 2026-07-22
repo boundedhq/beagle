@@ -7,22 +7,28 @@ export const CORE_BUDGET = 2000;
 export const TRUST_PATH_BUDGET = 5000;
 
 /** Explicit audit scope for capture, parsing, scanning, redaction, persistence,
- * and alert delivery. src/core remains a separate portability boundary. */
+ * and alert delivery. src/core remains a separate portability boundary (it is
+ * also a trust-path directory, so its lines are counted once inside the trust
+ * total). */
 export const TRUST_PATH_SCOPE = {
-  directories: ["src/core/"],
-  files: [
-    "src/adapters/codex-rollout-tailer.ts",
-    "src/adapters/scan-host.ts",
-    "src/adapters/scan-worker-entry.ts",
-    "src/adapters/sqlite.ts",
-    "src/daemon/daemon.ts",
-    "src/notifier/alert-copy.ts",
-    "src/notifier/notifier.ts",
-    "src/parsers/codex-rollout.ts",
-    "src/parsers/otlp-map.ts",
-    "src/parsers/parsers.ts",
-    "src/transform/redact.ts",
+  // Whole directories that are ENTIRELY on the trust path: every non-test .ts
+  // under them is budgeted, so a newly-added file is counted automatically —
+  // no manifest edit, no silent escape past the ceiling. Same mechanism the
+  // core budget already uses for src/core/.
+  directories: [
+    "src/core/",
+    "src/adapters/", // bun:sqlite persistence, scan host/worker, rollout tailer
+    "src/notifier/", // alert delivery + copy
+    "src/parsers/", // telemetry/format parsers whose derived text is scanned + redacted
+    "src/transform/", // redact-on-capture
   ],
+  // Individually-listed files from a directory that is only PARTLY in scope.
+  // src/daemon holds daemon.ts (the capture → ingest → scan → alert orchestrator)
+  // alongside control.ts (the control-plane socket transport, deliberately out),
+  // so it can't be a whole-directory entry — a new src/daemon file must be added
+  // here consciously. These explicit files are also the deletion tripwires
+  // (missingTrustPathFiles): a rename that drops one fails CI loudly.
+  files: ["src/daemon/daemon.ts"],
 } as const;
 
 export interface LocResult {
@@ -122,6 +128,8 @@ if (import.meta.main) {
   const root = args.find((a) => !a.startsWith("--")) ?? process.cwd();
   const r = locReport(root);
   for (const f of r.perFile.sort((a, b) => b.lines - a.lines)) {
+    // core ⊆ trust path, so a core file is also trustPath — test core FIRST so
+    // it keeps the CORE label rather than being relabeled TRUST.
     const scope = f.core ? "CORE " : f.trustPath ? "TRUST" : "     ";
     console.log(`${scope} ${String(f.lines).padStart(6)}  ${f.file}`);
   }
@@ -130,16 +138,17 @@ if (import.meta.main) {
       ` · trust path: ${r.trustPath} / ${TRUST_PATH_BUDGET} budget` +
       ` · total: ${r.total}`,
   );
-  if (check && r.overCoreBudget) {
-    console.error(`FAIL: dependency-free core LOC ${r.core} exceeds the ${CORE_BUDGET} budget (R9)`);
-  }
-  if (check && r.overTrustPathBudget) {
-    console.error(`FAIL: trust-path LOC ${r.trustPath} exceeds the ${TRUST_PATH_BUDGET} budget (R9)`);
-  }
-  if (check && r.missingTrustPathFiles.length > 0) {
-    console.error(`FAIL: trust-path manifest entries are missing: ${r.missingTrustPathFiles.join(", ")}`);
-  }
-  if (check && (r.overCoreBudget || r.overTrustPathBudget || r.missingTrustPathFiles.length > 0)) {
+  // One failure predicate, stated once: every over-budget/missing condition
+  // both prints its FAIL line and gates the exit, so the two can't drift.
+  const failures: string[] = [];
+  if (r.overCoreBudget)
+    failures.push(`dependency-free core LOC ${r.core} exceeds the ${CORE_BUDGET} budget (R9)`);
+  if (r.overTrustPathBudget)
+    failures.push(`trust-path LOC ${r.trustPath} exceeds the ${TRUST_PATH_BUDGET} budget (R9)`);
+  if (r.missingTrustPathFiles.length > 0)
+    failures.push(`trust-path manifest entries are missing: ${r.missingTrustPathFiles.join(", ")}`);
+  if (check && failures.length > 0) {
+    for (const msg of failures) console.error(`FAIL: ${msg}`);
     process.exit(1);
   }
 }

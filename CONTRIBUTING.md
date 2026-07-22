@@ -37,12 +37,18 @@ dev, just `unwatch` before switching back to a release binary.)
 Most of these have mechanical teeth — a lint script, the LOC checker, or a
 pin test; where one doesn't, review holds the line:
 
-1. **The core LOC budget is a feature.** `src/core/` (the audited security
-   path) must stay ≤ 2,000 lines (`bun run loc:check`); it sits around 1,550
-   today. The ceiling is a published, CI-enforced trust property — "small
-   enough to read in one sitting" — so spend the headroom deliberately:
-   prefer carving something non-security out of core to growing it, and
-   don't treat the slack as free.
+1. **The LOC budgets are a feature.** `bun run loc:check` enforces two nested
+   ceilings and fails if either is exceeded — or if a listed manifest file goes
+   missing: the dependency-free runtime core (`src/core/`, ≤ 2,000 lines,
+   stdlib-only) and the wider capture-to-alert trust path (`TRUST_PATH_SCOPE` in
+   `scripts/loc-report.ts`, ≤ 5,000 lines, counting the core once inside it).
+   `src/core/` is the portability boundary, **not** the whole security-audit
+   scope — that is the trust path (daemon ingestion, parsers, redact-on-capture,
+   scanner hosting, persistence adapters, rollout capture, alert delivery). The
+   ceilings are published, CI-enforced trust properties — "small enough to read
+   in one sitting" — so spend the headroom deliberately: prefer carving
+   something out of a budgeted path to growing it, and don't treat the slack as
+   free.
 2. **Core is stdlib-only.** `scripts/lint-bun-imports.ts` bans `bun:*`
    imports everywhere in `src/` outside `src/adapters/` — Bun-specific
    surface lives in adapters only. The rest of the rule — no third-party

@@ -18,7 +18,7 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: bun:* import lint (core stays runtime-portable)
         run: bun run lint
-      - name: Core LOC budget (R9, ≤2000)
+      - name: LOC budgets (R9 — core ≤2000, trust path ≤5000, manifest intact)
         run: bun run loc:check
       - name: Typecheck
         run: bunx tsc --noEmit

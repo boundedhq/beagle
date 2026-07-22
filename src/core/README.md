@@ -7,11 +7,13 @@ Bun-specific imports (`bun:*`) are forbidden here — they live in
 
 This is a portability and dependency boundary, not the complete security
 audit scope. The capture-to-alert trust path also includes daemon ingestion,
-parsers, redaction, scanner hosting, persistence adapters, rollout capture,
-and notification delivery. Its exact file manifest and separate ≤5,000-LOC
-gate are [`TRUST_PATH_SCOPE`](../../scripts/loc-report.ts).
+parsers, redact-on-capture, scanner hosting, persistence adapters, rollout
+capture, and notification delivery. Its exact file manifest and separate
+≤5,000-LOC gate are [`TRUST_PATH_SCOPE`](../../scripts/loc-report.ts).
 
-Planned modules (design §2):
+Original module plan (design §2 — the shipped tree has since added `fs/`,
+`net/`, and top-level files; run `bun run loc` for the current inventory and
+per-file counts):
 
 | dir | responsibility | ~LOC |
 |---|---|---|
