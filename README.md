@@ -25,7 +25,7 @@ beagle detect
 ```
 
 ```
-Found 4 agents — to capture one session, run the command shown:
+Found 4 supported agents — to capture one session, run the command shown:
 
   claude    → beagle run claude
               signed in with a subscription — captured via the agent's own usage report
@@ -43,6 +43,15 @@ That's this machine — Claude Code and Codex happen to be signed in with a
 subscription here; yours may say *"captured on the wire"* instead (the
 difference is explained under **Capture modes**). Either way, you run the
 exact command it prints.
+
+If Beagle finds local evidence of another recognized agent it cannot capture
+yet, `detect` lists it separately with a link to the
+[agent-support vote](https://github.com/boundedhq/beagle/issues/154). Detection
+only checks your local PATH and known application or configuration directories;
+it sends nothing anywhere.
+
+Desktop applications are reported separately from same-named CLIs: finding
+Claude Desktop or the Codex app does not imply their sessions are captured.
 
 `beagle run` wraps **one** session. It touches none of *your* files or
 config — captures land in Beagle's own store (`~/.local/state/beagle`), and
@@ -204,7 +213,7 @@ What Beagle is **not**:
 ## Commands
 
 ```sh
-beagle detect              # find your agents and the command for each
+beagle detect              # find supported agents and recognized coverage gaps
 beagle run <agent>         # capture one session; nothing changed on your system
 beagle watch <agent>       # make that agent always-on (guided; asks before each change)
 beagle unwatch [<agent>]   # stop watching; restores your setup

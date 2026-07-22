@@ -5,7 +5,7 @@ import {
   accessSync, constants as fsConstants, existsSync, readFileSync, statSync,
 } from "node:fs";
 import { join } from "node:path";
-import { AGENTS } from "../cli/agents";
+import { AGENTS, UNSUPPORTED_AGENTS } from "../cli/agents";
 import { isBeagleShim } from "./shim";
 
 // How opencode's openai provider is signed in. Its ChatGPT-plan OAuth login
@@ -155,11 +155,39 @@ export interface DetectOptions {
   extraLocations: Array<{ agent: string; path: string }>;
 }
 
+export interface DetectedUnsupportedAgent {
+  agent: string;
+  displayName: string;
+  evidence: "executable" | "application" | "configuration";
+  note?: string;
+}
+
 function isExecutable(path: string): boolean {
   try {
     if (!statSync(path).isFile()) return false;
     accessSync(path, fsConstants.X_OK);
     return true;
+  } catch {
+    return false;
+  }
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function isApplicationBundle(root: string, app: { name: string; bundleId: string }): boolean {
+  const bundle = join(root, app.name);
+  const info = join(bundle, "Contents", "Info.plist");
+  try {
+    if (!statSync(bundle).isDirectory() || !statSync(info).isFile()) return false;
+    // Both XML and binary plists retain the bundle identifier bytes. Checking
+    // the marker avoids executing the app (or a platform-specific plist tool).
+    return readFileSync(info).includes(Buffer.from(app.bundleId));
   } catch {
     return false;
   }
@@ -192,6 +220,35 @@ export function detectAgents(opts: DetectOptions): DetectedAgent[] {
     path,
     runCommand: `beagle run ${agent}`,
   }));
+}
+
+/** Recognize agents Beagle does not support yet. Like supported detection,
+ *  this only inspects local PATH entries/filesystem state and never executes a
+ *  candidate or makes a network request. */
+export function detectUnsupportedAgents(opts: {
+  pathDirs: string[];
+  home: string;
+  systemApplicationsDir: string;
+  xdgDataHome?: string;
+}): DetectedUnsupportedAgent[] {
+  const found: DetectedUnsupportedAgent[] = [];
+  for (const [agent, spec] of Object.entries(UNSUPPORTED_AGENTS)) {
+    const executable = spec.commands.some((name) =>
+      opts.pathDirs.some((dir) => isRealAgentBinary(join(dir, name)))) ||
+      spec.executablePaths?.(opts.home, opts.xdgDataHome).some(isRealAgentBinary) === true;
+    const application = !executable && spec.applications?.some((app) =>
+      isApplicationBundle(join(opts.home, "Applications"), app) ||
+      isApplicationBundle(opts.systemApplicationsDir, app));
+    const configured = !executable && !application && spec.configDirs?.(opts.home).some(isDirectory);
+    if (!executable && !application && !configured) continue;
+    found.push({
+      agent,
+      displayName: spec.displayName,
+      evidence: executable ? "executable" : application ? "application" : "configuration",
+      note: spec.note,
+    });
+  }
+  return found;
 }
 
 export function pathDirsFromEnv(pathEnv: string | undefined): string[] {

@@ -10,7 +10,7 @@ import { loadJsonFile } from "../core/fs/durable";
 import { controlRequest, openLease } from "../daemon/control";
 import { Notifier, stripControlChars } from "../notifier/notifier";
 import { GraduationTracker } from "../install/graduation";
-import { claudeAuthMode, codexAuthMode, detectAgents, knownExtraLocations, pathDirsFromEnv } from "../install/detect";
+import { claudeAuthMode, codexAuthMode, detectAgents, detectUnsupportedAgents, knownExtraLocations, pathDirsFromEnv } from "../install/detect";
 import { watchAgent, unwatchAgent, type WatchEnv, type WatchModeRequest } from "../install/watch";
 import { ChangeManifest } from "../install/manifest";
 import { osServiceRunner, servicePlan, serviceStateDir, type ServiceKind, type ServiceRunner } from "../install/service";
@@ -22,7 +22,7 @@ import { clampRedacted } from "../transform/redact";
 import { buildCodexOtelArgs, buildCodexOtelEnv, buildHookSettings, buildOtelEnv, mergeHookIntoSettings } from "../parsers/otlp-map";
 import { codexSessionsRoot } from "../adapters/codex-rollout-tailer";
 import { buildExtensionRedirect, buildRedirectConfig, readFirstConfig, writeRedirectConfig, writeRedirectExtension } from "../install/config-redirect";
-import { AGENTS, buildRunEnv, runBaseUrl } from "./agents";
+import { AGENT_REQUEST_URL, AGENTS, UNSUPPORTED_AGENTS, buildRunEnv, runBaseUrl } from "./agents";
 import { BEAGLE_VERSION } from "../core/version";
 
 // Everything printed by these commands can embed traffic-derived text
@@ -873,12 +873,26 @@ export function detectLine(agent: string, auth: "api-key" | "subscription" | "un
   return detectRow(agent, how);
 }
 
-export function cmdDetect(): string {
+export function cmdDetect(opts: {
+  pathDirs?: string[];
+  home?: string;
+  extraLocations?: Array<{ agent: string; path: string }>;
+  systemApplicationsDir?: string;
+  xdgDataHome?: string;
+} = {}): string {
+  const home = opts.home ?? homedir();
+  const pathDirs = opts.pathDirs ?? pathDirsFromEnv(process.env.PATH);
   const found = detectAgents({
-    pathDirs: pathDirsFromEnv(process.env.PATH),
-    extraLocations: knownExtraLocations(homedir()),
+    pathDirs,
+    extraLocations: opts.extraLocations ?? knownExtraLocations(home),
   });
-  if (found.length === 0) {
+  const unsupported = detectUnsupportedAgents({
+    pathDirs,
+    home,
+    systemApplicationsDir: opts.systemApplicationsDir ?? "/Applications",
+    xdgDataHome: opts.xdgDataHome ?? process.env.XDG_DATA_HOME,
+  });
+  if (found.length === 0 && unsupported.length === 0) {
     return (
       "No supported agents found on your PATH.\n" +
       `Beagle looked for: ${Object.keys(AGENTS).join(", ")} (and ~/.claude/local for Claude Code).\n` +
@@ -891,11 +905,31 @@ export function cmdDetect(): string {
     if (f.agent === "claude" || f.agent === "codex") return detectLine(f.agent, detectAuthForRun(f.agent));
     return detectRow(f.agent, "captured on the wire, full fidelity");
   });
-  return (
-    `Found ${found.length} agent${found.length === 1 ? "" : "s"} — to capture one session, run the command shown:\n\n` +
-    `${lines.join("\n")}\n\n` +
-    `To capture every session automatically:  beagle watch <agent>`
-  );
+  const sections: string[] = [];
+  if (found.length > 0) {
+    sections.push(
+      `Found ${found.length} supported agent${found.length === 1 ? "" : "s"} — to capture one session, run the command shown:\n\n` +
+      `${lines.join("\n")}\n\n` +
+      `To capture every session automatically:  beagle watch <agent>`,
+    );
+  }
+  if (unsupported.length > 0) {
+    const heading = found.length > 0
+      ? `Also found ${unsupported.length} recognized agent${unsupported.length === 1 ? "" : "s"} Beagle can't capture yet:`
+      : `Beagle found ${unsupported.length} recognized agent${unsupported.length === 1 ? "" : "s"}, but can't capture ${unsupported.length === 1 ? "it" : "them"} yet:`;
+    const rows = unsupported.map((item) => {
+      const evidence = item.evidence === "application"
+        ? "desktop app found; "
+        : item.evidence === "configuration" ? "configuration found; " : "";
+      const note = item.note ? `${item.note} — ` : "support planned — ";
+      return `  ${item.agent.padEnd(16)}${evidence}${note}request or follow: ${AGENT_REQUEST_URL}`;
+    });
+    sections.push(
+      `${heading}\n\n${rows.join("\n")}\n\n` +
+      "Contributions are welcome — see CONTRIBUTING.md.",
+    );
+  }
+  return sections.join("\n\n");
 }
 
 function buildWatchEnv(stateDir: string, yes: boolean): WatchEnv {
@@ -1337,7 +1371,21 @@ export function readCodexApiKey(codexHome: string | undefined): string | null {
 export async function cmdRun(stateDir: string, agentName: string, rawArgs: string[]): Promise<number> {
   const spec = AGENTS[agentName];
   if (!spec) {
-    console.error(`unknown agent '${agentName}' — supported: ${Object.keys(AGENTS).join(", ")}`);
+    const recognized = UNSUPPORTED_AGENTS[agentName];
+    if (recognized) {
+      const note = recognized.note ? `  ${recognized.note}.\n` : "";
+      console.error(
+        `beagle ▲ recognizes ${recognized.displayName}, but can't capture it yet.\n` +
+        note +
+        `  Request or follow support: ${AGENT_REQUEST_URL}\n` +
+        "  Contributions are welcome — see CONTRIBUTING.md if you want to help.",
+      );
+    } else {
+      console.error(
+        `unknown agent '${agentName}' — supported: ${Object.keys(AGENTS).join(", ")}\n` +
+        `Using an agent Beagle doesn't know yet? Request it at ${AGENT_REQUEST_URL}`,
+      );
+    }
     return 2;
   }
   // Mode B (R2): --telemetry watches via the agent's own OTel export instead
