@@ -583,16 +583,19 @@ describe("buildSessionTurns — Mode B folding", () => {
       ...overrides,
     });
 
-  test("codex: linked tool rows fold under their turn in rollout seq order", () => {
+  test("codex: linked tool rows fold in ROLLOUT order — seq beats inverted report stamps", () => {
     const store = Store.open(dir);
     const t0 = Date.now();
     const prompt = codexPrompt({ id: ulid(t0), tsRequest: t0 });
+    // Report stamps are COMPLETION times and invert against issue order when
+    // calls overlap (a long-running exec issued first finishes last). The
+    // rollout's seq is the authority on what the turn ran first, so c2
+    // (seq 0) renders first even though its stamp is a full second later.
     const tool1 = codexTool("c1", { id: ulid(t0 + 1000), tsRequest: t0 + 1000 });
     const tool2 = codexTool("c2", { id: ulid(t0 + 2000), tsRequest: t0 + 2000 });
     store.insertCall(prompt);
     store.insertCall(tool1);
     store.insertCall(tool2);
-    // The rollout says c2 ran FIRST (seq 0) — seq is authoritative over row ts.
     store.linkTurns("sess-1", [
       { linkKey: "call:c1", promptKey: "hashA", ordinal: 0, seq: 1 },
       { linkKey: "call:c2", promptKey: "hashA", ordinal: 0, seq: 0 },
@@ -604,7 +607,7 @@ describe("buildSessionTurns — Mode B folding", () => {
     expect(turn.responseText).toBe("the stitched answer");
     expect(turn.messages.map((m) => [m.kind ?? "user", m.callId ?? "-"])).toEqual([
       ["user", "-"],
-      ["call", "c2"], ["result", "c2"], // seq 0 first
+      ["call", "c2"], ["result", "c2"], // rollout seq 0 first, stamps notwithstanding
       ["call", "c1"], ["result", "c1"],
     ]);
     // Folding must never make the tool rows' own detail unreachable.
@@ -612,15 +615,74 @@ describe("buildSessionTurns — Mode B folding", () => {
     store.close();
   });
 
-  test("an UNLINKED tool row stays a standalone turn — folding degrades, never hides", () => {
+  test("an UNLINKED tool row is adopted by TIME into the turn that was open", () => {
+    // The twin-report case: codex reports each execution twice, and the inner
+    // event's id is one the rollout never names — no link can exist. Time is
+    // sound within a session (turns are sequential), so the row folds under
+    // the last turn at or before its stamp instead of straggling after the
+    // answer as an orphan.
     const store = Store.open(dir);
     const t0 = Date.now();
     store.insertCall(codexPrompt({ id: ulid(t0), tsRequest: t0 }));
     store.insertCall(codexTool("c9", { id: ulid(t0 + 1000), tsRequest: t0 + 1000 }));
-    // no linkTurns — rollout lagging or absent
+    // no linkTurns — rollout lagging, absent, or an id it never names
+    const view = buildSessionTurns(store, "sess-1");
+    expect(view.turns.length).toBe(1);
+    expect(view.turns[0]!.messages.map((m) => m.kind ?? "user")).toEqual(["user", "call", "result"]);
+    store.close();
+  });
+
+  test("a tool row BEFORE any turn row stays standalone — never guessed forward", () => {
+    const store = Store.open(dir);
+    const t0 = Date.now();
+    store.insertCall(codexTool("c0", { id: ulid(t0 - 5000), tsRequest: t0 - 5000 }));
+    store.insertCall(codexPrompt({ id: ulid(t0), tsRequest: t0 }));
     const view = buildSessionTurns(store, "sess-1");
     expect(view.turns.length).toBe(2);
-    expect(view.turns[1]!.messages.map((m) => m.kind)).toEqual(["call", "result"]);
+    expect(view.turns[0]!.messages.map((m) => m.kind)).toEqual(["call", "result"]);
+    store.close();
+  });
+
+  test("a twin-report inner row interleaves BESIDE its linked harness pair, not after everything", () => {
+    // Turn: prompt → exec c1 (linked, seq 0) with its inner twin one ms later
+    // (internal id, unlinked) → exec c2 (linked, seq 1) two seconds on. The
+    // twin must land right after c1's pair and before c2's — ts-primary
+    // ordering is what makes that happen; seq-primary parked every adopted
+    // row at the tail.
+    const store = Store.open(dir);
+    const t0 = Date.now();
+    const prompt = codexPrompt({ id: ulid(t0), tsRequest: t0 });
+    const harness1 = codexTool("c1", { id: ulid(t0 + 1000), tsRequest: t0 + 1000 });
+    const inner1 = codexTool("exec-uuid-1", {
+      id: ulid(t0 + 1001), tsRequest: t0 + 1001,
+      endpoint: "otel:codex:tool_result:exec_command",
+    });
+    const harness2 = codexTool("c2", { id: ulid(t0 + 3000), tsRequest: t0 + 3000 });
+    for (const c of [prompt, harness1, inner1, harness2]) store.insertCall(c);
+    store.linkTurns("sess-1", [
+      { linkKey: "call:c1", promptKey: "hashA", ordinal: 0, seq: 0 },
+      { linkKey: "call:c2", promptKey: "hashA", ordinal: 0, seq: 1 },
+    ]);
+    const view = buildSessionTurns(store, "sess-1");
+    expect(view.turns.length).toBe(1);
+    expect(view.turns[0]!.messages.map((m) => m.callId ?? "user")).toEqual([
+      "user",
+      "c1", "c1",
+      "exec-uuid-1", "exec-uuid-1", // the twin, beside its pair
+      "c2", "c2",
+    ]);
+    // A second turn bounds adoption: an inner row after prompt2 goes THERE.
+    const prompt2 = codexPrompt({ id: ulid(t0 + 10_000), tsRequest: t0 + 10_000, promptKey: "hashB" });
+    const inner2 = codexTool("exec-uuid-2", {
+      id: ulid(t0 + 11_000), tsRequest: t0 + 11_000,
+      endpoint: "otel:codex:tool_result:exec_command",
+    });
+    store.insertCall(prompt2);
+    store.insertCall(inner2);
+    const view2 = buildSessionTurns(store, "sess-1");
+    expect(view2.turns.length).toBe(2);
+    expect(view2.turns[1]!.id).toBe(prompt2.id);
+    expect(view2.turns[1]!.messages.map((m) => m.kind ?? "user")).toEqual(["user", "call", "result"]);
     store.close();
   });
 
@@ -686,6 +748,73 @@ describe("buildSessionTurns — Mode B folding", () => {
       "user:text", "Read:call", "exec:call", "exec:result", "Bash:call",
     ]);
     expect(turn.messages.at(-1)!.sourceId).toBe(partial.id);
+    store.close();
+  });
+
+  test("adoption never lands on a merged-away partial — cards and leaks survive on the real turn", () => {
+    // The vanish bug: turn row + same-prompt-id batch partial + an UNLINKED
+    // hook row stamped after the partial. Anchoring on the partial appended
+    // the hook cards to a turn the fold then dropped — the captured content
+    // (and its leak highlight) appeared NOWHERE, while the feed hid the row
+    // too. Anchors are now surviving turn rows only.
+    const store = Store.open(dir);
+    const t0 = Date.now();
+    const turnRow = call({
+      source: "otel", endpoint: "otel:claude_code.turn", agent: "claude",
+      promptKey: "prompt-uuid-v", displayMessages: [{ role: "user", content: "read my creds" }],
+      requestBody: enc("read my creds"), responseBody: enc("done"),
+      id: ulid(t0), tsRequest: t0,
+    });
+    const partial = call({
+      source: "otel", endpoint: "otel:claude_code.turn", agent: "claude",
+      promptKey: "prompt-uuid-v",
+      displayMessages: [{ role: "tool", content: "Read: {}", tool: "Read", kind: "call" }],
+      requestBody: enc("Read: {}"), responseBody: null, tsResponse: undefined,
+      id: ulid(t0 + 900), tsRequest: t0 + 900,
+    });
+    const secret = "AKIAZQ3DRSTUVWXY2345";
+    const hookBody = `Read\n{"file_path":"/c"}\n${secret}`;
+    const hook = call({
+      source: "otel", endpoint: "otel:tool_output:Read", agent: "claude",
+      promptKey: undefined,
+      displayMessages: toolCards(undefined, '{"file_path":"/c"}', secret),
+      requestBody: enc(hookBody), responseBody: null, tsResponse: undefined,
+      id: ulid(t0 + 1500), tsRequest: t0 + 1500,
+    });
+    for (const c of [turnRow, partial, hook]) store.insertCall(c);
+    store.upsertLeakEvent({
+      fingerprint: "fp-vanish", sessionId: "sess-1", detector: "aws-access-key-id",
+      secretType: "aws-access-key-id", severity: "high", confidenceTier: "structured",
+      destination: "anthropic", callId: hook.id, ts: t0 + 1500,
+      spanStart: hookBody.indexOf(secret), spanEnd: hookBody.indexOf(secret) + secret.length,
+    });
+    // no linkTurns for the hook row — the exact population that vanished
+    const view = buildSessionTurns(store, "sess-1");
+    expect(view.turns.length).toBe(1);
+    const turn = view.turns[0]!;
+    expect(turn.id).toBe(turnRow.id);
+    // The hook row's cards are ON the surviving turn…
+    expect(turn.messages.filter((m) => m.sourceId === hook.id).map((m) => m.kind)).toEqual(["call", "result"]);
+    // …and so is its leak (R7: the highlight must not vanish with the partial).
+    expect(turn.leaks.some((l) => l.value === secret)).toBe(true);
+    store.close();
+  });
+
+  test("a keyless turn row still anchors adoption — tools never skip past a visible turn", () => {
+    // A turn row can land with NULL prompt_key (older client, malformed
+    // prompt record). It can't be a link target, but it IS a turn on screen —
+    // adoption must stop there, not file its tools under the previous turn.
+    const store = Store.open(dir);
+    const t0 = Date.now();
+    const turnA = codexPrompt({ id: ulid(t0), tsRequest: t0 });
+    const keylessB = codexPrompt({ id: ulid(t0 + 10_000), tsRequest: t0 + 10_000, promptKey: undefined });
+    const tool = codexTool("exec-uuid-k", { id: ulid(t0 + 11_000), tsRequest: t0 + 11_000 });
+    for (const c of [turnA, keylessB, tool]) store.insertCall(c);
+    const view = buildSessionTurns(store, "sess-1");
+    expect(view.turns.length).toBe(2);
+    expect(view.turns[0]!.messages.length).toBe(1); // turn A untouched
+    expect(view.turns[1]!.id).toBe(keylessB.id);
+    expect(view.turns[1]!.messages.map((m) => m.kind ?? "user")).toEqual(["user", "call", "result"]);
     store.close();
   });
 

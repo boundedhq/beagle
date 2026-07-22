@@ -645,7 +645,7 @@ function SessionTranscript({ sessionId, row, refresh, onBack, onPurged }) {
               ${i === turns.length - 1 && !view.truncated && (t.responseCalls ?? []).length > 0 &&
               html`<div class="turn-note">results not captured yet (session ended or still running)</div>`}
               ${leakNotVisible(t) &&
-              html`<div class="turn-note warn">a detected secret is not visible in the readable cards — open ▸ details → raw</div>`}
+              html`<div class="turn-note warn">a detected secret is not visible in the readable cards — open ▸ details → raw (for a folded tool card, its own ▸ call detail)</div>`}
               ${t.messages.length === 0 && !t.responseText && (t.responseCalls ?? []).length === 0 &&
               html`<div class="turn-empty">(no parsed content — open details for raw bytes)</div>`}
             </div>

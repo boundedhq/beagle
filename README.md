@@ -141,9 +141,12 @@ prompt, then every tool call as a command/output pair folded under it, then
 the answer (for Codex, recovered from the session log Codex itself writes and
 stitched on a beat later). The calls feed reads one line per turn, verb-first —
 ``ran `sed -n '1,240p' SKILL.md` → …`` — instead of a row of exec noise per
-tool. Grouping is cosmetic and fails open: every tool execution is still its
-own captured, scanned call underneath (each folded card links to its raw
-bytes), a row whose linkage hasn't arrived yet just shows standalone — and a
+tool. (Codex reports each execution twice — a harness step and the inner
+tool — so a folded codex turn shows both, the way Codex's own UI lists both
+steps.) Grouping is cosmetic and fails open: every tool execution is still
+its own captured, scanned call underneath (each folded card links to its raw
+bytes), a row the linkage can't name is grouped by time under the turn that
+was open, one that can't be placed at all shows standalone — and a
 tool call that leaked a secret always keeps its own line in the feed. The one
 gap wire capture doesn't have: Codex encrypts its reasoning, so what the model
 was thinking between tools is the one thing a telemetry transcript can't show.
