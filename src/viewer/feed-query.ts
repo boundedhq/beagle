@@ -159,7 +159,9 @@ function snip(
     // can't be red-marked (the client highlights by whole-value match), so a
     // straddled one widens the window instead. One pass per value — the
     // residual (a value straddling another value's extension) is vanishing,
-    // and the row's leak chip + the expanded detail still carry it.
+    // and the row's leak chip + the expanded detail still carry it. Same
+    // accepted residual for a value holding a whitespace RUN, which display
+    // collapse would alter: it won't red-mark in the snippet, chip/detail do.
     for (const v of leakValues) {
       for (let j = content.indexOf(v); j !== -1 && j < end; j = content.indexOf(v, j + 1)) {
         if (j < start && j + v.length > start) start = j;

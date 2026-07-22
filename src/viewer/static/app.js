@@ -973,10 +973,12 @@ function Chip({ label, body }) {
 // pre/post render through Highlighted — same invariants as every body: text
 // nodes only (§6.8), and a detected secret in the context gets its red mark
 // (R7 — the server widens windows so a value is never half-shown). The match
-// itself IS the searched term, marked directly.
+// segment ALSO renders through Highlighted: when the searched term is itself
+// the leaked secret (the "did my key leave?" search), the red leak mark must
+// win inside the amber find mark, exactly as it does in every body.
 function Snippet({ s, leaks, term }) {
   return html`<div class="sv-snippet">
-    <${Highlighted} text=${s.pre} leaks=${leaks} find=${term} /><mark class="find">${s.match}</mark><${Highlighted} text=${s.post} leaks=${leaks} find=${term} />
+    <${Highlighted} text=${s.pre} leaks=${leaks} find=${term} /><mark class="find"><${Highlighted} text=${s.match} leaks=${leaks} /></mark><${Highlighted} text=${s.post} leaks=${leaks} find=${term} />
   </div>`;
 }
 
