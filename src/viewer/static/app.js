@@ -861,7 +861,7 @@ function Detail({ id, refresh, onSession, find }) {
   // transcript's legacy fallback). The raw-bytes toggle still shows true bytes.
   const messages = detail.messages?.length
     ? detail.messages
-    : detail.source === "otel" && detail.requestRaw
+    : detail.source === "otel" && !detail.requestStructured && detail.requestRaw
       ? [{ role: "request", content: detail.requestRaw }]
       : [];
   const system = detail.system;
@@ -891,9 +891,12 @@ function Detail({ id, refresh, onSession, find }) {
     (m) => hasFind(String(m.content ?? ""), find) || hasFind(String(m.detail ?? ""), find),
   );
   const showOlderInline = (newFrom == null && context.length <= 3) || leakInOlder || findInOlder;
-  // Nothing structured → raw is the only honest view; don't show an empty
-  // timeline with a toggle the user has to discover.
-  const hasStructure = messages.length > 0 || system != null;
+  // Nothing structured on EITHER side → raw is the only honest view; don't
+  // show an empty timeline with a toggle the user has to discover. A Claude
+  // turn may legitimately have no request cards after its tool invocation is
+  // placed on the response side, so response structure counts here too.
+  const hasStructure = messages.length > 0 || system != null ||
+    detail.responseText != null || responseCalls.length > 0;
   const showRaw = raw || !hasStructure;
   // What the readable view actually SHOWS inline: the messages (earlier ones
   // holding a leak are force-shown, above), each card's detail line (ToolCard

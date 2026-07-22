@@ -7,7 +7,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { Store } from "../core/store/store";
 import { listenReady } from "../core/net/listen";
 import { feedStats, listCalls, listLeakEvents, searchCalls } from "./feed-query";
-import { buildDetail, detailLeaks, detailMessages, leakSpansFor } from "./detail";
+import { buildCallDetail, detailLeaks, detailMessages, leakSpansFor } from "./detail";
 import { buildSessionTurns, listSessions, wireDeltaIndex } from "./session-view";
 // Statics embedded at build time (ships-what's-in-repo, and the compiled
 // binary has no filesystem view of the repo).
@@ -256,7 +256,7 @@ export class ViewerServer {
         if (!call) return this.json(res, 404, { error: "no such call" });
         // Reassemble the response, structure the request, and recover the
         // secret strings to highlight (detail.ts, UI fixes 1 + 2).
-        const detail = buildDetail(call, leakSpansFor(store, call.id));
+        const detail = buildCallDetail(call, leakSpansFor(store, call.id));
         if (call.source === "wire") {
           // Where does NEW content start? Diff against the nearest previous
           // wire call that parses (≤5 back — beyond that, no truthful claim,
