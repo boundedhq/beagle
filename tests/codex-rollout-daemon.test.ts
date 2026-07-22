@@ -338,7 +338,7 @@ describe("Codex rollout response capture end-to-end", () => {
     });
   }, 15_000);
 
-  test("rollout links fold the live tool rows under their turn; the feed reads one line", async () => {
+  test("rollout links sequence live tool rows into Pi-like calls; feed rows stay visible", async () => {
     // The full shape: the prompt and the tool execution arrive LIVE over OTLP
     // (scanned/alerted in real time, untouched by this feature); the rollout
     // then supplies the answer (stitched, shipped earlier) and the call_id →
@@ -356,7 +356,7 @@ describe("Codex rollout response capture end-to-end", () => {
     await post(codexPrompt(conv, prompt, t0 - 5000));
     await post(codexToolResult(conv, "call-f1", '{"cmd":"ls"}', "README.md", t0 - 3000));
     // codex double-reports each execution: the inner event carries an internal
-    // id the rollout never names — no link can exist, so it must fold by TIME.
+    // id the rollout never names — no link can exist, so it must sequence by TIME.
     await post(codexToolResult(conv, "exec-3f6b1255-inner", '{"cmd":"ls"}', "README.md (inner view)", t0 - 2900));
 
     // The answer stitches and the links land (order between them is free).
@@ -376,21 +376,25 @@ describe("Codex rollout response capture end-to-end", () => {
       // The tool row is intact and live-captured — its summary reads the command…
       expect(toolRow.summary).toBe("ran `ls` → README.md");
       expect(toolRow.promptKey).toBeUndefined(); // never an attach target
-      // …the transcript folds the session to ONE turn: prompt → cards →
-      // answer, the link-less inner twin adopted by time beside its pair…
+      // …the transcript uses Pi-like boundaries: response asks for a tool,
+      // the next request carries its result. The link-less inner twin follows
+      // its harness sibling by time, and the final answer lands last.
       const view = buildSessionTurns(s, promptRow.sessionId);
-      expect(view.turns.length).toBe(1);
-      const turn = view.turns[0]!;
-      expect(turn.id).toBe(promptRow.id);
-      expect(turn.responseText).toBe("One file: README.md");
-      expect(turn.messages.map((m) => m.kind ?? "text")).toEqual(["text", "call", "result", "call", "result"]);
-      expect(turn.messages[1]!.sourceId).toBe(toolRow.id); // linked pair first (earlier stamp)
-      expect(turn.messages[3]!.sourceId).not.toBe(toolRow.id); // the adopted twin keeps ITS row's raw access
-      // …and the feed shows the turn line only — neither tool flavor.
+      expect(view.turns.length).toBe(3);
+      expect(view.turns[0]!.id).toBe(promptRow.id);
+      expect(view.turns[0]!.messages.map((m) => m.kind ?? "text")).toEqual(["text"]);
+      expect(view.turns[0]!.responseCalls).toHaveLength(1);
+      expect(view.turns[1]!.messages.map((m) => m.kind)).toEqual(["result"]);
+      expect(view.turns[1]!.messages[0]!.sourceId).toBe(toolRow.id);
+      expect(view.turns[1]!.responseCalls).toHaveLength(1);
+      expect(view.turns[2]!.messages.map((m) => m.kind)).toEqual(["result"]);
+      expect(view.turns[2]!.messages[0]!.sourceId).not.toBe(toolRow.id);
+      expect(view.turns[2]!.responseText).toBe("One file: README.md");
+      // …and every raw capture remains in the feed after the rollout update.
       const ids = listCalls(s, 20).map((r) => r.id);
       expect(ids).toContain(promptRow.id);
-      expect(ids).not.toContain(toolRow.id);
-      expect(ids.length).toBe(1);
+      expect(ids).toContain(toolRow.id);
+      expect(ids.length).toBe(3);
     });
   }, 15_000);
 

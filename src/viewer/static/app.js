@@ -645,7 +645,7 @@ function SessionTranscript({ sessionId, row, refresh, onBack, onPurged }) {
               ${i === turns.length - 1 && !view.truncated && (t.responseCalls ?? []).length > 0 &&
               html`<div class="turn-note">results not captured yet (session ended or still running)</div>`}
               ${leakNotVisible(t) &&
-              html`<div class="turn-note warn">a detected secret is not visible in the readable cards — open ▸ details → raw (for a folded tool card, its own ▸ call detail)</div>`}
+              html`<div class="turn-note warn">a detected secret is not visible in the readable cards — open ▸ details → raw (for a reconstructed tool card, its own ▸ call detail)</div>`}
               ${t.messages.length === 0 && !t.responseText && (t.responseCalls ?? []).length === 0 &&
               html`<div class="turn-empty">(no parsed content — open details for raw bytes)</div>`}
             </div>
@@ -765,8 +765,8 @@ function ToolCard({ role, content, leaks, hasLeak, tool, kind, detail, hint, sou
   // from search to see exactly that text (they can still fold it away).
   const startOpen = hasLeak || content.length <= 240 || hasFind(content, find);
   const [open, setOpen] = useState(startOpen);
-  // A FOLDED card (a Mode B tool row regrouped under its turn) keeps a path to
-  // the row it came from — folding must never make captured bytes unreachable.
+  // A reconstructed subscription card keeps a path to the row it came from —
+  // sequencing must never make captured bytes unreachable.
   const [showSource, setShowSource] = useState(false);
   const isRequest = role === "request";
   // Display-only parse of the "Name: payload" convention the mappers write.
@@ -820,6 +820,7 @@ function ToolCard({ role, content, leaks, hasLeak, tool, kind, detail, hint, sou
 function ResponseCalls({ calls, leaks, find }) {
   return calls.map((c, i) => html`<${ToolCard} key=${i} role="tool" kind="call"
     tool=${c.tool} detail=${c.detail} content=${c.args ?? c.detail ?? c.tool}
+    sourceId=${c.sourceId}
     leaks=${leaks} hasLeak=${(leaks ?? []).some((l) => l.value && String(c.args ?? "").includes(l.value))}
     find=${find}
     hint="tool call from the model's response — displayed, not scanned (Beagle scans requests)" />`);

@@ -361,7 +361,7 @@ export class Store {
     });
   }
 
-  /** Record which turn some Mode B tool rows belong to (turn_link — see the
+  /** Record which turn some Mode B tool rows follow (turn_link — see the
    *  schema note for why this is not exchanges.prompt_key). Idempotent upsert:
    *  the codex tailer re-emits links content-addressed, and a re-delivered
    *  link must never error or duplicate. */

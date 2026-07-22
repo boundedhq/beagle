@@ -844,7 +844,7 @@ describe("Mode B tool-output capture (PostToolUse hook)", () => {
     store.close();
   });
 
-  test("a hook row carrying prompt_id folds under its claude turn; the feed reads one line", async () => {
+  test("a hook row becomes the next pending request and stays in the feed", async () => {
     const conv = "sess-fold";
     // The turn, as claude's OTel export reports it (prompt.id "prompt-x" — the
     // otlpBody fixture's stamp — plus the assistant response)…
@@ -872,18 +872,20 @@ describe("Mode B tool-output capture (PostToolUse hook)", () => {
     expect(hookRow.promptKey).toBeUndefined();
     expect(store.queryAll(`SELECT link_key, prompt_key FROM turn_link WHERE session_id=?`, [hookRow.sessionId]))
       .toEqual([{ link_key: `row:${hookRow.id}`, prompt_key: "prompt-x" }]);
-    // The transcript folds to ONE turn: prompt → Read call/result cards → answer.
+    // Pi-like boundary: the reported response asks for Read; its hook output
+    // is the next pending request because no later model response arrived.
     const view = buildSessionTurns(store, hookRow.sessionId);
-    expect(view.turns.length).toBe(1);
-    const turn = view.turns[0]!;
-    expect(turn.responseText).toBe("here they are");
-    expect(turn.messages.map((m) => m.kind ?? "text")).toEqual(["text", "call", "result"]);
-    expect(turn.messages.at(-1)!.sourceId).toBe(hookRow.id); // raw stays reachable
-    // The feed shows the turn line, not the tool row — and the tool row's
-    // summary (were it ever shown, e.g. on a leak) reads the command.
+    expect(view.turns.length).toBe(2);
+    expect(view.turns[0]!.responseText).toBe("here they are");
+    expect(view.turns[0]!.messages.map((m) => m.kind ?? "text")).toEqual(["text"]);
+    expect(view.turns[0]!.responseCalls.map((c) => c.tool)).toEqual(["Read"]);
+    expect(view.turns[1]!.id).toBe(hookRow.id);
+    expect(view.turns[1]!.messages.map((m) => m.kind)).toEqual(["result"]);
+    expect(view.turns[1]!.messages[0]!.sourceId).toBe(hookRow.id); // raw stays reachable
+    // The raw-capture feed is stable: the hook row remains after refetch.
     const feed = listCalls(store, 20);
-    expect(feed.map((r) => r.id)).toContain(turn.id);
-    expect(feed.map((r) => r.id)).not.toContain(hookRow.id);
+    expect(feed.map((r) => r.id)).toContain(view.turns[0]!.id);
+    expect(feed.map((r) => r.id)).toContain(hookRow.id);
     expect(hookRow.summary).toBe("read MEMORY.md → the memory file body");
     store.close();
   });

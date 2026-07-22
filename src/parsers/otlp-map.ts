@@ -524,8 +524,8 @@ function mapCodexRecords(records: OtlpRecord[]): OtelCall[] {
         // `exec_command`/`mcp__*` (internal id) — with no shared key, and the
         // pair can straddle OTLP batches. Any correlation here is a
         // time+content guess, and a wrong merge at capture is permanent
-        // evidence corruption in trust-path code. The viewer groups them
-        // (turn folding, time adoption) where a wrong guess costs a misplaced
+        // evidence corruption in trust-path code. The viewer sequences them
+        // (turn links, time adoption) where a wrong guess costs a misplaced
         // card that re-derives on the next render, not stored truth.
         // Both carry callId: it pairs the two cards for the viewer and, in B2,
         // links this row to the turn that issued the call. NOT `detail`: a
