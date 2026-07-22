@@ -21,7 +21,7 @@ const corpusRules = compileRules(
   loadRuleFile(readFileSync("rules/beagle-rules.json", "utf8")),
   new Uint8Array(32).fill(7),
 );
-const scanRaw = (text: string) => scan(new TextEncoder().encode(text), {}, corpusRules);
+const scanRaw = (text: string) => scan(new TextEncoder().encode(text), {}, corpusRules).findings;
 
 // fake upstream that replies with a fixed Anthropic-ish JSON body
 function fakeUpstream(replyBody?: string): Promise<{ server: Server; port: number; seen: string[] }> {
@@ -1750,6 +1750,71 @@ describe("Daemon end-to-end", () => {
       up.server.close();
     }
   });
+
+  test("a finding-cap scan is stored incomplete and withholds secrets past the cap", async () => {
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    const keys = Array.from(
+      { length: 501 },
+      (_, i) => `AKIA${i.toString(36).toUpperCase().padStart(16, "0")}`,
+    );
+    const last = keys.at(-1)!;
+
+    await sendThroughProxy(daemon.proxyPort, "run-e2e", requestBody(keys.join("\n")));
+    await captured(daemon.socketPath);
+
+    const store = Store.openReadOnly(stateDir);
+    const ex = listCalls(store, 10)[0]!;
+    expect(ex.scanState).toBe("incomplete");
+    expect(ex.summary).toBe("[REDACTION INCOMPLETE: content withheld]");
+    const full = store.getCall(ex.id)!;
+    expect(new TextDecoder().decode(full.requestBody!)).toContain("[REDACTION INCOMPLETE");
+    expect(new TextDecoder().decode(full.requestBody!)).not.toContain(last);
+    expect(store.searchLiteral(last)).toEqual([]);
+    store.close();
+  }, 20_000);
+
+  test("a response-only cap marks the withheld row incomplete, not a silent ok", async () => {
+    // Regression: only the RESPONSE body hits the cap. The request scan and the
+    // DERIVED scan are both clean (the keys sit in a non-rendered field, so they
+    // never reach respParsed.text), so scanState is set by neither line 594 nor
+    // 709. respScan.state feeds only applyCaptureRedaction — the call is withheld
+    // (heldOut) — but the wire path used to persist scanState "ok" beside that
+    // withheld body, unlike Mode B. A held-out call must never read "ok".
+    const keys = Array.from(
+      { length: 501 },
+      (_, i) => `AKIA${i.toString(36).toUpperCase().padStart(16, "0")}`,
+    );
+    const last = keys.at(-1)!;
+    // Keys in an unrendered top-level field: the raw-body scan sees all 501 (caps
+    // → respScan incomplete), but the display renders only `content`, so the
+    // derived scan stays clean and cannot mask the wire-path gap.
+    const reply = JSON.stringify({
+      model: "claude-sonnet-5",
+      content: [{ type: "text", text: "ok" }],
+      trace: keys.join(" "),
+      usage: { input_tokens: 9, output_tokens: 3 },
+    });
+    const up = await fakeUpstream(reply);
+    try {
+      await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+      await controlRequest(daemon.socketPath, {
+        cmd: "register-run",
+        args: { id: "run-respcap", agent: "claude-code", provider: "anthropic", upstream: `http://127.0.0.1:${up.port}`, authLocation: "x-api-key" },
+      });
+      await sendThroughProxy(daemon.proxyPort, "run-respcap", requestBody("benign request"));
+      await captured(daemon.socketPath);
+
+      const store = Store.openReadOnly(stateDir);
+      const ex = listCalls(store, 10)[0]!;
+      expect(ex.scanState).toBe("incomplete"); // the withheld row must NOT read a silent "ok"
+      const full = store.getCall(ex.id)!;
+      expect(new TextDecoder().decode(full.responseBody ?? new Uint8Array())).not.toContain(last);
+      expect(store.searchLiteral(last)).toEqual([]); // the capped-past secret is not indexed
+      store.close();
+    } finally {
+      up.server.close();
+    }
+  }, 20_000);
 
   test("excluded agent traffic is forwarded but never captured", async () => {
     await controlRequest(daemon.socketPath, { cmd: "set-config", args: { excludedAgents: ["claude-code"] } });

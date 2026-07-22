@@ -17,23 +17,19 @@ describe("ScanHost (worker-hosted scanner)", () => {
   test("returns findings from the worker", async () => {
     const r = await host.scan(new TextEncoder().encode('key="AKIAZQ3DRSTUVWXY2345"'), {});
     expect(r.state).toBe("ok");
+    expect(r.cappedRules).toEqual([]);
+    expect(r.probeBudgetExhausted).toBe(false);
     expect(r.findings.length).toBe(1);
     expect(r.findings[0]?.secretType).toBe("aws-access-key-id");
   });
 
-  test("the per-rule finding cap truncates silently: 500 findings, state still ok", async () => {
-    // MAX_FINDINGS_PER_RULE is a deadline backstop, not a detection limit, and
-    // hitting it is deliberately NOT a failed scan: "incomplete" is reserved
-    // for a scan whose verdict can't be trusted at all (deadline breach, dead
-    // worker), and flipping it here would hold out or withhold every
-    // pathological-but-scanned body. The cost is real and documented in the
-    // daemon: match 501 of a rule is invisible to every downstream pass, on a
-    // row that reads scanState "ok". This pins both halves of that trade —
-    // whoever changes the cap or its silence on purpose updates this test.
+  test("the per-rule finding cap reports incomplete instead of a clean verdict", async () => {
     const KEY = "AKIAZQ3DRSTUVWXY2345";
     const body = Array.from({ length: 501 }, () => KEY).join("\n");
     const r = await host.scan(new TextEncoder().encode(body), {});
-    expect(r.state).toBe("ok"); // the cap does not masquerade as a failure
+    expect(r.state).toBe("incomplete");
+    expect(r.cappedRules).toContain("aws-access-key-id");
+    expect(r.probeBudgetExhausted).toBe(false);
     expect(r.findings.length).toBe(500);
     expect(r.findings.every((f) => f.secretType === "aws-access-key-id")).toBe(true);
     // Matching is left to right, so the one dropped is exactly the 501st
@@ -44,6 +40,19 @@ describe("ScanHost (worker-hosted scanner)", () => {
     expect(r.findings.some((f) => f.start === lastAt)).toBe(false);
     for (const f of r.findings) expect(body.slice(f.start, f.end)).toBe(KEY);
   });
+
+  test("exhausting the base64 decode-probe budget reports incomplete (no finding cap)", async () => {
+    // The OTHER incomplete source: a body with more base64 candidates than the
+    // probe budget. No finding cap is hit (these decode to nothing), so this
+    // pins the `probeBudgetExhausted` disjunct of the host's state mapping on its
+    // own — dropping it would let a secret past the 65,536th blob store as "ok".
+    const benign = Buffer.from("fillerdata12").toString("base64"); // clears the entropy pre-gate, decodes to nothing any rule knows
+    const body = Array.from({ length: (1 << 16) + 1 }, () => benign).join("\n");
+    const r = await host.scan(new TextEncoder().encode(body), {});
+    expect(r.probeBudgetExhausted).toBe(true);
+    expect(r.cappedRules).toEqual([]); // no rule reached MAX_FINDINGS_PER_RULE
+    expect(r.state).toBe("incomplete");
+  }, 20_000);
 
   test("deadline breach terminates the worker and reports incomplete, then recovers", async () => {
     const evil = new ScanHost({

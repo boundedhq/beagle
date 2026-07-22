@@ -18,7 +18,7 @@ const corpusRules = compileRules(
   loadRuleFile(readFileSync("rules/beagle-rules.json", "utf8")),
   new Uint8Array(32).fill(7),
 );
-const scanRaw = (text: string) => scan(new TextEncoder().encode(text), {}, corpusRules);
+const scanRaw = (text: string) => scan(new TextEncoder().encode(text), {}, corpusRules).findings;
 
 // Claude Code's real Mode-B export (event schema, verified in the Phase-0
 // spike): a turn is a user_prompt + api_request + assistant_response sharing

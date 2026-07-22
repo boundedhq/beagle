@@ -26,6 +26,12 @@ export interface ScanCtx {
   authValue?: string;
 }
 
+export interface ScanReport {
+  findings: Finding[];
+  cappedRules: string[];
+  probeBudgetExhausted: boolean;
+}
+
 // Placeholder values that are overwhelmingly documentation, not leaks —
 // the main FP source on coding-agent traffic (R5).
 const STOPWORDS = ["example", "sample", "placeholder", "dummy", "xxxxxx", "changeme"];
@@ -279,7 +285,7 @@ export function compileRules(specs: RuleSpec[], hmacKey: Uint8Array): CompiledRu
   };
 }
 
-export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): Finding[] {
+export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): ScanReport {
   const raw = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
   const masked = maskJsonEscapes(raw);
   // Both readings of the bytes, unioned — see ESCAPE_RUN for why neither alone
@@ -294,7 +300,12 @@ export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): 
   // rule per body, and a second view silently doubling them would double what a
   // crafted body can push into suppressOverlaps below — the opposite of what a
   // deadline backstop is for.
-  const budget: ScanBudget = { probes: MAX_PROBES, perRule: new Map() };
+  const budget: ScanBudget = {
+    probes: MAX_PROBES,
+    perRule: new Map(),
+    cappedRules: new Set(),
+    probeBudgetExhausted: false,
+  };
   const findings = matchAll(raw, masked, ctx, compiled, budget);
   if (masked !== raw) {
     // Keyed dedup, not a scan of `findings` per candidate: both views can hit
@@ -306,13 +317,19 @@ export function scan(bytes: Uint8Array, ctx: ScanCtx, compiled: CompiledRules): 
       if (!seen.has(key(f))) findings.push(f);
     }
   }
-  return suppressOverlaps(findings);
+  return {
+    findings: suppressOverlaps(findings),
+    cappedRules: [...budget.cappedRules],
+    probeBudgetExhausted: budget.probeBudgetExhausted,
+  };
 }
 
 /** Per-body caps, shared by both views so each means what its name says. */
 interface ScanBudget {
   probes: number;
   perRule: Map<string, number>;
+  cappedRules: Set<string>;
+  probeBudgetExhausted: boolean;
 }
 
 // Run every rule over `text` (one view of the body), reporting spans that index
@@ -330,9 +347,9 @@ function matchAll(raw: string, text: string, ctx: ScanCtx, compiled: CompiledRul
     if (spec.keywords.length > 0 && !spec.keywords.some((k) => lower.includes(k))) continue;
     re.lastIndex = 0;
     // Decode-probe attempts are capped per body because rejected candidates
-    // don't count toward MAX_FINDINGS_PER_RULE. The cap is a deadline backstop,
-    // not a detection limit: it sits far above any realistic blob count, so a
-    // genuine wrapped secret isn't lost behind a wall of benign base64.
+    // don't count toward MAX_FINDINGS_PER_RULE. It sits far above any realistic
+    // blob count; if reached, the report is explicitly incomplete rather than
+    // claiming no wrapped secret exists behind the unchecked candidates.
     //
     // It is NOT cheap enough to ignore, which an earlier version of this note
     // claimed — it put a probe at ~0.35µs and concluded a saturated 8 MiB body
@@ -378,7 +395,12 @@ function matchAll(raw: string, text: string, ctx: ScanCtx, compiled: CompiledRul
       // in-flight cursor is never touched; probed regexes need no lastIndex
       // restore because this loop resets lastIndex before every rule's scan.
       if (spec.validators?.includes("base64-secret")) {
-        const decoded = --budget.probes >= 0 ? Buffer.from(secret, "base64").toString("utf8") : "";
+        if (budget.probes === 0) {
+          budget.probeBudgetExhausted = true;
+          continue;
+        }
+        budget.probes--;
+        const decoded = Buffer.from(secret, "base64").toString("utf8");
         if (decoded.length < 8 || STOPWORDS.some((w) => decoded.toLowerCase().includes(w)) || !compiled.rules.some(({ spec: s, re: r }) =>
           s.tier === "structured" && !s.validators?.length && ((r.lastIndex = 0), r.test(decoded)))) continue;
       }
@@ -395,6 +417,10 @@ function matchAll(raw: string, text: string, ctx: ScanCtx, compiled: CompiledRul
           authNorm !== undefined && (authNorm === secret || authNorm.includes(secret)),
       });
     }
+    // Reaching the limit stops before another re.exec can prove the rule has no
+    // unchecked tail. Conservatively report that rule as capped even when the
+    // body happened to contain exactly 500 accepted matches.
+    if (ruleFindings >= MAX_FINDINGS_PER_RULE) budget.cappedRules.add(spec.id);
     budget.perRule.set(spec.id, ruleFindings); // carries into the second view
   }
 

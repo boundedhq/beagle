@@ -11,8 +11,12 @@ const rules = compileRules(
   HMAC_KEY,
 );
 
-function scanText(text: string, authValue?: string) {
+function scanReport(text: string, authValue?: string) {
   return scan(new TextEncoder().encode(text), { authValue }, rules);
+}
+
+function scanText(text: string, authValue?: string) {
+  return scanReport(text, authValue).findings;
 }
 
 describe("structured detectors (loud tier)", () => {
@@ -233,7 +237,7 @@ describe("fingerprinting", () => {
       loadRuleFile(readFileSync("rules/beagle-rules.json", "utf8")),
       new Uint8Array(32).fill(9),
     );
-    const c = scan(new TextEncoder().encode('k="AKIAZQ3DRSTUVWXY2345"'), {}, otherKeyRules)[0]!;
+    const c = scan(new TextEncoder().encode('k="AKIAZQ3DRSTUVWXY2345"'), {}, otherKeyRules).findings[0]!;
     expect(c.fingerprint).not.toBe(a1.fingerprint);
   });
 
@@ -978,13 +982,7 @@ describe("secrets nested in tool-call arguments (R5)", () => {
   });
 });
 
-// The engine's caps are deadline backstops and both are deliberately SILENT —
-// nothing in a Finding[] says one was hit (the daemon documents the trade:
-// match 501 of a rule is invisible to every downstream pass, on a row that
-// still reads "ok"). Silent means the SEMANTICS only live here: a cap that
-// quietly became per view, or a probe budget that quietly stopped binding,
-// would pass every other test in this file.
-describe("scan caps (silent deadline backstops)", () => {
+describe("scan caps (reported deadline backstops)", () => {
   const NPM = "npm_Zx9Yw8Vu7Tt6Ss5Rr4Qq3Pp2Oo1Nn0MmLl2K";
   const BS = String.fromCharCode(92);
 
@@ -1001,7 +999,8 @@ describe("scan caps (silent deadline backstops)", () => {
     // re-matches of the plain region. After them, 501 plain occurrences (both
     // views can see those) saturate the masked view's budget on their own.
     const body = [rawOnly, rawOnly, rawOnly, ...Array.from({ length: 501 }, () => NPM)].join("\n");
-    const findings = scanText(body);
+    const result = scanReport(body);
+    const findings = result.findings;
     // budget.perRule carries between the two matchAll calls: the masked view
     // consumed all 500, so the raw view adds NOTHING — not the 501st plain
     // occurrence, and not the raw-only three. The cap is per rule PER BODY;
@@ -1015,29 +1014,33 @@ describe("scan caps (silent deadline backstops)", () => {
     // above), and the one past the cap is exactly the 501st — the last.
     expect(new Set(findings.map((f) => f.start)).size).toBe(500);
     expect(findings.some((f) => f.start === body.lastIndexOf(NPM))).toBe(false);
+    expect(result.cappedRules).toContain("npm-token");
+    expect(result.probeBudgetExhausted).toBe(false);
   });
 
   test("the base64 decode probe stops at its budget: last funded candidate decodes, the next is skipped", () => {
     // Rejected candidates never count toward the finding cap, so the probe
-    // budget (1<<16 per body) is the only thing bounding decode work — and
-    // exhausting it SKIPS the candidate, silently: a wrapped key behind a wall
-    // of benign base64 is a miss, not an "incomplete". That is the documented
-    // trade (the budget sits far above any realistic blob count; the worker
-    // deadline is the real bound) — pinned at the exact boundary so an
+    // budget (1<<16 per body) is the only thing bounding decode work. The next
+    // candidate is skipped, but exhaustion is reported so downstream state is
+    // incomplete rather than clean. The budget sits far above any realistic
+    // blob count; this is pinned at the exact boundary so an
     // off-by-one in the check, or the budget quietly ceasing to decrement,
     // fails here and nowhere else.
     const benign = Buffer.from("fillerdata12").toString("base64"); // 16 chars, entropy 3.63: clears the 3.3 pre-gate, decodes to nothing any rule knows
     const real = Buffer.from("AKIAZQ3DRSTUVWXY2345\n").toString("base64");
-    const found = (benignCount: number) =>
-      scanText([...Array.from({ length: benignCount }, () => benign), real].join("\n"))
-        .some((f) => f.secretType === "base64-wrapped-secret");
+    const result = (benignCount: number) =>
+      scanReport([...Array.from({ length: benignCount }, () => benign), real].join("\n"));
     // Control: the wrapped key is exactly what the probe exists to report, and
     // the benign blobs around it stay silent.
     expect(
       scanText([benign, benign, benign, real].join("\n")).map((f) => f.secretType),
     ).toEqual(["base64-wrapped-secret"]);
-    expect(found((1 << 16) - 1)).toBe(true); // the real key is candidate 65536: the LAST funded probe
-    expect(found(1 << 16)).toBe(false); // candidate 65537: budget exhausted, silently skipped
+    const funded = result((1 << 16) - 1);
+    expect(funded.findings.some((f) => f.secretType === "base64-wrapped-secret")).toBe(true);
+    expect(funded.probeBudgetExhausted).toBe(false);
+    const exhausted = result(1 << 16);
+    expect(exhausted.findings.some((f) => f.secretType === "base64-wrapped-secret")).toBe(false);
+    expect(exhausted.probeBudgetExhausted).toBe(true);
   });
 });
 

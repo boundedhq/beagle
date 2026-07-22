@@ -1,12 +1,14 @@
-// Host side of the worker-hosted scanner (design §6.3). The worker is what
-// makes the ReDoS deadline enforceable: on breach, terminate + respawn, and
-// the scan reports 'incomplete' — fail-safe, never a silent "clean".
+// Host side of the worker-hosted scanner (design §6.3). The worker makes the
+// ReDoS deadline enforceable; the engine also reports its internal resource
+// caps. Either kind of bound produces 'incomplete', never a silent "clean".
 import type { Finding, ScanCtx } from "../core/scanner/engine";
 import type { RuleSpec } from "../core/scanner/rules";
 
 export interface ScanResult {
   state: "ok" | "incomplete";
   findings: Finding[];
+  cappedRules: string[];
+  probeBudgetExhausted: boolean;
 }
 
 // Protocol identity fields carry expected high-entropy plumbing — opencode's
@@ -65,7 +67,9 @@ export class ScanHost {
   constructor(private opts: ScanHostOptions) {}
 
   scan(bytes: Uint8Array, ctx: ScanCtx): Promise<ScanResult> {
-    if (this.closed) return Promise.resolve({ state: "incomplete", findings: [] });
+    if (this.closed) {
+      return Promise.resolve({ state: "incomplete", findings: [], cappedRules: [], probeBudgetExhausted: false });
+    }
     const worker = this.ensureWorker();
     const id = this.nextId++;
     // Stage into a fresh buffer (the caller's may be a shared view), then
@@ -85,7 +89,7 @@ export class ScanHost {
     this.worker = null;
     for (const [id, p] of this.pending) {
       clearTimeout(p.timer);
-      p.resolve({ state: "incomplete", findings: [] });
+      p.resolve({ state: "incomplete", findings: [], cappedRules: [], probeBudgetExhausted: false });
       this.pending.delete(id);
     }
   }
@@ -101,13 +105,24 @@ export class ScanHost {
       ? "./adapters/scan-worker-entry.ts"
       : new URL("./scan-worker-entry.ts", import.meta.url).href;
     const worker = new Worker(entry);
-    worker.onmessage = (event: MessageEvent<{ kind: string; id: number; findings: Finding[] }>) => {
-      const { id, findings } = event.data;
+    worker.onmessage = (event: MessageEvent<{
+      kind: string;
+      id: number;
+      findings: Finding[];
+      cappedRules: string[];
+      probeBudgetExhausted: boolean;
+    }>) => {
+      const { id, findings, cappedRules, probeBudgetExhausted } = event.data;
       const p = this.pending.get(id);
       if (!p) return;
       clearTimeout(p.timer);
       this.pending.delete(id);
-      p.resolve({ state: "ok", findings });
+      p.resolve({
+        state: cappedRules.length > 0 || probeBudgetExhausted ? "incomplete" : "ok",
+        findings,
+        cappedRules,
+        probeBudgetExhausted,
+      });
     };
     worker.onerror = (e) => {
       // Never die silently: a dead scanner means every scan reports
@@ -139,7 +154,7 @@ export class ScanHost {
   private failAll(): void {
     for (const [id, p] of this.pending) {
       clearTimeout(p.timer);
-      p.resolve({ state: "incomplete", findings: [] });
+      p.resolve({ state: "incomplete", findings: [], cappedRules: [], probeBudgetExhausted: false });
       this.pending.delete(id);
     }
   }
