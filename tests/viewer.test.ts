@@ -64,6 +64,57 @@ describe("ViewerServer hardening (design §6.8)", () => {
     expect(again.status).toBe(401); // invalidated on use
   });
 
+  test("an existing session credential re-bootstraps a reloaded tab", async () => {
+    const cred = await getCredential();
+    const refreshed = await fetch(`${origin()}/api/session`, {
+      method: "POST",
+      headers: { "x-beagle-token": cred },
+    });
+    expect(refreshed.status).toBe(200);
+    expect(await refreshed.json()).toEqual({ credential: cred });
+
+    const rejected = await fetch(`${origin()}/api/session`, {
+      method: "POST",
+      headers: { "x-beagle-token": "0".repeat(64) },
+    });
+    expect(rejected.status).toBe(401);
+  });
+
+  test("re-bootstrap is repeatable and never consumes the credential", async () => {
+    // The guarantee the feature exists for: reloading a tab (or a sibling tab
+    // doing the same) must keep returning the SAME credential, not rotate or
+    // one-time-consume it. One success would pass even a regression that gave
+    // re-bootstrap boot-token-like single-use semantics — so exercise it thrice
+    // and then confirm the credential still authorizes a normal API route.
+    const cred = await getCredential();
+    for (let i = 0; i < 3; i++) {
+      const r = await fetch(`${origin()}/api/session`, {
+        method: "POST",
+        headers: { "x-beagle-token": cred },
+      });
+      expect(r.status).toBe(200);
+      expect(await r.json()).toEqual({ credential: cred });
+    }
+    const authed = await fetch(`${origin()}/api/feed`, { headers: { "x-beagle-token": cred } });
+    expect(authed.status).toBe(200);
+  });
+
+  test("a valid credential header wins over a stale boot body (reload beside a used link)", async () => {
+    // The client sends a saved credential AND, if the URL still carries one, the
+    // boot body. The server must honor the header first: a live session is kept
+    // and the (already-used) boot token is NOT required or re-consumed — so a
+    // re-opened one-time link never drops a working session to "expired".
+    const cred = await getCredential(); // consumes the boot token
+    const staleBoot = bootToken(); // now already used
+    const r = await fetch(`${origin()}/api/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-beagle-token": cred },
+      body: JSON.stringify({ boot: staleBoot }),
+    });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ credential: cred }); // the live credential, not a new one
+  });
+
   test("an oversized /api/session body is capped, not buffered unbounded (pre-auth DoS)", async () => {
     // /api/session reads the body BEFORE the bootstrap token is checked, so an
     // unbounded reader lets any local process exhaust memory. Over the cap the
