@@ -225,16 +225,24 @@ Trust needs numbers, not adjectives:
 
 | Budget | Design target | CI gate |
 |---|---|---|
-| Core security path | ≤ 2,000 LOC | `bun run loc:check` fails the build over budget |
+| Dependency-free runtime core | ≤ 2,000 LOC | `bun run loc:check` fails the build over budget |
+| Capture-to-alert trust path | ≤ 5,000 LOC | `bun run loc:check` fails the build over budget |
 | Structured-alert false positives | < 5% of 22 curated negatives | `tests/precision.test.ts` — a regression gate on hand-written snippets, not a real-world rate |
 | Scan time, 1 MB body | p99 ~10 ms | `tests/budget.test.ts` (median < 50 ms ceiling for CI variance); pathological inputs are bounded separately, by the scan worker's 500 ms fail-safe deadline |
 | Added request latency | p50 ≤ 5 ms | `tests/budget.test.ts` (< 25 ms ceiling for CI variance) |
 | Install size | ≤ 100 MB | CI binary-size check |
 
 Zero third-party runtime dependencies in the core; `bun:*` imports confined
-to `src/adapters/`; the viewer's Preact+htm is vendored and pinned. The core
-data path (intercept → forward → capture → detect) is small enough to audit
-in one sitting: start at [`src/core/`](src/core/).
+to `src/adapters/`; the viewer's Preact+htm is vendored and pinned. `src/core/`
+is that portability boundary, not the whole security audit scope. The wider
+capture-to-alert trust path is declared explicitly in
+[`TRUST_PATH_SCOPE`](scripts/loc-report.ts): core interception, scanning,
+alerting, and persistence plus daemon ingestion, telemetry/format parsers,
+redaction, scanner hosting, rollout capture, SQLite adaptation, and alert
+delivery. `bun run loc` labels both `CORE` and non-core `TRUST` files; the core
+is included in the trust-path total. This is a legibility gate, not a claim
+that code outside the manifest needs no security review: CLI orchestration,
+installation, and the viewer remain visible in the total LOC report.
 
 ## Trust properties
 
@@ -392,10 +400,13 @@ capture fails, your agent's traffic still flows; the gap is recorded as
 
 ## Layout
 
-- `src/core/` — the audited security path (LOC-budgeted, stdlib-only, no `bun:*`)
+- `src/core/` — the dependency-free runtime foundation (separately LOC-budgeted,
+  stdlib-only, no `bun:*`); it is a subset of the trust path, not the full audit scope
+- [`TRUST_PATH_SCOPE`](scripts/loc-report.ts) — the explicit capture-to-alert
+  audit manifest spanning core, daemon, parsers, redaction, and runtime adapters
 - `src/adapters/` — Bun-specific surface (`bun:sqlite`, workers)
 - `src/parsers/`, `src/viewer/`, `src/cli/`, `src/daemon/`, `src/install/`,
-  `src/notifier/`, `src/transform/` — non-core, in the same LOC report
+  `src/notifier/`, `src/transform/` — application code, all disclosed in the LOC report
 - `rules/` — vendored, pinned detection rules (data; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md))
 
 ## Development
