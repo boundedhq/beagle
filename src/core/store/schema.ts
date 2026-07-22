@@ -90,8 +90,8 @@ CREATE TABLE IF NOT EXISTS runs (
   created_ts    INTEGER NOT NULL
 );
 
--- Mode B display grouping: which TURN a tool row belongs to, so the viewer can
--- fold codex/claude tool rows under their prompt turn like a wire session.
+-- Mode B display sequencing: which USER turn a tool row belongs to, so the
+-- viewer can reconstruct Pi-like request/response boundaries.
 -- Deliberately a side table and not exchanges.prompt_key: that column is the
 -- response-stitch TARGET key, and a tool row carrying it would become an
 -- attach candidate. link_key is namespaced by the writer — 'row:<exchange id>'

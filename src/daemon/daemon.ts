@@ -1003,7 +1003,7 @@ export class Daemon {
       // grouping metadata — opaque call ids, no content — so they write to
       // turn_link and stop here, never reaching the scan/alert/insert path. A
       // link is not a captured call and must not become a row. Best-effort by
-      // the same rule that makes folding fail open: a store error here must
+      // the same rule that makes reconstruction fail open: a store error here must
       // not abort the batch. Today the tailer emits answers BEFORE links, so a
       // thrown link would cost only the links behind it — but that ordering is
       // the tailer's, not this loop's, and nothing else stops a links-first
@@ -1015,7 +1015,7 @@ export class Daemon {
             resolution.sessionId,
             call.toolLinks.map((l) => ({ linkKey: `call:${l.callId}`, promptKey: l.promptKey, ordinal: l.ordinal, seq: l.seq })),
           );
-        } catch { /* unlinked rows fold by time (or render standalone before any turn) */ }
+        } catch { /* unlinked rows sequence by time (or render standalone before any turn) */ }
         continue;
       }
       const scanResult = await this.scanHost.scan(call.request.bodyBytes, {});
@@ -1314,7 +1314,7 @@ export class Daemon {
           this.store.linkTurns(resolution.sessionId, [
             { linkKey: `row:${call.id}`, promptKey: call.turnRef.promptKey, ordinal: 0, seq: 0 },
           ]);
-        } catch { /* the row folds by time instead of by its exact link */ }
+        } catch { /* the row sequences by time instead of by its exact link */ }
       }
       this.alertEngine.process(
         {

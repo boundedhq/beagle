@@ -136,20 +136,22 @@ proxies normally at full fidelity.)
 
 **And telemetry sessions still read like conversations.** The vendors' exports
 arrive scattered — one event per tool execution, and Codex's omits the
-assistant's reply entirely — but the dashboard reassembles each turn: the
-prompt, then every tool call as a command/output pair folded under it, then
-the answer (for Codex, recovered from the session log Codex itself writes and
-stitched on a beat later). The calls feed reads one line per turn, verb-first —
-``ran `sed -n '1,240p' SKILL.md` → …`` — instead of a row of exec noise per
-tool. (Codex reports each execution twice — a harness step and the inner
-tool — so a folded codex turn shows both, the way Codex's own UI lists both
-steps.) Grouping is cosmetic and fails open: every tool execution is still
-its own captured, scanned call underneath (each folded card links to its raw
-bytes), a row the linkage can't name is grouped by time under the turn that
-was open, one that can't be placed at all shows standalone — and a
-tool call that leaked a secret always keeps its own line in the feed. The one
-gap wire capture doesn't have: Codex encrypts its reasoning, so what the model
-was thinking between tools is the one thing a telemetry transcript can't show.
+assistant's reply entirely — but the dashboard sequences them with the same
+request/response pattern as a wire-captured Pi session: a model response asks
+for a tool, and the next request carries that tool's result. The final answer
+appears after the final result (for Codex, it is recovered from the session log
+Codex itself writes and arrives a beat later). Every captured telemetry row
+also remains in the calls feed, so a live tool row never disappears after a
+refresh; reconstructed cards link back to that row's raw detail.
+
+This sequencing is a display projection and fails open: rollout links provide
+Codex's tool order, Claude hook ids keep results within their user prompt, and
+an event that cannot be placed stays standalone. Codex reports each execution
+twice — a harness step and the inner tool — so both appear, as they do in
+Codex's own UI. The underlying rows remain independently captured, scanned,
+redacted, and searchable. The one gap wire capture doesn't have: Codex encrypts
+its reasoning, so what the model was thinking between tools is the one thing a
+telemetry transcript can't show.
 
 ## Always-on (`beagle watch`)
 

@@ -15,9 +15,8 @@ export interface DisplayMessage extends Message {
   kind?: "call" | "result" | "response" | "response-call";
   callId?: string;
   detail?: string; // the originating call's short detail, shown in result headers
-  /** Viewer-only: the exchange row a FOLDED card came from (Mode B turn
-   *  folding, session-view), so the transcript can still reach that row's own
-   *  detail/raw view — folding must never make captured bytes unreachable.
+  /** Viewer-only: the exchange row a reconstructed subscription card came
+   *  from, so the transcript can still reach that row's own detail/raw view.
    *  Stamped at read time; never written into display_messages. */
   sourceId?: string;
 }
@@ -236,6 +235,9 @@ export interface ToolAction {
   detail?: string; // e.g. the shell command or a file path (bounded by its reader)
   callId?: string; // pairs a call with its result in the NEXT request
   args?: string; // full raw arguments (JSON text) for the display card body
+  /** Viewer-only: the self-report row that supplied this reconstructed call.
+   *  Lets a Pi-shaped subscription transcript keep the raw capture reachable. */
+  sourceId?: string;
 }
 
 // Extract the tool calls the assistant made in its response, for a plain-English

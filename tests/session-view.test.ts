@@ -559,11 +559,11 @@ describe("buildSessionTurns — the conversation delta", () => {
   });
 });
 
-// ---- Mode B turn folding ----
-// Codex/Claude subscription capture lands one row per tool execution beside
-// the turn row. The fold regroups them under their turn via turn_link, so a
-// Mode B session reads like a wire one: prompt → tool cards → answer.
-describe("buildSessionTurns — Mode B folding", () => {
+// ---- Subscription turn sequencing ----
+// Codex/Claude capture lands one row per tool execution beside response rows.
+// The projection uses turn_link plus chronology to expose the same boundary
+// model as Pi: response tool call → next request tool result.
+describe("buildSessionTurns — subscription sequencing", () => {
   const toolCards = (callId: string | undefined, cmd: string, out: string) => [
     { role: "tool", content: cmd, tool: "exec", kind: "call" as const, ...(callId ? { callId } : {}) },
     { role: "tool", content: out, tool: "exec", kind: "result" as const, ...(callId ? { callId } : {}) },
@@ -583,7 +583,100 @@ describe("buildSessionTurns — Mode B folding", () => {
       ...overrides,
     });
 
-  test("codex: linked tool rows fold in ROLLOUT order — seq beats inverted report stamps", () => {
+  test("subscription sessions use pi-like call boundaries and keep every feed row stable", () => {
+    const store = Store.open(dir);
+    const t0 = Date.now();
+
+    const codexPromptRow = codexPrompt({ id: ulid(t0), tsRequest: t0 });
+    const codexTool1 = codexTool("c1", { id: ulid(t0 + 1000), tsRequest: t0 + 1000 });
+    const codexTool2 = codexTool("c2", { id: ulid(t0 + 2000), tsRequest: t0 + 2000 });
+    for (const c of [codexPromptRow, codexTool1, codexTool2]) store.insertCall(c);
+    store.linkTurns("sess-1", [
+      { linkKey: "call:c1", promptKey: "hashA", ordinal: 0, seq: 0 },
+      { linkKey: "call:c2", promptKey: "hashA", ordinal: 0, seq: 1 },
+    ]);
+
+    const codex = buildSessionTurns(store, "sess-1").turns;
+    expect(codex).toHaveLength(3);
+    expect(codex.map((t) => ({
+      request: t.messages.map((m) => m.kind ?? m.role),
+      responseCalls: t.responseCalls.map((c) => c.callId),
+      response: t.responseText,
+    }))).toEqual([
+      { request: ["user"], responseCalls: ["c1"], response: null },
+      { request: ["result"], responseCalls: ["c2"], response: null },
+      { request: ["result"], responseCalls: [], response: "the stitched answer" },
+    ]);
+    expect(new Set(listCalls(store, 20).map((r) => r.id))).toEqual(
+      new Set([codexPromptRow.id, codexTool1.id, codexTool2.id]),
+    );
+    store.close();
+  });
+
+  test("claude keeps each reported response and carries hook results into the next request", () => {
+    const store = Store.open(dir);
+    const t0 = Date.now();
+    const first = call({
+      source: "otel", endpoint: "otel:claude_code.turn", agent: "claude",
+      promptKey: "prompt-uuid-chain",
+      displayMessages: [
+        { role: "user", content: "research this" },
+        { role: "tool", content: '{"query":"first"}', tool: "WebSearch", kind: "call" },
+      ],
+      requestBody: enc("research this\nfirst"), responseBody: enc("I will check."),
+      id: ulid(t0), tsRequest: t0,
+    });
+    const firstHook = call({
+      source: "otel", endpoint: "otel:tool_output:WebSearch", agent: "claude",
+      displayMessages: [
+        { role: "tool", content: '{"query":"first"}', tool: "WebSearch", kind: "call" },
+        { role: "tool", content: "first results", tool: "WebSearch", kind: "result" },
+      ],
+      requestBody: enc("WebSearch\nfirst\nfirst results"), responseBody: null, tsResponse: undefined,
+      id: ulid(t0 + 500), tsRequest: t0 + 500,
+    });
+    const second = call({
+      source: "otel", endpoint: "otel:claude_code.turn", agent: "claude",
+      promptKey: "prompt-uuid-chain",
+      displayMessages: [
+        { role: "tool", content: '{"query":"second"}', tool: "WebSearch", kind: "call" },
+      ],
+      requestBody: enc("second"), responseBody: enc("Here is the answer."),
+      id: ulid(t0 + 1000), tsRequest: t0 + 1000,
+    });
+    const secondHook = call({
+      source: "otel", endpoint: "otel:tool_output:WebSearch", agent: "claude",
+      displayMessages: [
+        { role: "tool", content: '{"query":"second"}', tool: "WebSearch", kind: "call" },
+        { role: "tool", content: "second results", tool: "WebSearch", kind: "result" },
+      ],
+      requestBody: enc("WebSearch\nsecond\nsecond results"), responseBody: null, tsResponse: undefined,
+      id: ulid(t0 + 1500), tsRequest: t0 + 1500,
+    });
+    for (const c of [first, firstHook, second, secondHook]) store.insertCall(c);
+    store.linkTurns("sess-1", [
+      { linkKey: `row:${firstHook.id}`, promptKey: "prompt-uuid-chain", ordinal: 0, seq: 0 },
+      { linkKey: `row:${secondHook.id}`, promptKey: "prompt-uuid-chain", ordinal: 0, seq: 0 },
+    ]);
+
+    const claude = buildSessionTurns(store, "sess-1").turns;
+    expect(claude).toHaveLength(3);
+    expect(claude.map((t) => ({
+      request: t.messages.map((m) => [m.kind ?? m.role, m.content]),
+      responseCalls: t.responseCalls.map((c) => c.args),
+      response: t.responseText,
+    }))).toEqual([
+      { request: [["user", "research this"]], responseCalls: ['{"query":"first"}'], response: "I will check." },
+      { request: [["result", "first results"]], responseCalls: ['{"query":"second"}'], response: "Here is the answer." },
+      { request: [["result", "second results"]], responseCalls: [], response: null },
+    ]);
+    expect(new Set(listCalls(store, 20).map((r) => r.id))).toEqual(
+      new Set([first.id, firstHook.id, second.id, secondHook.id]),
+    );
+    store.close();
+  });
+
+  test("codex: Pi-like turns follow ROLLOUT order — seq beats inverted report stamps", () => {
     const store = Store.open(dir);
     const t0 = Date.now();
     const prompt = codexPrompt({ id: ulid(t0), tsRequest: t0 });
@@ -601,34 +694,32 @@ describe("buildSessionTurns — Mode B folding", () => {
       { linkKey: "call:c2", promptKey: "hashA", ordinal: 0, seq: 0 },
     ]);
     const view = buildSessionTurns(store, "sess-1");
-    expect(view.turns.length).toBe(1); // 3 rows → 1 turn
-    const turn = view.turns[0]!;
-    expect(turn.id).toBe(prompt.id);
-    expect(turn.responseText).toBe("the stitched answer");
-    expect(turn.messages.map((m) => [m.kind ?? "user", m.callId ?? "-"])).toEqual([
-      ["user", "-"],
-      ["call", "c2"], ["result", "c2"], // rollout seq 0 first, stamps notwithstanding
-      ["call", "c1"], ["result", "c1"],
-    ]);
-    // Folding must never make the tool rows' own detail unreachable.
-    expect(turn.messages.filter((m) => m.callId === "c1").every((m) => m.sourceId === tool1.id)).toBe(true);
+    expect(view.turns.map((t) => t.id)).toEqual([prompt.id, tool2.id, tool1.id]);
+    expect(view.turns[0]!.responseCalls.map((c) => c.callId)).toEqual(["c2"]);
+    expect(view.turns[1]!.messages.map((m) => m.callId)).toEqual(["c2"]);
+    expect(view.turns[1]!.responseCalls.map((c) => c.callId)).toEqual(["c1"]);
+    expect(view.turns[2]!.messages.map((m) => m.callId)).toEqual(["c1"]);
+    expect(view.turns[2]!.responseText).toBe("the stitched answer");
+    expect(view.turns[1]!.responseCalls[0]!.sourceId).toBe(tool1.id);
     store.close();
   });
 
-  test("an UNLINKED tool row is adopted by TIME into the turn that was open", () => {
+  test("an UNLINKED tool row is sequenced by TIME after the turn that was open", () => {
     // The twin-report case: codex reports each execution twice, and the inner
     // event's id is one the rollout never names — no link can exist. Time is
-    // sound within a session (turns are sequential), so the row folds under
-    // the last turn at or before its stamp instead of straggling after the
-    // answer as an orphan.
+    // sound within a session (turns are sequential), so the row becomes the
+    // result request after the last prompt instead of an unrelated orphan.
     const store = Store.open(dir);
     const t0 = Date.now();
     store.insertCall(codexPrompt({ id: ulid(t0), tsRequest: t0 }));
     store.insertCall(codexTool("c9", { id: ulid(t0 + 1000), tsRequest: t0 + 1000 }));
     // no linkTurns — rollout lagging, absent, or an id it never names
     const view = buildSessionTurns(store, "sess-1");
-    expect(view.turns.length).toBe(1);
-    expect(view.turns[0]!.messages.map((m) => m.kind ?? "user")).toEqual(["user", "call", "result"]);
+    expect(view.turns.length).toBe(2);
+    expect(view.turns[0]!.messages.map((m) => m.kind ?? "user")).toEqual(["user"]);
+    expect(view.turns[0]!.responseCalls.map((c) => c.callId)).toEqual(["c9"]);
+    expect(view.turns[1]!.messages.map((m) => m.kind)).toEqual(["result"]);
+    expect(view.turns[1]!.responseText).toBe("the stitched answer");
     store.close();
   });
 
@@ -664,12 +755,15 @@ describe("buildSessionTurns — Mode B folding", () => {
       { linkKey: "call:c2", promptKey: "hashA", ordinal: 0, seq: 1 },
     ]);
     const view = buildSessionTurns(store, "sess-1");
-    expect(view.turns.length).toBe(1);
-    expect(view.turns[0]!.messages.map((m) => m.callId ?? "user")).toEqual([
-      "user",
-      "c1", "c1",
-      "exec-uuid-1", "exec-uuid-1", // the twin, beside its pair
-      "c2", "c2",
+    expect(view.turns.map((t) => t.id)).toEqual([prompt.id, harness1.id, inner1.id, harness2.id]);
+    expect(view.turns.map((t) => ({
+      request: t.messages.map((m) => m.callId ?? "user"),
+      response: t.responseCalls.map((c) => c.callId),
+    }))).toEqual([
+      { request: ["user"], response: ["c1"] },
+      { request: ["c1"], response: ["exec-uuid-1"] },
+      { request: ["exec-uuid-1"], response: ["c2"] },
+      { request: ["c2"], response: [] },
     ]);
     // A second turn bounds adoption: an inner row after prompt2 goes THERE.
     const prompt2 = codexPrompt({ id: ulid(t0 + 10_000), tsRequest: t0 + 10_000, promptKey: "hashB" });
@@ -680,9 +774,10 @@ describe("buildSessionTurns — Mode B folding", () => {
     store.insertCall(prompt2);
     store.insertCall(inner2);
     const view2 = buildSessionTurns(store, "sess-1");
-    expect(view2.turns.length).toBe(2);
-    expect(view2.turns[1]!.id).toBe(prompt2.id);
-    expect(view2.turns[1]!.messages.map((m) => m.kind ?? "user")).toEqual(["user", "call", "result"]);
+    expect(view2.turns.length).toBe(6);
+    expect(view2.turns[4]!.id).toBe(prompt2.id);
+    expect(view2.turns[4]!.responseCalls.map((c) => c.callId)).toEqual(["exec-uuid-2"]);
+    expect(view2.turns[5]!.messages.map((m) => m.kind)).toEqual(["result"]);
     store.close();
   });
 
@@ -697,14 +792,16 @@ describe("buildSessionTurns — Mode B folding", () => {
     store.insertCall(tool);
     store.linkTurns("sess-1", [{ linkKey: "call:c2", promptKey: "hashA", ordinal: 1, seq: 0 }]);
     const view = buildSessionTurns(store, "sess-1");
-    expect(view.turns.length).toBe(2);
+    expect(view.turns.length).toBe(3);
     expect(view.turns[0]!.messages.length).toBe(1); // turn 1 untouched
     expect(view.turns[1]!.id).toBe(second.id);
-    expect(view.turns[1]!.messages.map((m) => m.kind ?? "user")).toEqual(["user", "call", "result"]);
+    expect(view.turns[1]!.messages.map((m) => m.kind ?? "user")).toEqual(["user"]);
+    expect(view.turns[1]!.responseCalls.map((c) => c.callId)).toEqual(["c2"]);
+    expect(view.turns[2]!.messages.map((m) => m.kind)).toEqual(["result"]);
     store.close();
   });
 
-  test("claude: hook rows fold by row link, batch partials merge by exact prompt id", () => {
+  test("claude: hook results become the next same-prompt request; response rows stay distinct", () => {
     const store = Store.open(dir);
     const t0 = Date.now();
     const turnRow = call({
@@ -720,7 +817,10 @@ describe("buildSessionTurns — Mode B folding", () => {
     const hookRow = call({
       source: "otel", endpoint: "otel:tool_output:Read", agent: "claude",
       promptKey: undefined,
-      displayMessages: toolCards(undefined, '{"file_path":"/m/MEMORY.md"}', "the file body"),
+      displayMessages: [
+        { role: "tool", content: '{"file_path":"/m/MEMORY.md"}', tool: "Read", kind: "call" },
+        { role: "tool", content: "the file body", tool: "Read", kind: "result" },
+      ],
       requestBody: enc('Read\n{"file_path":"/m/MEMORY.md"}\nthe file body'),
       responseBody: null, tsResponse: undefined,
       id: ulid(t0 + 500), tsRequest: t0 + 500,
@@ -738,23 +838,22 @@ describe("buildSessionTurns — Mode B folding", () => {
     store.insertCall(partial);
     store.linkTurns("sess-1", [{ linkKey: `row:${hookRow.id}`, promptKey: "prompt-uuid-1", ordinal: 0, seq: 0 }]);
     const view = buildSessionTurns(store, "sess-1");
-    expect(view.turns.length).toBe(1);
-    const turn = view.turns[0]!;
-    expect(turn.id).toBe(turnRow.id);
-    expect(turn.responseText).toBe("here they are");
-    // Arrival order: the turn's own cards, then the hook pair (the fixture
-    // helper labels them "exec"), then the merged partial's card.
-    expect(turn.messages.map((m) => `${m.tool ?? "user"}:${m.kind ?? "text"}`)).toEqual([
-      "user:text", "Read:call", "exec:call", "exec:result", "Bash:call",
-    ]);
-    expect(turn.messages.at(-1)!.sourceId).toBe(partial.id);
+    expect(view.turns.length).toBe(2);
+    expect(view.turns[0]!.id).toBe(turnRow.id);
+    expect(view.turns[0]!.responseText).toBe("here they are");
+    expect(view.turns[0]!.messages.map((m) => m.role)).toEqual(["user"]);
+    expect(view.turns[0]!.responseCalls.map((c) => c.tool)).toEqual(["Read"]);
+    expect(view.turns[1]!.id).toBe(partial.id);
+    expect(view.turns[1]!.messages.map((m) => [m.kind, m.content])).toEqual([["result", "the file body"]]);
+    expect(view.turns[1]!.messages[0]!.sourceId).toBe(hookRow.id);
+    expect(view.turns[1]!.responseCalls.map((c) => c.tool)).toEqual(["Bash"]);
     store.close();
   });
 
-  test("adoption never lands on a merged-away partial — cards and leaks survive on the real turn", () => {
+  test("a final unlinked hook stays as a visible pending request with its leak", () => {
     // The vanish bug: turn row + same-prompt-id batch partial + an UNLINKED
     // hook row stamped after the partial. Anchoring on the partial appended
-    // the hook cards to a turn the fold then dropped — the captured content
+    // the hook cards to a turn the old fold then dropped — the captured content
     // (and its leak highlight) appeared NOWHERE, while the feed hid the row
     // too. Anchors are now surviving turn rows only.
     const store = Store.open(dir);
@@ -777,7 +876,10 @@ describe("buildSessionTurns — Mode B folding", () => {
     const hook = call({
       source: "otel", endpoint: "otel:tool_output:Read", agent: "claude",
       promptKey: undefined,
-      displayMessages: toolCards(undefined, '{"file_path":"/c"}', secret),
+      displayMessages: [
+        { role: "tool", content: '{"file_path":"/c"}', tool: "Read", kind: "call" },
+        { role: "tool", content: secret, tool: "Read", kind: "result" },
+      ],
       requestBody: enc(hookBody), responseBody: null, tsResponse: undefined,
       id: ulid(t0 + 1500), tsRequest: t0 + 1500,
     });
@@ -788,15 +890,13 @@ describe("buildSessionTurns — Mode B folding", () => {
       destination: "anthropic", callId: hook.id, ts: t0 + 1500,
       spanStart: hookBody.indexOf(secret), spanEnd: hookBody.indexOf(secret) + secret.length,
     });
-    // no linkTurns for the hook row — the exact population that vanished
+    // no linkTurns for the hook row — the exact population that used to vanish
     const view = buildSessionTurns(store, "sess-1");
-    expect(view.turns.length).toBe(1);
-    const turn = view.turns[0]!;
-    expect(turn.id).toBe(turnRow.id);
-    // The hook row's cards are ON the surviving turn…
-    expect(turn.messages.filter((m) => m.sourceId === hook.id).map((m) => m.kind)).toEqual(["call", "result"]);
-    // …and so is its leak (R7: the highlight must not vanish with the partial).
-    expect(turn.leaks.some((l) => l.value === secret)).toBe(true);
+    expect(view.turns.length).toBe(3);
+    const pending = view.turns[2]!;
+    expect(pending.id).toBe(hook.id);
+    expect(pending.messages.map((m) => m.kind)).toEqual(["result"]);
+    expect(pending.leaks.some((l) => l.value === secret)).toBe(true);
     store.close();
   });
 
@@ -811,14 +911,16 @@ describe("buildSessionTurns — Mode B folding", () => {
     const tool = codexTool("exec-uuid-k", { id: ulid(t0 + 11_000), tsRequest: t0 + 11_000 });
     for (const c of [turnA, keylessB, tool]) store.insertCall(c);
     const view = buildSessionTurns(store, "sess-1");
-    expect(view.turns.length).toBe(2);
+    expect(view.turns.length).toBe(3);
     expect(view.turns[0]!.messages.length).toBe(1); // turn A untouched
     expect(view.turns[1]!.id).toBe(keylessB.id);
-    expect(view.turns[1]!.messages.map((m) => m.kind ?? "user")).toEqual(["user", "call", "result"]);
+    expect(view.turns[1]!.messages.map((m) => m.kind ?? "user")).toEqual(["user"]);
+    expect(view.turns[1]!.responseCalls.map((c) => c.callId)).toEqual(["exec-uuid-k"]);
+    expect(view.turns[2]!.messages.map((m) => m.kind)).toEqual(["result"]);
     store.close();
   });
 
-  test("a folded row's leaks ride along, so its secret still highlights (R7)", () => {
+  test("a sequenced row's leaks highlight both its response call and result request (R7)", () => {
     const store = Store.open(dir);
     const t0 = Date.now();
     const prompt = codexPrompt({ id: ulid(t0), tsRequest: t0 });
@@ -839,23 +941,122 @@ describe("buildSessionTurns — Mode B folding", () => {
     });
     store.linkTurns("sess-1", [{ linkKey: "call:c1", promptKey: "hashA", ordinal: 0, seq: 0 }]);
     const view = buildSessionTurns(store, "sess-1");
-    expect(view.turns.length).toBe(1);
-    expect(view.turns[0]!.leaks.some((l) => l.value === secret)).toBe(true);
+    expect(view.turns.length).toBe(2);
+    expect(view.turns[0]!.responseLeaks.some((l) => l.value === secret)).toBe(true);
+    expect(view.turns[1]!.leaks.some((l) => l.value === secret)).toBe(true);
+    store.close();
+  });
+
+  test("claude: a hook-recovered call's arg secret still highlights (R7)", () => {
+    const store = Store.open(dir);
+    const t0 = Date.now();
+    const secret = "AKIAZQ3DRSTUVWXY2345";
+    // The turn event omitted the tool call; only the PostToolUse hook reports
+    // it, so the command is recovered onto the turn's response. Its secret was
+    // scanned on the hook row alone (the turn row never saw this arg) — the
+    // recovered card must still carry the highlight, like the codex chain does.
+    const turn = call({
+      source: "otel", endpoint: "otel:claude_code.turn", agent: "claude", promptKey: "P1",
+      displayMessages: [{ role: "user", content: "do it" }],
+      requestBody: enc("do it"), responseBody: enc("working"), id: ulid(t0), tsRequest: t0,
+    });
+    const hookBody = `Bash\ncurl -H 'x: ${secret}'\nok`;
+    const hook = call({
+      source: "otel", endpoint: "otel:tool_output:Bash", agent: "claude", promptKey: undefined,
+      displayMessages: [
+        { role: "tool", content: `curl -H 'x: ${secret}'`, tool: "Bash", kind: "call" },
+        { role: "tool", content: "ok", tool: "Bash", kind: "result" },
+      ],
+      requestBody: enc(hookBody), responseBody: null, tsResponse: undefined,
+      id: ulid(t0 + 500), tsRequest: t0 + 500,
+    });
+    for (const c of [turn, hook]) store.insertCall(c);
+    store.upsertLeakEvent({
+      fingerprint: "fp-claude-arg", sessionId: "sess-1", detector: "aws-access-key-id",
+      secretType: "aws-access-key-id", severity: "high", confidenceTier: "structured",
+      destination: "anthropic", callId: hook.id, ts: t0 + 500,
+      spanStart: hookBody.indexOf(secret), spanEnd: hookBody.indexOf(secret) + secret.length,
+    });
+    const view = buildSessionTurns(store, "sess-1");
+    const turnT = view.turns.find((x) => x.id === turn.id)!;
+    expect(turnT.responseCalls.some((c) => String(c.args).includes(secret))).toBe(true);
+    expect(turnT.responseLeaks.some((l) => l.value === secret)).toBe(true);
+    store.close();
+  });
+
+  test("an unlinked claude hook is NOT merged into a later, unrelated prompt", () => {
+    const store = Store.open(dir);
+    const t0 = Date.now();
+    const turn1 = call({
+      source: "otel", endpoint: "otel:claude_code.turn", agent: "claude", promptKey: "P1",
+      displayMessages: [
+        { role: "user", content: "Q1" },
+        { role: "tool", content: '{"f":"a"}', tool: "Read", kind: "call" },
+      ],
+      requestBody: enc("Q1"), responseBody: enc("working1"), id: ulid(t0), tsRequest: t0,
+    });
+    const hookRead = call({
+      source: "otel", endpoint: "otel:tool_output:Read", agent: "claude", promptKey: undefined,
+      displayMessages: [
+        { role: "tool", content: '{"f":"a"}', tool: "Read", kind: "call" },
+        { role: "tool", content: "fileA", tool: "Read", kind: "result" },
+      ],
+      requestBody: enc("Read\nfileA"), responseBody: null, tsResponse: undefined,
+      id: ulid(t0 + 500), tsRequest: t0 + 500,
+    });
+    const turn2 = call({
+      source: "otel", endpoint: "otel:claude_code.turn", agent: "claude", promptKey: "P2",
+      displayMessages: [
+        { role: "user", content: "Q2" },
+        { role: "tool", content: '{"p":"x"}', tool: "Grep", kind: "call" },
+      ],
+      requestBody: enc("Q2"), responseBody: enc("answer2"), id: ulid(t0 + 1000), tsRequest: t0 + 1000,
+    });
+    for (const c of [turn1, hookRead, turn2]) store.insertCall(c);
+    // no linkTurns — the hook is unlinked (its row: link never landed)
+    const view = buildSessionTurns(store, "sess-1");
+    // Q2's request is only its own user message — never Q1's tool result…
+    const t2 = view.turns.find((x) => x.id === turn2.id)!;
+    expect(t2.messages.map((m) => m.kind ?? m.role)).toEqual(["user"]);
+    // …and Q1's result rides its own standalone turn, ordered between the two.
+    expect(view.turns.map((x) => x.id)).toEqual([turn1.id, hookRead.id, turn2.id]);
+    expect(view.turns[1]!.messages.map((m) => [m.kind, m.content])).toEqual([["result", "fileA"]]);
+    store.close();
+  });
+
+  test("a hook that opens the view (no turn row yet) keeps its command card", () => {
+    const store = Store.open(dir);
+    const t0 = Date.now();
+    // The claude_code.turn event was lost or fell outside the window; the hook
+    // is the first captured row. Its command must not vanish from the cards.
+    const hook = call({
+      source: "otel", endpoint: "otel:tool_output:Read", agent: "claude", promptKey: undefined,
+      displayMessages: [
+        { role: "tool", content: '{"file_path":"/secret/path"}', tool: "Read", kind: "call" },
+        { role: "tool", content: "body", tool: "Read", kind: "result" },
+      ],
+      requestBody: enc("Read\nbody"), responseBody: null, tsResponse: undefined,
+      id: ulid(t0), tsRequest: t0,
+    });
+    store.insertCall(hook);
+    const view = buildSessionTurns(store, "sess-1");
+    expect(view.turns).toHaveLength(1);
+    expect(view.turns[0]!.messages.map((m) => m.kind)).toEqual(["call", "result"]);
     store.close();
   });
 });
 
-// The feed's half of the same story: one line per turn, so leak-free tool
-// rows hide — but a row that LEAKED always shows (never hide a leak).
-describe("listCalls — Mode B tool rows fold out of the feed", () => {
-  test("leak-free tool rows are hidden; the turn row and leak-bearing rows show", () => {
+// The feed is the stable raw-capture ledger beneath the reconstructed session:
+// an SSE-added tool row must still be there after any later refetch.
+describe("listCalls — subscription tool rows stay in the feed", () => {
+  test("clean and leaky tool rows are all retained", () => {
     const store = Store.open(dir);
     const t0 = Date.now();
     const prompt = call({ source: "otel", endpoint: "otel:codex:user_prompt", id: ulid(t0), tsRequest: t0, summary: '"q" → a' });
     const cleanTool = call({ source: "otel", endpoint: "otel:codex:tool_result:exec", id: ulid(t0 + 1000), tsRequest: t0 + 1000 });
     const hookTool = call({ source: "otel", endpoint: "otel:tool_output:Read", id: ulid(t0 + 2000), tsRequest: t0 + 2000 });
     const leakyTool = call({ source: "otel", endpoint: "otel:codex:tool_result:exec", id: ulid(t0 + 3000), tsRequest: t0 + 3000 });
-    const wire = call({ id: ulid(t0 + 4000), tsRequest: t0 + 4000 }); // wire rows never fold
+    const wire = call({ id: ulid(t0 + 4000), tsRequest: t0 + 4000 });
     for (const c of [prompt, cleanTool, hookTool, leakyTool, wire]) store.insertCall(c);
     store.upsertLeakEvent({
       fingerprint: "fp-feed", sessionId: "sess-1", detector: "d", secretType: "t",
@@ -866,8 +1067,8 @@ describe("listCalls — Mode B tool rows fold out of the feed", () => {
     expect(ids).toContain(prompt.id);
     expect(ids).toContain(leakyTool.id); // leaked → stays visible
     expect(ids).toContain(wire.id);
-    expect(ids).not.toContain(cleanTool.id);
-    expect(ids).not.toContain(hookTool.id);
+    expect(ids).toContain(cleanTool.id);
+    expect(ids).toContain(hookTool.id);
     store.close();
   });
 });

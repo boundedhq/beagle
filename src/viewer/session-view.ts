@@ -148,7 +148,7 @@ export function buildSessionTurns(store: Store, sessionId: string, cap = 200): S
   );
   const truncated = ids.length > cap;
   const turns: SessionTurn[] = [];
-  // Row facts the Mode B fold below keys on; SessionTurn itself stays the
+  // Row facts the subscription sequencer below keys on; SessionTurn stays the
   // render shape (the client has no use for endpoints).
   const rowMeta = new Map<SessionTurn, { endpoint: string; promptKey: string | null }>();
   let system: string | null = null;
@@ -274,51 +274,53 @@ export function buildSessionTurns(store: Store, sessionId: string, cap = 200): S
         [sessionId],
       )[0]?.u,
     );
-  return { sessionId, system, turns: foldModeBTurns(store, sessionId, turns, rowMeta), truncated, utility };
+  return { sessionId, system, turns: sequenceModeBTurns(store, sessionId, turns, rowMeta), truncated, utility };
 }
 
-// ---- Mode B turn folding ----
+// ---- Subscription turn sequencing ----
 //
-// Codex and Claude subscription capture split one user turn across rows: the
-// turn row (prompt + response), plus one row per tool execution (codex
-// tool_result / the Claude PostToolUse hook). Content-wise that is complete;
-// arrangement-wise it reads as a pile of loose one-card turns. This fold
-// regroups them the way a wire session reads: each tool row's cards move under
-// the turn that ran them, resolved through the turn_link table (written by the
-// codex rollout tailer and the Claude hook path — see the schema note).
+// Pi's wire transcript uses provider-call boundaries: response N asks for a
+// tool, request N+1 carries its result. Claude/Codex subscription telemetry
+// arrives in different rows (turn reports plus per-tool reports), but the UI
+// must keep the same boundary model. The old projection instead appended every
+// tool card to the first prompt's REQUEST and deleted the tool rows from the
+// transcript/feed. Besides changing under a live user's feet, that collapsed a
+// 19-row Codex session to one turn and could discard later Claude responses
+// sharing a prompt.id.
 //
-// Display-only and fail-safe by construction. A tool row folds by, in order:
-// its turn_link (exact — the rollout/hook named its turn), else by TIME under
-// the turn that was open when it ran. The time fallback exists because codex
-// double-reports each execution under two events with two id namespaces: the
-// harness `exec` event carries the rollout's call id (links), but the inner
-// `exec_command`/`mcp__*` event carries an internal id the rollout never
-// names — link-only folding left those as orphan turns straggling after the
-// answer. Time is sound here because a Mode B conversation is sequential:
-// within one session, a tool row after prompt N and before prompt N+1 is turn
-// N's activity. Only a tool row BEFORE any turn row stays standalone —
-// capture is never hidden. Folded cards carry sourceId so their own row's
-// detail/raw view stays one click away.
-//
-// Three stated biases, all accepted because no pairing signal exists at view
-// time, the misplacement is display-only (detail/raw untouched), and a
-// leak-bearing row keeps its own feed line regardless: tool events stamp at
-// COMPLETION, so an execution that outlives its turn (interrupted, next
-// prompt already sent) can adopt into the FOLLOWING turn; a turn whose own
-// row never landed (the mapper skips a prompt-less user_prompt event) leaves
-// its tool rows adopting into the PREVIOUS turn; and the sequential-turns
-// premise is the SESSION's — two conversations glued into one session by the
-// resolver's low-confidence tiers (run/time-gap) interleave their clocks,
-// and a row can then adopt across that seam.
-const TURN_ENDPOINTS = new Set(["otel:claude_code.turn", "otel:codex:user_prompt"]);
-const isToolRow = (endpoint: string) =>
-  endpoint.startsWith("otel:tool_output:") || endpoint.startsWith("otel:codex:tool_result:");
+// This is display-only: stored/scanned rows remain untouched. Codex tool rows
+// become the next request in a chain, with the following tool call on their
+// response side; Claude hook results join the next reported response row. Every
+// source card/action carries sourceId, and unplaceable rows remain standalone.
+type RowMeta = { endpoint: string; promptKey: string | null };
 
-function foldModeBTurns(
+function cardAction(card: DisplayMessage, sourceId: string): ToolAction {
+  return {
+    tool: card.tool ?? "tool",
+    args: card.content || undefined,
+    detail: card.detail,
+    callId: card.callId,
+    sourceId,
+  };
+}
+
+// The subset of `leaks` whose secret value actually appears in these cards.
+// A split tool row shows its command on one turn (the response call) and its
+// result on the next (the request) — this routes each secret's highlight to the
+// turn that displays it, so a moved card still highlights and an unrelated turn
+// gets no phantom "secret sent" flag. Never used to DECIDE visibility: a leak
+// always keeps its own row's feed line regardless (R7).
+function leaksIn(leaks: DetailLeak[], cards: DisplayMessage[]): DetailLeak[] {
+  if (leaks.length === 0) return leaks;
+  const text = cards.map((c) => `${c.content ?? ""}\n${c.detail ?? ""}`).join("\n");
+  return leaks.filter((l) => l.value && text.includes(l.value));
+}
+
+function sequenceModeBTurns(
   store: Store,
   sessionId: string,
   turns: SessionTurn[],
-  rowMeta: Map<SessionTurn, { endpoint: string; promptKey: string | null }>,
+  rowMeta: Map<SessionTurn, RowMeta>,
 ): SessionTurn[] {
   const links = new Map<string, { promptKey: string; ordinal: number; seq: number }>();
   for (const r of store.queryAll<{ link_key: string; prompt_key: string; ordinal: number; seq: number }>(
@@ -327,92 +329,45 @@ function foldModeBTurns(
   )) {
     links.set(r.link_key, { promptKey: r.prompt_key, ordinal: r.ordinal, seq: r.seq });
   }
-  // Turn index: the Nth turn row per prompt_key, in ts order — the SAME
-  // all-turns counting the rollout links use, so the two sides can't drift.
-  // Claude prompt ids are unique (links always say ordinal 0); codex keys are
-  // hash-of-prompt, so repeated identical prompts need the occurrence number.
+  // Codex turn index: the Nth prompt row per prompt_key, matching rollout link
+  // ordinals. Claude prompt ids span several provider calls, so its repeated
+  // rows must remain distinct and never go through this occurrence merge.
   const occurrence = new Map<string, number>();
   const index = new Map<string, SessionTurn>();
-  // Adoption anchors: every turn row that will SURVIVE the fold, in ts order
-  // (turns[] already is). Claude batch partials (occurrence 1+ of a key)
-  // merge away below and must never anchor an adopted row — cards appended
-  // to a dropped turn would vanish with it, hiding capture. Keyless turn
-  // rows (no prompt id reported) can't be link targets but ARE real turns on
-  // screen, so they do anchor — without them adoption would skip past a
-  // visible turn into an older one.
   const anchorsAsc: Array<{ ts: number; turn: SessionTurn }> = [];
   for (const t of turns) {
     const m = rowMeta.get(t);
-    if (!m || !TURN_ENDPOINTS.has(m.endpoint)) continue;
-    let survives = true;
+    if (!m || m.endpoint !== "otel:codex:user_prompt") continue;
     if (m.promptKey) {
       const n = occurrence.get(m.promptKey) ?? 0;
       occurrence.set(m.promptKey, n + 1);
       index.set(`${m.promptKey}#${n}`, t);
-      survives = !(m.endpoint === "otel:claude_code.turn" && n > 0);
     }
-    if (survives) anchorsAsc.push({ ts: t.tsRequest, turn: t });
+    anchorsAsc.push({ ts: t.tsRequest, turn: t });
   }
-  // The turn a time-adopted row belongs to: the last surviving turn open at
-  // its stamp.
   const coveringTurn = (ts: number): SessionTurn | null => {
     for (let i = anchorsAsc.length - 1; i >= 0; i--) {
       if (anchorsAsc[i]!.ts <= ts) return anchorsAsc[i]!.turn;
     }
     return null;
   };
-  const dropped = new Set<SessionTurn>();
-  // Appends are collected then applied so ordering is explicit (see the apply
-  // loop). `seq` is set only for rollout call-links — the one source that
-  // actually knows call order; a row-link's stored seq is a constant 0, not
-  // an ordering claim.
-  const appends = new Map<SessionTurn, Array<{ cards: DisplayMessage[]; leaks: DetailLeak[]; ts: number; seq?: number }>>();
-  const append = (target: SessionTurn, from: SessionTurn, seq?: number) => {
-    const cards = from.messages.map((c) => ({ ...c, sourceId: from.id }));
-    const list = appends.get(target) ?? [];
-    list.push({ cards, leaks: from.leaks, ts: from.tsRequest, seq });
-    appends.set(target, list);
-    dropped.add(from);
-  };
+  const codexGroups = new Map<SessionTurn, Array<{ turn: SessionTurn; ts: number; seq?: number }>>();
+  const codexOrder = new Map<SessionTurn, SessionTurn[]>();
+  const codexChildren = new Set<SessionTurn>();
   for (const t of turns) {
     const m = rowMeta.get(t);
-    if (!m) continue;
-    // Claude batch partials: a turn whose tool_result events arrived in their
-    // own OTLP batch lands as an extra claude_code.turn row sharing the exact
-    // prompt.id. Merge it into the question turn. Safe ONLY because claude's
-    // prompt_key is a real unique id — never do this for codex's hash keys.
-    if (m.endpoint === "otel:claude_code.turn" && m.promptKey) {
-      const target = index.get(`${m.promptKey}#0`);
-      if (target && target !== t) {
-        // An attach-miss response partial (rare fallback insert) carries the
-        // turn's reply — move it home rather than dropping it with the row.
-        if (!target.responseText && t.responseText) target.responseText = t.responseText;
-        append(target, t);
-      }
-      continue;
-    }
-    if (!isToolRow(m.endpoint)) continue;
-    // row:<id> first (claude, exact); else the row's own callId → call:<id>
-    // (codex, via the rollout); else adopt by time (the twin-report case —
-    // see the fold note above).
-    const rowLink = links.get(`row:${t.id}`);
-    const link = rowLink ?? t.messages.reduce<
+    if (!m?.endpoint.startsWith("otel:codex:tool_result:")) continue;
+    const link = t.messages.reduce<
       { promptKey: string; ordinal: number; seq: number } | null
     >((got, c) => got ?? (c.callId ? links.get(`call:${c.callId}`) ?? null : null), null);
     const target = link ? index.get(`${link.promptKey}#${link.ordinal}`) : coveringTurn(t.tsRequest);
     if (!target || target === t) continue;
-    append(target, t, link && !rowLink ? link.seq : undefined);
+    const list = codexGroups.get(target) ?? [];
+    list.push({ turn: t, ts: t.tsRequest, seq: link?.seq });
+    codexGroups.set(target, list);
   }
-  for (const [target, list] of appends) {
-    // Two-tier order. Rollout-linked entries keep the ROLLOUT's call order
-    // (seq): row stamps are completion times, and overlapping calls complete
-    // out of issue order — the rollout is the authority on what ran first.
-    // An unnumbered entry (a time-adopted twin, claude cards) slots after the
-    // last linked entry whose stamp precedes its own — its harness sibling in
-    // every real codex session — so it sits beside its pair without letting
-    // raw stamps reorder the linked skeleton. No linked entry before it →
-    // tier -1, ahead of the skeleton. Ties fall to the row stamp, then to
-    // insertion order (the sort is stable) — no arrival counter needed.
+
+  for (const [target, list] of codexGroups) {
     const linkedByTs = list.filter((a) => a.seq !== undefined).sort((x, y) => x.ts - y.ts);
     const tier = (a: { ts: number; seq?: number }): [number, number] => {
       if (a.seq !== undefined) return [a.seq, 0];
@@ -423,15 +378,130 @@ function foldModeBTurns(
       }
       return [anchor, 1];
     };
-    list
+    const ordered = list
       .map((a) => ({ a, k: tier(a) }))
       .sort((x, y) => x.k[0] - y.k[0] || x.k[1] - y.k[1] || x.a.ts - y.a.ts)
-      .forEach(({ a }) => {
-        target.messages.push(...a.cards);
-        target.leaks.push(...a.leaks);
-      });
+      .map(({ a }) => a.turn);
+    codexOrder.set(target, ordered);
+    for (const t of ordered) codexChildren.add(t);
+    const calls = ordered.map((t) => t.messages.filter((m) => m.kind === "call").map((m) => cardAction(m, t.id)));
+    const finalResponse = target.responseText;
+    const finalResponseLeaks = [...target.responseLeaks];
+    target.responseText = null;
+    target.responseCalls.push(...calls[0]!);
+    target.responseLeaks = [...ordered[0]!.leaks];
+    for (let i = 0; i < ordered.length; i++) {
+      const t = ordered[i]!;
+      // This row's output is the next provider request. Keep any unusual
+      // non-call card rather than guessing it away; only the call half moves.
+      t.messages = t.messages
+        .filter((m) => m.kind !== "call")
+        .map((m) => ({ ...m, sourceId: t.id }));
+      t.responseCalls = i + 1 < calls.length ? calls[i + 1]! : [];
+      t.responseText = i === ordered.length - 1 ? finalResponse : null;
+      t.responseLeaks = i === ordered.length - 1 ? finalResponseLeaks : [...ordered[i + 1]!.leaks];
+    }
   }
-  return dropped.size ? turns.filter((t) => !dropped.has(t)) : turns;
+
+  // Claude already yields one response-bearing row per reported model cycle.
+  // Move tool calls to that row's RESPONSE, then carry PostToolUse results
+  // forward into the next same-prompt cycle's REQUEST. Repeated prompt.id rows
+  // are intentionally preserved: they contain distinct responses.
+  const dropped = new Set<SessionTurn>();
+  let lastClaude: SessionTurn | null = null;
+  // Hook rows waiting to become the next cycle's request. `callShown` records
+  // whether this hook's command was already surfaced (the turn event listed it,
+  // or it was recovered onto a response). If not, the command card must survive
+  // rather than being stripped to the bare result — capture must stay visible.
+  let pending: Array<{ turn: SessionTurn; promptKey?: string; callShown: boolean }> = [];
+  // Calls already on the current turn's response, per tool, so a hook that
+  // merely re-reports a call the turn event listed isn't shown twice. Counted
+  // DOWN as hooks match it (seeded when the turn becomes current) — no re-scan
+  // of the growing responseCalls array per hook.
+  let reportedByTool = new Map<string, number>();
+  const seedReported = (t: SessionTurn) => {
+    reportedByTool = new Map();
+    for (const c of t.responseCalls) reportedByTool.set(c.tool, (reportedByTool.get(c.tool) ?? 0) + 1);
+  };
+  const mergePending = (target: SessionTurn, promptKey: string | null): void => {
+    // Only a CONTINUATION cycle (one carrying no fresh user prompt) may absorb a
+    // prior cycle's tool results — a NEW prompt's turn must never show the
+    // previous turn's output as its own request (the row would render above that
+    // turn's user message). A keyed hook still needs a matching prompt; an
+    // unlinked hook rides any continuation.
+    if (target.messages.some((c) => c.role === "user")) return;
+    const kept: typeof pending = [];
+    const cards: DisplayMessage[] = [];
+    for (const p of pending) {
+      if (p.promptKey && promptKey && p.promptKey !== promptKey) { kept.push(p); continue; }
+      const results = p.turn.messages.filter((c) => c.kind === "result");
+      cards.push(...results.map((c) => ({ ...c, sourceId: p.turn.id })));
+      // The result carries this row's output-side secrets; an input-side secret
+      // rode the call card and highlights where that card is shown (above).
+      target.leaks.push(...leaksIn(p.turn.leaks, results));
+      dropped.add(p.turn);
+    }
+    if (cards.length) target.messages.unshift(...cards);
+    pending = kept;
+  };
+  for (const t of turns) {
+    const m = rowMeta.get(t);
+    if (!m) continue;
+    if (m.endpoint === "otel:claude_code.turn") {
+      mergePending(t, m.promptKey);
+      const callCards = t.messages.filter((card) => card.kind === "call");
+      t.messages = t.messages.filter((card) => card.kind !== "call");
+      t.responseCalls.push(...callCards.map((card) => cardAction(card, t.id)));
+      lastClaude = t;
+      seedReported(t);
+      continue;
+    }
+    if (!m.endpoint.startsWith("otel:tool_output:")) continue;
+    const rowLink = links.get(`row:${t.id}`);
+    const callCards = t.messages.filter((card) => card.kind === "call");
+    let callShown = false;
+    if (lastClaude && callCards.length) {
+      // Claude can report a call both in its turn event and in PostToolUse.
+      // Skip a card the turn already listed (matched by tool occurrence);
+      // recover the rest so an under-reported command isn't lost — and carry the
+      // hook's matching leaks onto the response so the recovered arg still
+      // highlights (the turn row never scanned this arg). The codex chain sets
+      // responseLeaks the same way — keep the two paths symmetric (R7).
+      for (const card of callCards) {
+        const tool = card.tool ?? "tool";
+        const dup = reportedByTool.get(tool) ?? 0;
+        if (dup > 0) {
+          reportedByTool.set(tool, dup - 1);
+        } else {
+          lastClaude.responseCalls.push(cardAction(card, t.id));
+          lastClaude.responseLeaks = [...lastClaude.responseLeaks, ...leaksIn(t.leaks, [card])];
+        }
+      }
+      callShown = true;
+    }
+    pending.push({ turn: t, promptKey: rowLink?.promptKey, callShown });
+  }
+
+  // Results with no following cycle stay as their own pending request. Strip a
+  // hook to its result once its command has been shown elsewhere; keep the
+  // command card when nothing else did (a hook before any turn) so the tool
+  // input never vanishes from the transcript.
+  for (const p of pending) {
+    const results = p.turn.messages.filter((c) => c.kind === "result");
+    p.turn.messages = (p.callShown && results.length ? results : p.turn.messages)
+      .map((c) => ({ ...c, sourceId: p.turn.id }));
+    p.turn.responseText = null;
+    p.turn.responseCalls = [];
+  }
+
+  const out: SessionTurn[] = [];
+  for (const t of turns) {
+    if (dropped.has(t) || codexChildren.has(t)) continue;
+    out.push(t);
+    const children = codexOrder.get(t);
+    if (children) out.push(...children.filter((child) => !dropped.has(child)));
+  }
+  return out;
 }
 
 // Where does this request's NEW content start, given the previous wire call's
