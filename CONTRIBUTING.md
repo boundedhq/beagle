@@ -143,8 +143,8 @@ canonical public statement.)
   fails without it.
 - Keep PRs single-purpose. Mechanical renames, formatting-only, or
   vendored-file updates go in their own PRs.
-- The precision gate (`tests/precision.test.ts`, <5% false positives) and
-  the perf budgets (`tests/budget.test.ts`) are ship gates — a PR that
+- The curated detector regression gate (`tests/precision.test.ts`) and the
+  perf budgets (`tests/budget.test.ts`) are ship gates — a PR that
   trades them away needs a very good reason.
 - Changes to `run`/`watch`/install paths deserve a live check against a
   real agent (your own machine is fine — use a scratch `BEAGLE_STATE_DIR`),

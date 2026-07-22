@@ -8,7 +8,7 @@
   "scripts": {
     "build": "bun build --compile src/cli/main.ts src/adapters/scan-worker-entry.ts --outfile dist/beagle",
     "test": "bun test",
-    "lint": "bun scripts/lint-bun-imports.ts && bun scripts/lint-viewer-safety.ts",
+    "lint": "bun scripts/lint-bun-imports.ts && bun scripts/lint-viewer-safety.ts && bun scripts/lint-docs-claims.ts",
     "loc": "bun scripts/loc-report.ts",
     "loc:check": "bun scripts/loc-report.ts . --check",
     "check": "bun run lint && bun run loc:check && tsc --noEmit && bun test"

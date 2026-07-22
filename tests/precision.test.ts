@@ -3,10 +3,10 @@ import { readFileSync } from "node:fs";
 import { compileRules, scan } from "../src/core/scanner/engine";
 import { loadRuleFile } from "../src/core/scanner/rules";
 
-// Detection-precision ship gate (R5): FP rate < 5% on a curated corpus of
-// realistic coding-agent traffic that should NOT trip the loud (structured)
-// tier. Example keys in code are the main FP source, so the corpus is built
-// from exactly those.
+// Detection-precision regression gate (R5): every curated coding-agent
+// negative must avoid the loud (structured) tier. These hand-written fixtures
+// pin known cases; they are not a sample from which to estimate a population
+// false-positive rate.
 const rules = compileRules(
   loadRuleFile(readFileSync("rules/beagle-rules.json", "utf8")),
   new Uint8Array(32).fill(3),
@@ -34,9 +34,12 @@ const NEGATIVES: string[] = [
   'a bearer token goes in the Authorization header',
   'the private key lives in ~/.ssh/id_ed25519',
   'card numbers are validated with the Luhn algorithm',
-  // Both fire under a looser hyphen window, so both hold this corpus to the
-  // formulation that shipped. A negative no candidate ever trips would only
-  // pad the denominator and make this gate easier to pass.
+  // Two deliberate near-miss canaries: the aws-secret-access-key rule is tuned
+  // to REJECT both, but each fires under a looser hyphen/keyword window, so they
+  // pin the shipped formulation. Under the zero-structured-alert gate below a
+  // canary that starts firing is a real precision regression, caught with no
+  // slack (the old "< 5%" rate tolerated one such fixture; this gate tolerates
+  // none).
   'aws-cdk-lib-construct-x 3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5e',
   'aws-object-key: 3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5e',
 ];
@@ -57,12 +60,11 @@ function structuredHits(text: string): number {
   return scan(new TextEncoder().encode(text), {}, rules).findings.filter((f) => f.tier === "structured").length;
 }
 
-describe("detection precision (ship gate)", () => {
-  test("false-positive rate on realistic negatives is < 5%", () => {
+describe("detection precision regression gate", () => {
+  test("every curated negative stays free of structured alerts", () => {
     const fps = NEGATIVES.filter((s) => structuredHits(s) > 0);
-    const rate = fps.length / NEGATIVES.length;
     if (fps.length > 0) console.error("false positives:", fps);
-    expect(rate).toBeLessThan(0.05);
+    expect(fps).toEqual([]);
   });
 
   test("recall: every positive trips the structured tier", () => {
@@ -71,12 +73,16 @@ describe("detection precision (ship gate)", () => {
     expect(misses).toEqual([]);
   });
 
-  test("corpus size matches the count the README cites", () => {
-    // README.md states this gate as "< 5% of 22 curated negatives" (budgets
-    // table + the detector FAQ). The bare percentage would overclaim without
-    // the denominator — < 5% of 22 is "at most one snippet" — so the number is
-    // load-bearing copy. If this corpus grows or shrinks, update the README in
-    // the same change; this pins the two together.
-    expect(NEGATIVES.length).toBe(22);
+  test("the corpora are non-trivially sized (a filter over an empty array passes)", () => {
+    // Both gates above are `expect([].filter(...)).toEqual([])`, which passes
+    // vacuously if the corpus is silently emptied by a bad rebase/dedup. Pin a
+    // floor so accidental shrinkage fails loudly. Not coupled to any doc number
+    // (the README no longer cites a count); a floor, so growth is free.
+    expect(NEGATIVES.length).toBeGreaterThanOrEqual(20);
+    expect(POSITIVES.length).toBeGreaterThanOrEqual(6);
   });
 });
+// The guard that public docs don't restate the curated fixtures as a
+// false-positive RATE lives in scripts/lint-docs-claims.ts (a repo lint over
+// all *.md, run by `bun run lint`), not here — a scanner-precision test should
+// not readFileSync and grep prose.
