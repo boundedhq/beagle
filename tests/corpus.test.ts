@@ -57,7 +57,6 @@ describe("new vendor token rules", () => {
     ["pypi-token", "password = pypi-AgEIcHlwaS5vcmcCJDkwNzYtZGVhZC1iZWVmLTEyMzQtNTY3ODlhYmNkZWYwAAIqWzM"],
     ["sendgrid-key", "SENDGRID=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"],
     ["huggingface-token", "login(token='hf_Ab3dEf6hIj9lMn2pQr5tUv8xYz1Bc4De7F')"],
-    ["twilio-api-key", "TWILIO_SID=SK3f9c1e8b7d62049f5e1c0a8b4d7e2f6c"],
     ["digitalocean-token", "doctl auth init -t dop_v1_3f9c1e8b7d62049f5e1c0a8b4d7e2f6c9a1b3d5e3f9c1e8b7d62049f5e1c0a8b"],
     ["square-token", "SQUARE_ACCESS=sq0atp-Ab3dEf6hIj9lMn2pQr5tUv"],
     ["shopify-token", "X-Shopify-Access-Token: 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"],
@@ -76,6 +75,26 @@ describe("new vendor token rules", () => {
       expect(f.find((x) => x.detector === detector)?.tier).toBe("structured");
     });
   }
+});
+
+describe("vendor identifiers that are not secrets", () => {
+  test("Twilio API Key SID", () => {
+    const sid = "SK3f9c1e8b7d62049f5e1c0a8b4d7e2f6c";
+    for (const text of [
+      `TWILIO_API_KEY=${sid}`,
+      JSON.stringify({ api_key_sid: sid }),
+      `created Twilio Key resource ${sid}`,
+    ]) {
+      expect(scanText(text)).toEqual([]);
+    }
+  });
+
+  test("the Twilio SID exclusion does not suppress neighboring generic shapes", () => {
+    const sid = "SK3f9c1e8b7d62049f5e1c0a8b4d7e2f6c";
+    for (const value of [`${sid}A`, sid.toLowerCase()]) {
+      expect(scanText(`api_key=${value}`).some((f) => f.detector === "generic-api-key")).toBe(true);
+    }
+  });
 });
 
 describe("quiet-tier fallbacks", () => {
