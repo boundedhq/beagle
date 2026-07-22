@@ -1480,17 +1480,9 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
       // tool's OUTPUT is scanned too. Endpoint + token ride env vars the hook
       // process inherits — never argv.
       // Claude takes ONE --settings value (last wins). Keep that same meaning
-      // when the flag is repeated, but collapse every valid pair so no later
-      // user flag can displace Beagle's merged hook and tool-output scanning.
-      let userSettings: string | null = null;
-      const restArgs: string[] = [];
-      for (let i = 0; i < agentArgs.length; i++) {
-        if (agentArgs[i] === "--settings" && agentArgs[i + 1] !== undefined) {
-          userSettings = agentArgs[++i]!;
-        } else {
-          restArgs.push(agentArgs[i]!);
-        }
-      }
+      // when the flag is repeated, but collapse every pair out of the argv so no
+      // later user flag can displace Beagle's merged hook and tool-output scan.
+      const { userSettings, restArgs } = collapseClaudeSettings(agentArgs);
       const settings = userSettings
         ? mergeHookIntoSettings(userSettings, beagleHookCommand())
         : buildHookSettings(beagleHookCommand());
@@ -1832,6 +1824,33 @@ export function graduationNudge(agent: string, telemetry: boolean): string {
     `  Watch it automatically so you never have to prefix again? Run: ${cmd}\n` +
     `  (one-time nudge; it won't ask again)\n\n`
   );
+}
+
+/** Pull every user `--settings` out of Claude's argv, returning the winning
+ *  value (last wins, matching Claude) and the remaining args. Handles both the
+ *  space form (`--settings x`) and the equals form (`--settings=x`) — Claude
+ *  accepts both — and drops a value-less trailing `--settings`. The point is
+ *  that `restArgs` contains NO `--settings`, so the flag Beagle appends after it
+ *  can never be displaced by a later user flag (which would silently disable
+ *  tool-output scanning) nor lose last-wins to a user flag (silently dropping
+ *  the user's own settings). */
+export function collapseClaudeSettings(agentArgs: string[]): {
+  userSettings: string | null;
+  restArgs: string[];
+} {
+  let userSettings: string | null = null;
+  const restArgs: string[] = [];
+  for (let i = 0; i < agentArgs.length; i++) {
+    const arg = agentArgs[i]!;
+    if (arg === "--settings") {
+      if (agentArgs[i + 1] !== undefined) userSettings = agentArgs[++i]!;
+    } else if (arg.startsWith("--settings=")) {
+      userSettings = arg.slice("--settings=".length);
+    } else {
+      restArgs.push(arg);
+    }
+  }
+  return { userSettings, restArgs };
 }
 
 // The shell command Claude Code runs for the tool-output hook: this same
