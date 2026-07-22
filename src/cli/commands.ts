@@ -1567,27 +1567,31 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
   // "this run captured nothing" back-to-back would be contradictory advice.
   const grad = new GraduationTracker(stateDir);
   const shouldNudge = grad.recordRunAndCheck(agentName);
-  // An agent the user deliberately excluded from capture gets no capture-health
-  // signals at all — neither the early "capture active" confirmation nor the
-  // end-of-run zero-capture warning (zero rows there is configured behavior, not
-  // a failure). Read once, reused by both.
-  const excluded = loadConfig(stateDir).excludedAgents.includes(agentName);
   const t0 = Date.now();
-  // Positive mid-session feedback: the moment the FIRST call is actually
-  // captured, print a one-time "capture active" line — so a long session isn't
-  // left believing it's watched only to discover at the very end that it
-  // wasn't. Polls the SAME arrival predicate the end-of-run tripwire uses (a
-  // deadline of 0 makes each poll one cheap store check); armed only in a
-  // capture-enabled, non-excluded mode. stopWatch() clears the interval at exit
-  // — and since it fires only when a call arrived, the end-of-run "NOT captured"
-  // path (which then sees that same call) can't contradict it.
+  // Positive mid-session feedback: the moment the FIRST call for this run is
+  // actually captured, print a one-time "capture active" line — so a long
+  // session isn't left believing it's watched only to discover at the very end
+  // that it wasn't.
+  //
+  // WIRE MODE ONLY. Telemetry (Mode B) rows are all stored under a shared
+  // runId ("otel") behind one daemon-wide token, so the store can't attribute a
+  // captured call to THIS run; a time-scoped check would let a concurrent
+  // telemetry run trip a false "capture active" and mask a dead exporter — the
+  // exact failure this exists to catch (honesty over reassurance). We make the
+  // positive claim only where it's run-attributable; telemetry still gets the
+  // accurate end-of-run check below. The predicate fails CLOSED (silent on an
+  // unreadable store) — the opposite of the end-of-run tripwire's fail-open —
+  // so a store hiccup can never manufacture a false "watched" claim. For a
+  // full-screen TUI agent the line may be wiped by the next alt-screen redraw
+  // (R2), like the daemon-down notice — best-effort. Excluded agents are
+  // skipped (arm-time config read; the end-of-run block re-reads at report
+  // time). stopWatch rides a .finally so a spawn failure can't leave it firing.
   const stopWatch = watchForFirstCapture(
-    captureEnabled && !excluded,
-    () => (telemetry ? otelCallsArrivedSince(stateDir, t0, 0) : runCallsArrived(stateDir, runId, 0)),
+    !telemetry && captureEnabled && !loadConfig(stateDir).excludedAgents.includes(agentName),
+    () => wireCaptureLive(stateDir, runId, t0),
     () => process.stderr.write(`beagle ● capture active — ${agentName} traffic is being watched.\n`),
   );
-  const exitCode = await execAgent(daemon.socketPath, realBinary, finalArgs, modeEnv, cleanupFile);
-  stopWatch();
+  const exitCode = await execAgent(daemon.socketPath, realBinary, finalArgs, modeEnv, cleanupFile).finally(stopWatch);
   // Both modes have silent zero-capture failure modes the agent itself never
   // surfaces — say so loudly rather than let the user believe the run was
   // watched. Gated the same way for both: near-instant runs (--help, version
@@ -1596,6 +1600,9 @@ export async function cmdRun(stateDir: string, agentName: string, rawArgs: strin
   // excluded from capture (zero rows there is configured behavior, not a
   // failure). A rare false positive remains (e.g. `codex login`, which sends
   // no model traffic) — the right trade against silently unwatched runs.
+  // Re-read at report time (not the watcher's arm-time snapshot): a mid-run
+  // exclusion should still suppress the end-of-run warning and the nudge.
+  const excluded = loadConfig(stateDir).excludedAgents.includes(agentName);
   let warned = false;
   if (Date.now() - t0 >= 3_000 && !excluded) {
     if (telemetry) {
@@ -1712,44 +1719,80 @@ export async function runCallsArrived(stateDir: string, runId: string, deadlineM
   }
 }
 
+// One cheap store check for the live "capture active" watcher: has a WIRE call
+// for THIS run landed at or after the run started? Two deliberate differences
+// from the end-of-run tripwire runCallsArrived:
+//   1. Fails CLOSED. runCallsArrived returns true on a null/unreadable store so
+//      it never cries wolf; a POSITIVE signal must do the opposite — on any
+//      missing store or read error return false and stay silent, never affirm
+//      capture we can't verify (honesty over reassurance).
+//   2. Rides the ts_request index. run_id is unindexed, so a bare COUNT on it
+//      full-scans the exchanges table every poll; bounding by ts_request>=t0
+//      (t0 = run start) restricts the scan to a small recent slice regardless
+//      of store size, and LIMIT 1 makes it a bare existence check. run_id is a
+//      fresh per-run UUID, so it — not the ts bound — is what guarantees no
+//      concurrent run can match; the ts_request floor is only an index hint.
+//      That floor is a heuristic, not an invariant: t0 (this process) and
+//      ts_request (the daemon, moments later) are independent wall-clock reads,
+//      so a backward clock step between them could push a genuine capture below
+//      t0 and hide it here for the whole run. It degrades SAFELY — only ever
+//      under-claiming, never a false "active" (run_id still scopes it) — and the
+//      end-of-run runCallsArrived tripwire has no ts bound, so real capture is
+//      still confirmed there. Exported for tests.
+export function wireCaptureLive(stateDir: string, runId: string, sinceTs: number): boolean {
+  const store = openStore(stateDir);
+  if (store === null || isStoreError(store)) return false; // fail closed
+  try {
+    return (
+      store.queryAll<{ one: number }>(
+        "SELECT 1 AS one FROM exchanges WHERE ts_request>=? AND run_id=? LIMIT 1",
+        [sinceTs, runId],
+      ).length > 0
+    );
+  } catch {
+    return false; // read error → stay silent, never a false "capture active"
+  } finally {
+    store.close();
+  }
+}
+
 // The positive counterpart to the zero-capture tripwires above: while the agent
-// runs, poll `check` (an arrival predicate) and the FIRST time it returns true,
-// fire `onActive` exactly once — Beagle is a trust tool, so a long session needs
-// mid-run proof it's watched, not only an end-of-run warning when it ISN'T.
-// Returns a stop() the caller MUST invoke when the agent exits: the interval is
-// unref'd (it can never keep the process alive past the agent) and a poll still
-// in flight when stop() lands can't fire after the fact. `enabled` false — an
-// excluded agent, or a fail-open no-capture run — arms nothing at all. Errors
-// from `check` are swallowed: a transient store hiccup must never disrupt the
-// run. Exported for tests.
+// runs, poll `check` and the FIRST time it returns true, fire `onActive` exactly
+// once — Beagle is a trust tool, so a long session needs mid-run proof it's
+// watched, not only an end-of-run warning when it ISN'T. `check` is synchronous
+// (bun:sqlite is): the `done` latch plus clearInterval give exactly-once, and a
+// setInterval tick can't re-enter a sync callback, so no overlap guard is
+// needed. Returns a stop() the caller MUST invoke when the agent exits: the
+// interval is unref'd (it can never keep the process alive past the agent) and
+// `done` blocks any fire after stop(). `enabled` false — telemetry, an excluded
+// agent, or a fail-open no-capture run — arms nothing. A throw from `check` is
+// swallowed: a transient store hiccup must never disrupt the run. Exported for
+// tests.
 export function watchForFirstCapture(
   enabled: boolean,
-  check: () => Promise<boolean>,
+  check: () => boolean,
   onActive: () => void,
   intervalMs = 500,
 ): () => void {
   if (!enabled) return () => {};
   let done = false;
-  let busy = false; // one poll at a time — a slow check must not stack
   const timer = setInterval(() => {
-    if (done || busy) return;
-    busy = true;
-    check()
-      .then((arrived) => {
-        if (arrived && !done) {
-          done = true;
-          clearInterval(timer);
-          onActive();
-        }
-      })
-      .catch(() => {})
-      .finally(() => {
-        busy = false;
-      });
+    if (done) return;
+    let live = false;
+    try {
+      live = check();
+    } catch {
+      live = false; // a transient store hiccup must never disrupt the run
+    }
+    if (live) {
+      done = true;
+      clearInterval(timer);
+      onActive();
+    }
   }, intervalMs);
   timer.unref?.();
   return () => {
-    done = true; // block a late in-flight poll from firing post-exit
+    done = true; // block any later tick from firing post-exit
     clearInterval(timer);
   };
 }
