@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, chmodSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, chmodSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChangeManifest } from "../src/install/manifest";
@@ -507,6 +507,37 @@ describe("agent detection", () => {
     mkdirSync(local, { recursive: true });
     writeFileSync(p, "not a program\n", { mode: 0o644 });
     expect(detectAgents({ pathDirs: [], extraLocations: [{ agent: "claude", path: p }] })).toEqual([]);
+  });
+
+  test("detects an agent that is a symlink to an executable (npm/brew install shape)", () => {
+    // The executable check resolves symlinks (statSync + accessSync both follow),
+    // which is the COMMON real-world install: a PATH entry symlinked to the real
+    // binary. Pins that so a future switch to a no-follow lstat can't silently
+    // stop detecting agents installed this way.
+    const dir = tmp();
+    const bin = join(dir, "bin");
+    const realDir = join(dir, "real");
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(realDir, { recursive: true });
+    const target = join(realDir, "claude-real");
+    writeFileSync(target, "#!/bin/sh\n");
+    chmodSync(target, 0o755);
+    symlinkSync(target, join(bin, "claude"));
+    expect(detectAgents({ pathDirs: [bin], extraLocations: [] }).map((f) => f.agent)).toEqual(["claude"]);
+  });
+
+  test("ignores a symlink whose target is not executable", () => {
+    // The follow reaches the TARGET's permission, not the link's: a symlink to a
+    // 0o644 file must be rejected just like the direct non-executable case.
+    const dir = tmp();
+    const bin = join(dir, "bin");
+    const realDir = join(dir, "real");
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(realDir, { recursive: true });
+    const target = join(realDir, "claude-real");
+    writeFileSync(target, "not a program\n", { mode: 0o644 });
+    symlinkSync(target, join(bin, "claude"));
+    expect(detectAgents({ pathDirs: [bin], extraLocations: [] })).toEqual([]);
   });
 
   test("reports nothing found cleanly", () => {
