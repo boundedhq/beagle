@@ -518,6 +518,15 @@ function mapCodexRecords(records: OtlpRecord[]): OtelCall[] {
         // Two cards — the command the agent RAN, then its output — so a codex
         // tool row reads like a pi one (a call paired with its result) instead
         // of a single one-sided "tool: output" blob that buried the command.
+        //
+        // DO NOT dedup/merge twin reports here. Codex reports one execution
+        // under TWO events — a harness `exec` (rollout call id) and an inner
+        // `exec_command`/`mcp__*` (internal id) — with no shared key, and the
+        // pair can straddle OTLP batches. Any correlation here is a
+        // time+content guess, and a wrong merge at capture is permanent
+        // evidence corruption in trust-path code. The viewer groups them
+        // (turn folding, time adoption) where a wrong guess costs a misplaced
+        // card that re-derives on the next render, not stored truth.
         // Both carry callId: it pairs the two cards for the viewer and, in B2,
         // links this row to the turn that issued the call. NOT `detail`: a
         // Mode-B mapper that sets detail reopens a raw-through redaction hole

@@ -299,6 +299,17 @@ export function buildSessionTurns(store: Store, sessionId: string, cap = 200): S
 // N's activity. Only a tool row BEFORE any turn row stays standalone —
 // capture is never hidden. Folded cards carry sourceId so their own row's
 // detail/raw view stays one click away.
+//
+// Three stated biases, all accepted because no pairing signal exists at view
+// time, the misplacement is display-only (detail/raw untouched), and a
+// leak-bearing row keeps its own feed line regardless: tool events stamp at
+// COMPLETION, so an execution that outlives its turn (interrupted, next
+// prompt already sent) can adopt into the FOLLOWING turn; a turn whose own
+// row never landed (the mapper skips a prompt-less user_prompt event) leaves
+// its tool rows adopting into the PREVIOUS turn; and the sequential-turns
+// premise is the SESSION's — two conversations glued into one session by the
+// resolver's low-confidence tiers (run/time-gap) interleave their clocks,
+// and a row can then adopt across that seam.
 const TURN_ENDPOINTS = new Set(["otel:claude_code.turn", "otel:codex:user_prompt"]);
 const isToolRow = (endpoint: string) =>
   endpoint.startsWith("otel:tool_output:") || endpoint.startsWith("otel:codex:tool_result:");
@@ -322,41 +333,50 @@ function foldModeBTurns(
   // hash-of-prompt, so repeated identical prompts need the occurrence number.
   const occurrence = new Map<string, number>();
   const index = new Map<string, SessionTurn>();
-  const turnRowsAsc: Array<{ ts: number; turn: SessionTurn }> = []; // ts order (turns[] already is)
+  // Adoption anchors: every turn row that will SURVIVE the fold, in ts order
+  // (turns[] already is). Claude batch partials (occurrence 1+ of a key)
+  // merge away below and must never anchor an adopted row — cards appended
+  // to a dropped turn would vanish with it, hiding capture. Keyless turn
+  // rows (no prompt id reported) can't be link targets but ARE real turns on
+  // screen, so they do anchor — without them adoption would skip past a
+  // visible turn into an older one.
+  const anchorsAsc: Array<{ ts: number; turn: SessionTurn }> = [];
   for (const t of turns) {
     const m = rowMeta.get(t);
-    if (!m?.promptKey || !TURN_ENDPOINTS.has(m.endpoint)) continue;
-    const n = occurrence.get(m.promptKey) ?? 0;
-    occurrence.set(m.promptKey, n + 1);
-    index.set(`${m.promptKey}#${n}`, t);
-    turnRowsAsc.push({ ts: t.tsRequest, turn: t });
+    if (!m || !TURN_ENDPOINTS.has(m.endpoint)) continue;
+    let survives = true;
+    if (m.promptKey) {
+      const n = occurrence.get(m.promptKey) ?? 0;
+      occurrence.set(m.promptKey, n + 1);
+      index.set(`${m.promptKey}#${n}`, t);
+      survives = !(m.endpoint === "otel:claude_code.turn" && n > 0);
+    }
+    if (survives) anchorsAsc.push({ ts: t.tsRequest, turn: t });
   }
-  // The turn a time-adopted row belongs to: the last turn open at its stamp.
+  // The turn a time-adopted row belongs to: the last surviving turn open at
+  // its stamp.
   const coveringTurn = (ts: number): SessionTurn | null => {
-    for (let i = turnRowsAsc.length - 1; i >= 0; i--) {
-      if (turnRowsAsc[i]!.ts <= ts) return turnRowsAsc[i]!.turn;
+    for (let i = anchorsAsc.length - 1; i >= 0; i--) {
+      if (anchorsAsc[i]!.ts <= ts) return anchorsAsc[i]!.turn;
     }
     return null;
   };
   const dropped = new Set<SessionTurn>();
-  // Appends are collected then applied so ordering is explicit. Report time
-  // (ts) is primary — it is the one clock every row shares, so a linked
-  // harness pair and its time-adopted inner twin interleave side by side —
-  // with the rollout seq breaking same-stamp ties among linked rows, and
-  // arrival as the stable last resort.
-  const appends = new Map<SessionTurn, Array<{ cards: DisplayMessage[]; leaks: DetailLeak[]; ts: number; seq: number; arrival: number }>>();
-  let arrival = 0;
-  const append = (target: SessionTurn, from: SessionTurn, seq: number) => {
+  // Appends are collected then applied so ordering is explicit (see the apply
+  // loop). `seq` is set only for rollout call-links — the one source that
+  // actually knows call order; a row-link's stored seq is a constant 0, not
+  // an ordering claim.
+  const appends = new Map<SessionTurn, Array<{ cards: DisplayMessage[]; leaks: DetailLeak[]; ts: number; seq?: number }>>();
+  const append = (target: SessionTurn, from: SessionTurn, seq?: number) => {
     const cards = from.messages.map((c) => ({ ...c, sourceId: from.id }));
     const list = appends.get(target) ?? [];
-    list.push({ cards, leaks: from.leaks, ts: from.tsRequest, seq, arrival });
+    list.push({ cards, leaks: from.leaks, ts: from.tsRequest, seq });
     appends.set(target, list);
     dropped.add(from);
   };
   for (const t of turns) {
     const m = rowMeta.get(t);
     if (!m) continue;
-    arrival++;
     // Claude batch partials: a turn whose tool_result events arrived in their
     // own OTLP batch lands as an extra claude_code.turn row sharing the exact
     // prompt.id. Merge it into the question turn. Safe ONLY because claude's
@@ -367,7 +387,7 @@ function foldModeBTurns(
         // An attach-miss response partial (rare fallback insert) carries the
         // turn's reply — move it home rather than dropping it with the row.
         if (!target.responseText && t.responseText) target.responseText = t.responseText;
-        append(target, t, Number.MAX_SAFE_INTEGER);
+        append(target, t);
       }
       continue;
     }
@@ -375,19 +395,41 @@ function foldModeBTurns(
     // row:<id> first (claude, exact); else the row's own callId → call:<id>
     // (codex, via the rollout); else adopt by time (the twin-report case —
     // see the fold note above).
-    const link = links.get(`row:${t.id}`) ?? t.messages.reduce<
+    const rowLink = links.get(`row:${t.id}`);
+    const link = rowLink ?? t.messages.reduce<
       { promptKey: string; ordinal: number; seq: number } | null
     >((got, c) => got ?? (c.callId ? links.get(`call:${c.callId}`) ?? null : null), null);
     const target = link ? index.get(`${link.promptKey}#${link.ordinal}`) : coveringTurn(t.tsRequest);
     if (!target || target === t) continue;
-    append(target, t, link && !links.has(`row:${t.id}`) ? link.seq : Number.MAX_SAFE_INTEGER);
+    append(target, t, link && !rowLink ? link.seq : undefined);
   }
   for (const [target, list] of appends) {
-    list.sort((a, b) => a.ts - b.ts || a.seq - b.seq || a.arrival - b.arrival);
-    for (const a of list) {
-      target.messages.push(...a.cards);
-      target.leaks.push(...a.leaks);
-    }
+    // Two-tier order. Rollout-linked entries keep the ROLLOUT's call order
+    // (seq): row stamps are completion times, and overlapping calls complete
+    // out of issue order — the rollout is the authority on what ran first.
+    // An unnumbered entry (a time-adopted twin, claude cards) slots after the
+    // last linked entry whose stamp precedes its own — its harness sibling in
+    // every real codex session — so it sits beside its pair without letting
+    // raw stamps reorder the linked skeleton. No linked entry before it →
+    // tier -1, ahead of the skeleton. Ties fall to the row stamp, then to
+    // insertion order (the sort is stable) — no arrival counter needed.
+    const linkedByTs = list.filter((a) => a.seq !== undefined).sort((x, y) => x.ts - y.ts);
+    const tier = (a: { ts: number; seq?: number }): [number, number] => {
+      if (a.seq !== undefined) return [a.seq, 0];
+      let anchor = -1;
+      for (const l of linkedByTs) {
+        if (l.ts <= a.ts) anchor = l.seq!;
+        else break;
+      }
+      return [anchor, 1];
+    };
+    list
+      .map((a) => ({ a, k: tier(a) }))
+      .sort((x, y) => x.k[0] - y.k[0] || x.k[1] - y.k[1] || x.a.ts - y.a.ts)
+      .forEach(({ a }) => {
+        target.messages.push(...a.cards);
+        target.leaks.push(...a.leaks);
+      });
   }
   return dropped.size ? turns.filter((t) => !dropped.has(t)) : turns;
 }

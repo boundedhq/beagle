@@ -1013,7 +1013,7 @@ export class Daemon {
             resolution.sessionId,
             call.toolLinks.map((l) => ({ linkKey: `call:${l.callId}`, promptKey: l.promptKey, ordinal: l.ordinal, seq: l.seq })),
           );
-        } catch { /* unlinked rows render standalone */ }
+        } catch { /* unlinked rows fold by time (or render standalone before any turn) */ }
         continue;
       }
       const scanResult = await this.scanHost.scan(call.request.bodyBytes, {});
@@ -1313,7 +1313,7 @@ export class Daemon {
           this.store.linkTurns(resolution.sessionId, [
             { linkKey: `row:${call.id}`, promptKey: call.turnRef.promptKey, ordinal: 0, seq: 0 },
           ]);
-        } catch { /* the row renders standalone */ }
+        } catch { /* the row folds by time instead of by its exact link */ }
       }
       this.alertEngine.process(
         {
