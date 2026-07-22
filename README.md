@@ -227,7 +227,6 @@ Trust needs numbers, not adjectives:
 |---|---|---|
 | Dependency-free runtime core | ≤ 2,000 LOC | `bun run loc:check` fails the build over budget |
 | Capture-to-alert trust path (the core counts inside this, not on top of it) | ≤ 5,000 LOC | `bun run loc:check` fails over budget, or if a manifest file goes missing |
-| Structured-alert false positives | < 5% of 22 curated negatives | `tests/precision.test.ts` — a regression gate on hand-written snippets, not a real-world rate |
 | Scan time, 1 MB body | p99 ~10 ms | `tests/budget.test.ts` (median < 50 ms ceiling for CI variance); pathological inputs are bounded separately by per-rule/probe caps and the scan worker's 500 ms deadline |
 | Added request latency | p50 ≤ 5 ms | `tests/budget.test.ts` (< 25 ms ceiling for CI variance) |
 | Install size | ≤ 100 MB | CI binary-size check |
@@ -393,13 +392,13 @@ subset, re-tiered and precision-tuned for agent traffic, then vendored as
 data and sha256-pinned at load (see
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)). The matcher is ~200 lines
 you can read in one sitting ([`src/core/scanner/`](src/core/scanner/)). A CI
-regression gate holds the loud (structured) tier to fewer than 5% false
-positives across 22 hand-written negative snippets
-([`tests/precision.test.ts`](tests/precision.test.ts)) — a guard against
-precision regressions on those snippets, not a measured false-positive rate
-over real traffic. Detection tiers are honest: structured hits
-(AWS/GitHub/Stripe/private keys, Luhn-checked cards) alert loudly;
-entropy-only hits stay a quiet "possible."
+regression gate requires every hand-written negative fixture to remain free of
+loud (structured) findings and every positive fixture to remain detected
+([`tests/precision.test.ts`](tests/precision.test.ts)). That guards known cases;
+it is not a measured false-positive rate over representative traffic, and
+Beagle does not publish one without a larger, representative corpus. Detection
+tiers are honest: structured hits (AWS/GitHub/Stripe/private keys,
+Luhn-checked cards) alert loudly; entropy-only hits stay a quiet "possible."
 
 **What happens if Beagle crashes mid-run?**
 The proxy fails open for observation, never blocking your agent: if

@@ -3,10 +3,10 @@ import { readFileSync } from "node:fs";
 import { compileRules, scan } from "../src/core/scanner/engine";
 import { loadRuleFile } from "../src/core/scanner/rules";
 
-// Detection-precision ship gate (R5): FP rate < 5% on a curated corpus of
-// realistic coding-agent traffic that should NOT trip the loud (structured)
-// tier. Example keys in code are the main FP source, so the corpus is built
-// from exactly those.
+// Detection-precision regression gate (R5): every curated coding-agent
+// negative must avoid the loud (structured) tier. These hand-written fixtures
+// pin known cases; they are not a sample from which to estimate a population
+// false-positive rate.
 const rules = compileRules(
   loadRuleFile(readFileSync("rules/beagle-rules.json", "utf8")),
   new Uint8Array(32).fill(3),
@@ -57,12 +57,11 @@ function structuredHits(text: string): number {
   return scan(new TextEncoder().encode(text), {}, rules).findings.filter((f) => f.tier === "structured").length;
 }
 
-describe("detection precision (ship gate)", () => {
-  test("false-positive rate on realistic negatives is < 5%", () => {
+describe("detection precision regression gate", () => {
+  test("every curated negative stays free of structured alerts", () => {
     const fps = NEGATIVES.filter((s) => structuredHits(s) > 0);
-    const rate = fps.length / NEGATIVES.length;
     if (fps.length > 0) console.error("false positives:", fps);
-    expect(rate).toBeLessThan(0.05);
+    expect(fps).toEqual([]);
   });
 
   test("recall: every positive trips the structured tier", () => {
@@ -71,12 +70,12 @@ describe("detection precision (ship gate)", () => {
     expect(misses).toEqual([]);
   });
 
-  test("corpus size matches the count the README cites", () => {
-    // README.md states this gate as "< 5% of 22 curated negatives" (budgets
-    // table + the detector FAQ). The bare percentage would overclaim without
-    // the denominator — < 5% of 22 is "at most one snippet" — so the number is
-    // load-bearing copy. If this corpus grows or shrinks, update the README in
-    // the same change; this pins the two together.
-    expect(NEGATIVES.length).toBe(22);
+  test("public docs do not present curated fixtures as a false-positive rate", () => {
+    const readme = readFileSync("README.md", "utf8");
+    const publicDocs = readme + "\n" + readFileSync("CONTRIBUTING.md", "utf8");
+    const percentageClaim =
+      /(?:false[- ]positives?[\s\S]{0,80}%|%[\s\S]{0,80}false\s*positives?)/i;
+    expect(percentageClaim.test(publicDocs)).toBe(false);
+    expect(readme).toContain("not a measured false-positive rate");
   });
 });
