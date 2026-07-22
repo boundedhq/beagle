@@ -57,6 +57,44 @@ describe("readFirstConfig", () => {
     expect(readFirstConfig([join(dir, "missing.json"), a])).toEqual({ model: "x" });
   });
 
+  test("preserves OpenCode settings from a commented JSONC config", () => {
+    const dir = tmp();
+    const config = join(dir, "opencode.jsonc");
+    writeFileSync(config, `{
+      // Keep the user's selected model.
+      "model": "openai/gpt-5",
+      "plugin": ["opencode-plugin"],
+      /* MCP entries must survive the Beagle redirect. */
+      "mcp": {
+        "docs": {
+          "type": "remote",
+          "url": "https://example.com/docs//search",
+        },
+      },
+      "note": "/* comment markers inside strings are data */",
+    }`);
+
+    const userConfig = readFirstConfig([config]);
+    const redirected = buildRedirectConfig(
+      userConfig,
+      ["provider", "openai", "options", "baseURL"],
+      "http://127.0.0.1:9/run/test",
+    );
+
+    expect(redirected).toEqual({
+      model: "openai/gpt-5",
+      plugin: ["opencode-plugin"],
+      mcp: {
+        docs: {
+          type: "remote",
+          url: "https://example.com/docs//search",
+        },
+      },
+      note: "/* comment markers inside strings are data */",
+      provider: { openai: { options: { baseURL: "http://127.0.0.1:9/run/test" } } },
+    });
+  });
+
   test("null when none exist", () => {
     expect(readFirstConfig([join(tmp(), "nope.json")])).toBeNull();
   });
