@@ -676,6 +676,91 @@ describe("buildSessionTurns — subscription sequencing", () => {
     store.close();
   });
 
+  test("claude places a late-stitched final response after the last tool result", () => {
+    // Claude's initial user_prompt row can receive the final assistant response
+    // in a later OTLP batch. Its request timestamp stays at the start of the
+    // turn, so rendering the stitched response on that row pulls the final
+    // answer above all intervening tool cycles.
+    const store = Store.open(dir);
+    const t0 = Date.now();
+    const first = call({
+      source: "otel", endpoint: "otel:claude_code.turn", agent: "claude",
+      model: "claude-opus-final",
+      promptKey: "prompt-late-final",
+      displayMessages: [
+        { role: "user", content: "research this" },
+        { role: "tool", content: "{}", tool: "ToolSearch", kind: "call" },
+      ],
+      requestBody: enc("research this"), responseBody: enc("final answer"),
+      id: ulid(t0), tsRequest: t0, tsResponse: t0 + 2000,
+    });
+    const firstHook = call({
+      source: "otel", endpoint: "otel:tool_output:ToolSearch", agent: "claude",
+      displayMessages: [
+        { role: "tool", content: "{}", tool: "ToolSearch", kind: "call" },
+        { role: "tool", content: "tool list", tool: "ToolSearch", kind: "result" },
+      ],
+      requestBody: enc("ToolSearch\ntool list"), responseBody: null, tsResponse: undefined,
+      id: ulid(t0 + 300), tsRequest: t0 + 300,
+    });
+    const second = call({
+      source: "otel", endpoint: "otel:claude_code.turn", agent: "claude",
+      promptKey: "prompt-late-final",
+      displayMessages: [{ role: "tool", content: "{}", tool: "WebSearch", kind: "call" }],
+      requestBody: enc("search"), responseBody: enc("searching"),
+      id: ulid(t0 + 1000), tsRequest: t0 + 1000, tsResponse: t0 + 1000,
+    });
+    const secondHook = call({
+      source: "otel", endpoint: "otel:tool_output:WebSearch", agent: "claude",
+      displayMessages: [
+        { role: "tool", content: "{}", tool: "WebSearch", kind: "call" },
+        { role: "tool", content: "search results", tool: "WebSearch", kind: "result" },
+      ],
+      requestBody: enc("WebSearch\nsearch results"), responseBody: null, tsResponse: undefined,
+      id: ulid(t0 + 1200), tsRequest: t0 + 1200,
+    });
+    for (const c of [first, firstHook, second, secondHook]) store.insertCall(c);
+    store.linkTurns("sess-1", [
+      { linkKey: `row:${firstHook.id}`, promptKey: "prompt-late-final", ordinal: 0, seq: 0 },
+      { linkKey: `row:${secondHook.id}`, promptKey: "prompt-late-final", ordinal: 0, seq: 0 },
+    ]);
+
+    const turns = buildSessionTurns(store, "sess-1").turns;
+    expect(turns.map((t) => t.responseText)).toEqual([null, "searching", "final answer"]);
+    expect(turns[2]!.model).toBe("claude-opus-final");
+    expect(turns[2]!.responseSourceId).toBe(first.id);
+    expect(turns[2]!.messages.map((m) => [m.kind, m.content])).toEqual([
+      ["result", "search results"],
+    ]);
+    store.close();
+  });
+
+  test("claude never combines a late answer with a boundary that already asks for another tool", () => {
+    const store = Store.open(dir);
+    const t0 = Date.now();
+    const first = call({
+      source: "otel", endpoint: "otel:claude_code.turn", agent: "claude",
+      promptKey: "prompt-incomplete", displayMessages: [{ role: "user", content: "do it" }],
+      requestBody: enc("do it"), responseBody: enc("late answer"),
+      id: ulid(t0), tsRequest: t0, tsResponse: t0 + 2000,
+    });
+    const toolCycle = call({
+      source: "otel", endpoint: "otel:claude_code.turn", agent: "claude",
+      promptKey: "prompt-incomplete",
+      displayMessages: [{ role: "tool", content: "{}", tool: "Bash", kind: "call" }],
+      requestBody: enc("Bash"), responseBody: null, tsResponse: undefined,
+      id: ulid(t0 + 1000), tsRequest: t0 + 1000,
+    });
+    store.insertCall(first);
+    store.insertCall(toolCycle);
+
+    const turns = buildSessionTurns(store, "sess-1").turns;
+    expect(turns.map((t) => t.responseText)).toEqual(["late answer", null]);
+    expect(turns[1]!.responseCalls.map((c) => c.tool)).toEqual(["Bash"]);
+    expect(turns[1]!.responseSourceId).toBeUndefined();
+    store.close();
+  });
+
   test("codex: Pi-like turns follow ROLLOUT order — seq beats inverted report stamps", () => {
     const store = Store.open(dir);
     const t0 = Date.now();

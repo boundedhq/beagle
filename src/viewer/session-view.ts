@@ -119,6 +119,9 @@ export interface SessionTurn {
   status?: number;
   messages: DisplayMessage[]; // only what this turn ADDED (see delta note above)
   responseText: string | null;
+  /** Original capture row when a late-stitched Claude response is displayed
+   *  on a later request boundary. Keeps that response's raw bytes reachable. */
+  responseSourceId?: string;
   /** Tool calls the model made in THIS turn's response — the "what was sent
    *  back" half the transcript used to show one turn late (as request echoes). */
   responseCalls: ToolAction[];
@@ -150,7 +153,7 @@ export function buildSessionTurns(store: Store, sessionId: string, cap = 200): S
   const turns: SessionTurn[] = [];
   // Row facts the subscription sequencer below keys on; SessionTurn stays the
   // render shape (the client has no use for endpoints).
-  const rowMeta = new Map<SessionTurn, { endpoint: string; promptKey: string | null }>();
+  const rowMeta = new Map<SessionTurn, RowMeta>();
   let system: string | null = null;
   let prevWire: Message[] = [];
   let prevResponseText: string | null = null;
@@ -248,7 +251,11 @@ export function buildSessionTurns(store: Store, sessionId: string, cap = 200): S
       responseLeaks: [],
     };
     turns.push(turn);
-    rowMeta.set(turn, { endpoint: endpoint ?? "", promptKey: prompt_key });
+    rowMeta.set(turn, {
+      endpoint: endpoint ?? "",
+      promptKey: prompt_key,
+      responseTs: call.tsResponse ?? call.tsRequest,
+    });
     if (d.source === "wire") lastWireTurn = turn;
   }
   // Backward leak propagation (R7): a secret inside a response (tool args,
@@ -292,7 +299,7 @@ export function buildSessionTurns(store: Store, sessionId: string, cap = 200): S
 // become the next request in a chain, with the following tool call on their
 // response side; Claude hook results join the next reported response row. Every
 // source card/action carries sourceId, and unplaceable rows remain standalone.
-type RowMeta = { endpoint: string; promptKey: string | null };
+type RowMeta = { endpoint: string; promptKey: string | null; responseTs: number };
 
 function cardAction(card: DisplayMessage, sourceId: string): ToolAction {
   return {
@@ -500,6 +507,41 @@ function sequenceModeBTurns(
     out.push(t);
     const children = codexOrder.get(t);
     if (children) out.push(...children.filter((child) => !dropped.has(child)));
+  }
+
+  // A response-only Claude OTLP batch is stitched onto the original prompt
+  // row in storage. That preserves capture, but the row keeps its old request
+  // timestamp: a final answer arriving after several tool cycles would render
+  // above them. Place only those late-stitched responses on the latest empty
+  // response boundary for the SAME prompt. Exact hook links make this
+  // fail-closed: without a matching later boundary, the stored placement wins.
+  const claudePrompt = (t: SessionTurn): string | null => {
+    const m = rowMeta.get(t);
+    if (!m) return null;
+    if (m.endpoint === "otel:claude_code.turn") return m.promptKey;
+    if (m.endpoint.startsWith("otel:tool_output:")) return links.get(`row:${t.id}`)?.promptKey ?? null;
+    return null;
+  };
+  for (const source of out) {
+    const m = rowMeta.get(source);
+    if (
+      m?.endpoint !== "otel:claude_code.turn" || !m.promptKey ||
+      !source.responseText || m.responseTs <= source.tsRequest
+    ) continue;
+    let target: SessionTurn | null = null;
+    for (const candidate of out) {
+      if (
+        candidate.tsRequest <= source.tsRequest || candidate.tsRequest > m.responseTs ||
+        candidate.responseText !== null || candidate.responseCalls.length > 0 ||
+        claudePrompt(candidate) !== m.promptKey
+      ) continue;
+      target = candidate;
+    }
+    if (!target) continue;
+    target.responseText = source.responseText;
+    target.responseSourceId = source.id;
+    target.model = source.model ?? target.model;
+    source.responseText = null;
   }
   return out;
 }

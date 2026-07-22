@@ -639,7 +639,7 @@ function SessionTranscript({ sessionId, row, refresh, onBack, onPurged }) {
                   : "what the agent reported receiving back"}>⇠ response</div>`}
               ${t.responseText != null && t.responseText !== "" &&
               html`<${TMsg} key=${`${t.id}:resp`} leaks=${respLeaks(t)}
-                m=${{ role: "response", content: t.responseText }} />`}
+                m=${{ role: "response", content: t.responseText, sourceId: t.responseSourceId }} />`}
               ${(t.responseCalls ?? []).length > 0 &&
               html`<${ResponseCalls} calls=${t.responseCalls} leaks=${respLeaks(t)} />`}
               ${i === turns.length - 1 && !view.truncated && (t.responseCalls ?? []).length > 0 &&
@@ -727,6 +727,7 @@ function SystemCard({ text }) {
 // colored role label in its header. Tool/request cards additionally collapse.
 // All bodies render through JsonBody (see render-json.module.js).
 function TMsg({ m, leaks, find }) {
+  const [showSource, setShowSource] = useState(false);
   const content = typeof m.content === "string" ? m.content : JSON.stringify(m.content, null, 2);
   // The one unacceptable failure is a hidden secret: a leak-bearing message
   // never clamps and never renders collapsed.
@@ -745,11 +746,17 @@ function TMsg({ m, leaks, find }) {
   const bare = m.role === "user" || m.role === "response";
   return html`
     <div class=${hasLeak ? "mcard has-leak" : "mcard"}>
-      ${!bare && html`<div class="mc-head"><span class=${`mc-name ${m.role}`}>${m.role}</span></div>`}
+      ${(!bare || m.sourceId) && html`<div class="mc-head">
+        ${!bare && html`<span class=${`mc-name ${m.role}`}>${m.role}</span>`}
+        ${m.sourceId && html`<button class="chip"
+          title="this response was captured on an earlier call — open that call's detail (raw bytes, sizes)"
+          onClick=${() => setShowSource(!showSource)}>${showSource ? "▾" : "▸"} call</button>`}
+      </div>`}
       <div class="mc-body">
         <${JsonBody} content=${content} leaks=${leaks}
           threshold=${m.role === "user" ? 1500 : 2500} hasLeak=${hasLeak} find=${find} />
       </div>
+      ${showSource && html`<${Detail} id=${m.sourceId} />`}
     </div>
   `;
 }
