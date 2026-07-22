@@ -29,12 +29,12 @@ export function buildRedirectConfig(
   return merged;
 }
 
-/** First existing config file among candidates, parsed; null if none/malformed. */
+/** First existing JSON/JSONC config among candidates, parsed; null if none/malformed. */
 export function readFirstConfig(candidates: string[]): Record<string, unknown> | null {
   for (const path of candidates) {
     if (!existsSync(path)) continue;
     try {
-      return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+      return Bun.JSONC.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
     } catch {
       return null; // malformed user config: fall back to a bare override
     }
