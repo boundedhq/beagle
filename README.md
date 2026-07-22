@@ -227,9 +227,14 @@ Trust needs numbers, not adjectives:
 |---|---|---|
 | Core security path | ≤ 2,000 LOC | `bun run loc:check` fails the build over budget |
 | Structured-alert false positives | < 5% of 22 curated negatives | `tests/precision.test.ts` — a regression gate on hand-written snippets, not a real-world rate |
-| Scan time, 1 MB body | p99 ~10 ms | `tests/budget.test.ts` (median < 50 ms ceiling for CI variance); pathological inputs are bounded separately, by the scan worker's 500 ms fail-safe deadline |
+| Scan time, 1 MB body | p99 ~10 ms | `tests/budget.test.ts` (median < 50 ms ceiling for CI variance); pathological inputs are bounded separately by per-rule/probe caps and the scan worker's 500 ms deadline |
 | Added request latency | p50 ≤ 5 ms | `tests/budget.test.ts` (< 25 ms ceiling for CI variance) |
 | Install size | ≤ 100 MB | CI binary-size check |
+
+Scanner resource bounds fail safe: reaching a finding cap, exhausting the
+decode-probe budget, or exceeding the worker deadline marks the exchange
+`incomplete`; with default redaction, unverified content is withheld rather
+than stored under a clean verdict.
 
 Zero third-party runtime dependencies in the core; `bun:*` imports confined
 to `src/adapters/`; the viewer's Preact+htm is vendored and pinned. The core

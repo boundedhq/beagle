@@ -54,7 +54,7 @@ describe("redact-on-capture (R11)", () => {
     const key = "AKIAZQ3DRSTUVWXY2345";
     const args = String.raw`{\"path\":\".env\",\"content\":\"# prod creds\\n${key}\\n\"}`;
     const body = String.raw`{"tool_calls":[{"function":{"name":"write_file","arguments":"${args}"}}]}`;
-    const findings = scan(enc(body), {}, rules).filter((f) => f.secretType === "aws-access-key-id");
+    const findings = scan(enc(body), {}, rules).findings.filter((f) => f.secretType === "aws-access-key-id");
     expect(findings.length).toBe(1);
 
     const out = dec(redactBody(enc(body), findings).bytes);
@@ -74,7 +74,7 @@ describe("redact-on-capture (R11)", () => {
   // rescues it — if the span is wrong, the password ships in cleartext.
   test("a connection-string password matching the username is redacted, not the username", () => {
     const body = '{"MONGO_URL":"mongodb://root:root@db.internal:27017/app"}';
-    const findings = scan(enc(body), {}, rules).filter((f) => f.secretType === "connection-string");
+    const findings = scan(enc(body), {}, rules).findings.filter((f) => f.secretType === "connection-string");
     expect(findings.length).toBe(1);
     const out = dec(applyCaptureRedaction({
       incomplete: false, requestBytes: enc(body), requestFindings: findings, responseBody: null,
@@ -236,7 +236,7 @@ describe("redact-on-capture (R11)", () => {
     // starting with a backslash, which that class does not even accept).
     const key = "Xk7Qm2Vb9Rt4Ws8Yz1Nc6Pd3aJ5Hf0Lg";
     const body = JSON.stringify({ messages: [{ role: "user", content: `config has "api_key": "${key}" in it` }] });
-    expect(scan(enc(body), {}, rules)).toEqual([]); // premise: the body scan sees nothing
+    expect(scan(enc(body), {}, rules).findings).toEqual([]); // premise: the body scan sees nothing
     const out = applyCaptureRedaction({
       incomplete: false,
       requestBytes: enc(body),

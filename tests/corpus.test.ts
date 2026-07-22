@@ -14,7 +14,7 @@ const rules = compileRules(
 );
 
 function scanText(text: string) {
-  return scan(new TextEncoder().encode(text), {}, rules);
+  return scan(new TextEncoder().encode(text), {}, rules).findings;
 }
 
 interface CorpusCase {

@@ -27,6 +27,6 @@ self.onmessage = (event: MessageEvent<InitMsg | ScanMsg>) => {
     return;
   }
   if (!compiled) throw new Error("scan before init");
-  const findings = scan(new Uint8Array(msg.bytes), msg.ctx, compiled);
-  postMessage({ kind: "result", id: msg.id, findings });
+  const result = scan(new Uint8Array(msg.bytes), msg.ctx, compiled);
+  postMessage({ kind: "result", id: msg.id, ...result });
 };

@@ -54,7 +54,7 @@ const POSITIVES: string[] = [
 ];
 
 function structuredHits(text: string): number {
-  return scan(new TextEncoder().encode(text), {}, rules).filter((f) => f.tier === "structured").length;
+  return scan(new TextEncoder().encode(text), {}, rules).findings.filter((f) => f.tier === "structured").length;
 }
 
 describe("detection precision (ship gate)", () => {

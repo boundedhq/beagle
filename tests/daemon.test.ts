@@ -21,7 +21,7 @@ const corpusRules = compileRules(
   loadRuleFile(readFileSync("rules/beagle-rules.json", "utf8")),
   new Uint8Array(32).fill(7),
 );
-const scanRaw = (text: string) => scan(new TextEncoder().encode(text), {}, corpusRules);
+const scanRaw = (text: string) => scan(new TextEncoder().encode(text), {}, corpusRules).findings;
 
 // fake upstream that replies with a fixed Anthropic-ish JSON body
 function fakeUpstream(replyBody?: string): Promise<{ server: Server; port: number; seen: string[] }> {
@@ -1750,6 +1750,28 @@ describe("Daemon end-to-end", () => {
       up.server.close();
     }
   });
+
+  test("a finding-cap scan is stored incomplete and withholds secrets past the cap", async () => {
+    await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
+    const keys = Array.from(
+      { length: 501 },
+      (_, i) => `AKIA${i.toString(36).toUpperCase().padStart(16, "0")}`,
+    );
+    const last = keys.at(-1)!;
+
+    await sendThroughProxy(daemon.proxyPort, "run-e2e", requestBody(keys.join("\n")));
+    await captured(daemon.socketPath);
+
+    const store = Store.openReadOnly(stateDir);
+    const ex = listCalls(store, 10)[0]!;
+    expect(ex.scanState).toBe("incomplete");
+    expect(ex.summary).toBe("[REDACTION INCOMPLETE: content withheld]");
+    const full = store.getCall(ex.id)!;
+    expect(new TextDecoder().decode(full.requestBody!)).toContain("[REDACTION INCOMPLETE");
+    expect(new TextDecoder().decode(full.requestBody!)).not.toContain(last);
+    expect(store.searchLiteral(last)).toEqual([]);
+    store.close();
+  }, 20_000);
 
   test("excluded agent traffic is forwarded but never captured", async () => {
     await controlRequest(daemon.socketPath, { cmd: "set-config", args: { excludedAgents: ["claude-code"] } });

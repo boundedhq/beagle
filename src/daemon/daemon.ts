@@ -623,16 +623,11 @@ export class Daemon {
     // that both read [REDACTED:…]. Appended AFTER the contents, so every content
     // offset (and the search text built from them) is byte-identical to before.
     //
-    // That append order also decides who loses MAX_FINDINGS_PER_RULE, and it is
-    // always this half: the rule scans left to right, so the contents claim the
-    // budget first and the details get what is left. 300 tool calls each
-    // carrying a sub-floor password = 300 content matches + 200 detail matches,
-    // and the last 100 details render in cleartext beside a fully-redacted
-    // content, body and index, on a row that reads scanState "ok". Strictly
-    // better than the value scrub this replaced (which floored out ALL 300),
-    // but do not read "it is a part now" as "it is always covered". Interleaving
-    // the runs would spread the starvation instead of concentrating it — at the
-    // cost of the byte-identical content offsets the line above depends on.
+    // That append order also decides which parts are reported before
+    // MAX_FINDINGS_PER_RULE: contents claim the budget first and details get
+    // what is left. Reaching the cap now marks the derived scan incomplete, so
+    // default redaction withholds the whole call rather than storing unchecked
+    // details on a row labeled ok.
     const detailParts = (parsed?.messages ?? []).map((m) => m.detail ?? "");
     const requestText = call.request.bodyBytes ? new TextDecoder().decode(call.request.bodyBytes) : "";
     const bodyValues = findingValues(requestText, stash?.findings);
@@ -688,10 +683,9 @@ export class Daemon {
     // surfaces BUILT FROM THESE PARTS, the summary was the last one still
     // scrubbing by value.
     //
-    // One boundary that leaves, so nobody reads this as a guarantee: spans only
-    // cover what the scan REPORTED. The engine stops at MAX_FINDINGS_PER_RULE
-    // and still returns "ok", so match 501 of a rule is invisible to every pass
-    // — spans and value scrub alike.
+    // Spans only cover what the scan reported. If MAX_FINDINGS_PER_RULE is
+    // reached, the engine marks this scan incomplete below; default redaction
+    // withholds the call because match 501 cannot be safely spliced or scrubbed.
     //
     // `detail` used to be a second one: not a part, so no span reached it, and
     // the value scrub standing in for one left everything under the 8-char
@@ -1062,9 +1056,8 @@ export class Daemon {
       // response.text and response.bodyBytes are both `ans.answer`. So carrying
       // the merged text too would re-scan bytes already covered while doubling
       // this text against MAX_FINDINGS_PER_RULE, and a response saturated with
-      // secret-shaped matches would start DROPPING findings at half the count
-      // it takes today — dropped findings being exactly the ones that would
-      // have scrubbed the line.
+      // secret-shaped matches would reach the cap at half the count it takes
+      // today and unnecessarily withhold the call.
       const derived = await this.redactDerived(
         messages.map((m) => String(m.content)),
         [call.responseHeadline ?? call.response.text ?? ""],
