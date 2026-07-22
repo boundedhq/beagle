@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, cmdUninstall, countPossibleLeaksSince, detectLine, interpretAskAnswer, isLoopbackHookEndpoint, otelCallsArrivedSince, parseRunArgs, readCodexApiKey, resolveRunMode, runCallsArrived, watchForFirstCapture, wireCaptureLive } from "../src/cli/commands";
+import { cmdLeaks, cmdSearch, cmdShow, cmdStatus, cmdUninstall, collapseClaudeSettings, countPossibleLeaksSince, detectLine, interpretAskAnswer, isLoopbackHookEndpoint, otelCallsArrivedSince, parseRunArgs, readCodexApiKey, resolveRunMode, runCallsArrived, watchForFirstCapture, wireCaptureLive } from "../src/cli/commands";
 import { buildRunEnv, AGENTS } from "../src/cli/agents";
 import { Store, type CallRecord } from "../src/core/store/store";
 import { ulid } from "../src/core/store/ulid";
@@ -575,6 +575,51 @@ describe("Claude telemetry settings redirect", () => {
       await controlRequest(info.socketPath, { cmd: "shutdown" });
     } catch { /* already gone */ }
   }, 20_000);
+});
+
+describe("collapseClaudeSettings", () => {
+  test("no --settings: args pass through, no user settings", () => {
+    expect(collapseClaudeSettings(["--model", "opus", "hi"])).toEqual({
+      userSettings: null,
+      restArgs: ["--model", "opus", "hi"],
+    });
+  });
+
+  test("space form: last value wins, both pairs removed from argv", () => {
+    expect(collapseClaudeSettings(["--settings", "a.json", "user-arg", "--settings", "b.json"])).toEqual({
+      userSettings: "b.json",
+      restArgs: ["user-arg"],
+    });
+  });
+
+  test("equals form is recognized and collapsed (Claude accepts --settings=x)", () => {
+    // Regression: the equals form used to slip through into restArgs, where it
+    // lost last-wins to Beagle's appended --settings and silently dropped the
+    // user's whole settings file.
+    expect(collapseClaudeSettings(["--settings=/my/settings.json", "user-arg"])).toEqual({
+      userSettings: "/my/settings.json",
+      restArgs: ["user-arg"],
+    });
+  });
+
+  test("mixed space and equals forms preserve left-to-right last-wins", () => {
+    expect(collapseClaudeSettings(["--settings", "a.json", "--settings=b.json"]).userSettings).toBe("b.json");
+    expect(collapseClaudeSettings(["--settings=a.json", "--settings", "b.json"]).userSettings).toBe("b.json");
+  });
+
+  test("value-less trailing --settings is dropped, never left to swallow Beagle's flag", () => {
+    // Regression: left in restArgs, a bare trailing --settings would consume
+    // Beagle's own appended "--settings" as its value and turn the hook config
+    // path into a positional — silently disabling tool-output capture.
+    expect(collapseClaudeSettings(["user-arg", "--settings"])).toEqual({
+      userSettings: null,
+      restArgs: ["user-arg"],
+    });
+  });
+
+  test("empty equals form yields an empty string value (not dropped)", () => {
+    expect(collapseClaudeSettings(["--settings="])).toEqual({ userSettings: "", restArgs: [] });
+  });
 });
 
 describe("pi extension redirect (run-level)", () => {
