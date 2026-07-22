@@ -86,7 +86,7 @@ const JSON_MUST_ESCAPE_RE = /["\\\u0000-\u001f]/;
 // than only re-encoded.
 //
 // Narrow by construction, and unit-tested rather than end-to-end for that
-// reason: of the 30 rules, only connection-string (`[^\s@\/]{4,}`) and
+// reason: of the 29 rules, only connection-string (`[^\s@\/]{4,}`) and
 // private-key (`[\s\S]`) have a secret group that can hold a character JSON
 // escapes at all — every other value class is alphanumeric-ish, so this returns
 // null and costs one regex test. And for those two the body scan usually

@@ -78,12 +78,22 @@ describe("new vendor token rules", () => {
 });
 
 describe("vendor identifiers that are not secrets", () => {
-  test("Twilio API Key SID", () => {
-    const sid = "SK3f9c1e8b7d62049f5e1c0a8b4d7e2f6c";
+  test("Twilio API Key SID is not flagged, across delimiter spellings", () => {
+    const sid = "SK3f9c1e8b7d62049f5e1c0a8b4d7e2f6c"; // SK + 32 lowercase hex
+    // Each string places the SID where the generic rule WOULD fire without the
+    // exclusion (keyword within 1-5 separator chars of the value) — verified by
+    // mutation: with the exclusion removed, every one of these produces a
+    // generic-api-key finding, so each genuinely exercises the guard.
     for (const text of [
       `TWILIO_API_KEY=${sid}`,
-      JSON.stringify({ api_key_sid: sid }),
-      `created Twilio Key resource ${sid}`,
+      JSON.stringify({ api_key: sid }), // JSON: api_key":"<sid>
+      `2026-01-02 provisioned twilio key=${sid}`, // log line
+      // '=' donation: the greedy key-separator class shares '=' with the value
+      // class and can push one into the value by backtracking; the guard's =*
+      // prefix must still suppress these (regression pin for that bypass).
+      `key =${sid}`,
+      `key:=${sid}`,
+      `key==${sid}`,
     ]) {
       expect(scanText(text)).toEqual([]);
     }
@@ -91,7 +101,11 @@ describe("vendor identifiers that are not secrets", () => {
 
   test("the Twilio SID exclusion does not suppress neighboring generic shapes", () => {
     const sid = "SK3f9c1e8b7d62049f5e1c0a8b4d7e2f6c";
-    for (const value of [`${sid}A`, sid.toLowerCase()]) {
+    for (const value of [
+      `${sid}A`, // SID + trailing char: no longer the whole-value SID shape
+      sid.toLowerCase(), // lowercase 'sk' prefix: not a Twilio SID
+      "SK" + sid.slice(2).toUpperCase(), // SK + UPPER hex: outside the real (lowercase) SID space
+    ]) {
       expect(scanText(`api_key=${value}`).some((f) => f.detector === "generic-api-key")).toBe(true);
     }
   });
