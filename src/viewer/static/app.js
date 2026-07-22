@@ -17,6 +17,9 @@ const isTypingTarget = (e) => /^(?:INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagNa
 
 // ---- session bootstrap: exchange the one-time URL token for a header credential ----
 let credential = null;
+// Tab-scoped: survives reload, disappears when the tab closes, and never
+// enters the URL. localStorage would outlive the viewer tab and is not used.
+const SESSION_CREDENTIAL_KEY = "beagle.viewerCredential";
 // `beagle ui --session <id>` deep link: land directly on that session's
 // transcript. Rides the #fragment so the id never reaches the server.
 let deepLinkSession = null;
@@ -29,14 +32,25 @@ async function bootstrap() {
   const frag = /^#s=(.+)$/.exec(location.hash);
   if (frag) { try { deepLinkSession = decodeURIComponent(frag[1]); } catch { /* ignore */ } }
   if (boot) history.replaceState(null, "", "/"); // token out of the URL/history
-  if (!boot) return false;
-  const r = await fetch("/api/session", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ boot }),
-  });
-  if (!r.ok) return false;
+  let saved = null;
+  try { saved = sessionStorage.getItem(SESSION_CREDENTIAL_KEY); } catch { /* unavailable */ }
+  if (!boot && !saved) return false;
+  const r = boot
+    ? await fetch("/api/session", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ boot }),
+      })
+    : await fetch("/api/session", {
+        method: "POST",
+        headers: { "x-beagle-token": saved },
+      });
+  if (!r.ok) {
+    if (!boot) { try { sessionStorage.removeItem(SESSION_CREDENTIAL_KEY); } catch { /* unavailable */ } }
+    return false;
+  }
   credential = (await r.json()).credential;
+  try { sessionStorage.setItem(SESSION_CREDENTIAL_KEY, credential); } catch { /* unavailable */ }
   return true;
 }
 

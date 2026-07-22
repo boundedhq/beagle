@@ -64,6 +64,22 @@ describe("ViewerServer hardening (design §6.8)", () => {
     expect(again.status).toBe(401); // invalidated on use
   });
 
+  test("an existing session credential re-bootstraps a reloaded tab", async () => {
+    const cred = await getCredential();
+    const refreshed = await fetch(`${origin()}/api/session`, {
+      method: "POST",
+      headers: { "x-beagle-token": cred },
+    });
+    expect(refreshed.status).toBe(200);
+    expect(await refreshed.json()).toEqual({ credential: cred });
+
+    const rejected = await fetch(`${origin()}/api/session`, {
+      method: "POST",
+      headers: { "x-beagle-token": "0".repeat(64) },
+    });
+    expect(rejected.status).toBe(401);
+  });
+
   test("an oversized /api/session body is capped, not buffered unbounded (pre-auth DoS)", async () => {
     // /api/session reads the body BEFORE the bootstrap token is checked, so an
     // unbounded reader lets any local process exhaust memory. Over the cap the

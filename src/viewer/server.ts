@@ -156,6 +156,18 @@ export class ViewerServer {
     }
 
     if (path === "/api/session" && req.method === "POST") {
+      // A tab keeps its session credential across reloads and presents it here
+      // to re-bootstrap. This does not mint or rotate credentials, so another
+      // tab already using the same viewer session is not invalidated.
+      const existing = req.headers["x-beagle-token"];
+      if (
+        this.credential &&
+        typeof existing === "string" &&
+        constantTimeEqual(existing, this.credential)
+      ) {
+        this.json(res, 200, { credential: this.credential });
+        return;
+      }
       void this.readJson(req).then((body) => {
         const boot = (body as { boot?: string })?.boot;
         if (this.bootToken && typeof boot === "string" && constantTimeEqual(boot, this.bootToken)) {
