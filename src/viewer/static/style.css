@@ -368,10 +368,9 @@ button.linklike:hover { text-decoration: underline; }
 /* Raw payload / stream. Wrap at token boundaries, not mid-token: break-all
    turned indented JSON into a wall of characters. overflow-wrap only breaks a
    genuinely-unbreakable long token (e.g. a minified line) as a last resort. */
-/* The raw view's three blocks: request + response (.rawblock, a foldable JSON
-   tree or flat fallback) and the verbatim stream (.detail pre). Same frame and
-   the same 460px scroll cap so the section reads as one thing; pre-wrap keeps
-   the flat fallback's indentation. */
+/* The raw view's request/response blocks (.rawblock) and verbatim stream
+   (.detail pre). Same frame and the same 460px scroll cap so the section reads
+   as one thing; pre-wrap preserves the stored whitespace and indentation. */
 .detail pre, .rawblock {
   background: var(--bg); padding: 11px 12px; border-radius: 7px;
   border: 1px solid var(--border); overflow-x: auto; overflow-y: auto;
@@ -410,11 +409,6 @@ button.linklike:hover { text-decoration: underline; }
 .jt-chev { display: inline-block; width: 13px; }
 .jt-toggle { cursor: pointer; }
 .jt-toggle:hover .jt-chev, .jt-toggle:hover .jt-p { color: var(--accent); }
-/* A streamed (SSE) response in the raw view: one foldable tree per event,
-   labelled by event type. The type is metadata — quiet, above its data. */
-.sse-ev { margin-bottom: 12px; }
-.sse-ev:last-child { margin-bottom: 0; }
-.sse-ev-type { color: var(--ok); font-size: 11px; margin-bottom: 1px; opacity: 0.85; }
 /* ---- session transcript: the whole session as a conversation thread ---- */
 /* Centered reading column — the feed stays full-width, the transcript earns
    a measure. Everything left-aligned: tint + radius says "human said this";

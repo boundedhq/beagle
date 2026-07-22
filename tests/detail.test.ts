@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildDetail, detailLeaks, detailMessages, type LeakSpan } from "../src/viewer/detail";
+import { buildCallDetail, buildDetail, detailLeaks, detailMessages, type LeakSpan } from "../src/viewer/detail";
 import type { CallRecord } from "../src/core/store/store";
 import type { DisplayMessage } from "../src/parsers/parsers";
 
@@ -88,6 +88,41 @@ describe("buildDetail — response reassembly (UI fix 1)", () => {
     );
     expect(d.messages).toEqual([{ role: "user", content: "run the tests" }]);
     expect(d.responseText).toBe("Running them now.");
+  });
+
+  test("Claude tool invocation is response-side; its hook row keeps only the next request's result", () => {
+    const invocation = { role: "tool" as const, content: '{"query":"beagle"}', tool: "WebSearch", kind: "call" as const };
+    const result = { role: "tool" as const, content: '{"results":["found"]}', tool: "WebSearch", kind: "result" as const };
+
+    const turnCall = call({
+      source: "otel", agent: undefined, endpoint: "otel:claude_code.turn",
+      requestBody: enc('{"query":"beagle"}'),
+      displayMessages: [{ role: "user", content: "search for beagle" }, invocation],
+    });
+    const turn = buildCallDetail(turnCall, []);
+    expect(turn.messages).toEqual([{ role: "user", content: "search for beagle" }]);
+    expect(turn.requestStructured).toBe(true);
+    expect(turn.responseCalls).toEqual([
+      { tool: "WebSearch", args: '{"query":"beagle"}', detail: undefined, callId: undefined },
+    ]);
+    // The session sequencer consumes the original cards and performs its own
+    // cross-row placement; call-feed correction must never pre-empt it.
+    expect(buildDetail(turnCall, []).messages).toEqual([
+      { role: "user", content: "search for beagle" }, invocation,
+    ]);
+    expect(buildDetail(turnCall, []).responseCalls).toEqual([]);
+
+    const hook = buildCallDetail(
+      call({
+        source: "otel", agent: "claude", endpoint: "otel:tool_output:WebSearch",
+        requestBody: enc('WebSearch\n{"query":"beagle"}\n{"results":["found"]}'),
+        displayMessages: [invocation, result],
+      }),
+      [],
+    );
+    expect(hook.messages).toEqual([result]);
+    expect(hook.responseCalls).toEqual([]);
+    expect(hook.requestRaw).toContain('{"query":"beagle"}');
   });
 
   test("wire call with no stored transcript parses its body — the usual case", () => {

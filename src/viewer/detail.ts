@@ -71,6 +71,10 @@ export interface CallDetail {
   captureState: string;
   source: string;
   system: string | null;
+  /** True when the request has a parsed/persisted readable projection, even
+   *  if that projection is intentionally empty (for example, a Claude row
+   *  whose only card moved to the response side). */
+  requestStructured: boolean;
   messages: DisplayMessage[];
   responseText: string | null; // reassembled (SSE or JSON), null if unparseable
   /** Tool calls the model made in THIS response — "what was sent back" beyond
@@ -92,6 +96,22 @@ export interface CallDetail {
 const REDACTED_RE = /\[REDACTED:[^\]]+\]/g;
 
 export function buildDetail(call: CallRecord, spans: LeakSpan[]): CallDetail {
+  return buildDetailWithProjection(call, spans, false);
+}
+
+// The calls feed shows one captured row at a time, so it applies Claude's
+// request/response boundary correction here. The session view deliberately
+// uses buildDetail above: its sequencer needs the original cards to place them
+// across turns using turn_link metadata.
+export function buildCallDetail(call: CallRecord, spans: LeakSpan[]): CallDetail {
+  return buildDetailWithProjection(call, spans, true);
+}
+
+function buildDetailWithProjection(
+  call: CallRecord,
+  spans: LeakSpan[],
+  callFeed: boolean,
+): CallDetail {
   const dec = new TextDecoder("utf-8", { fatal: false });
   const requestRaw = call.requestBody ? dec.decode(call.requestBody) : "";
   const responseRaw = call.responseBody ? dec.decode(call.responseBody) : "";
@@ -99,7 +119,7 @@ export function buildDetail(call: CallRecord, spans: LeakSpan[]): CallDetail {
   const format = detectFormat(call.endpoint ?? "");
 
   const parsedReq = call.requestBody ? parseRequest(format, call.requestBody) : null;
-  const stored = storedProjection(call);
+  const stored = callFeed ? detailProjection(call) : storedProjection(call);
   // Reassemble from the decoded body; fall back to the raw SSE for streamed
   // responses whose decoded body is the event stream.
   const parsedResp =
@@ -126,6 +146,7 @@ export function buildDetail(call: CallRecord, spans: LeakSpan[]): CallDetail {
     captureState: call.captureState,
     source: call.source,
     system: stored?.system ?? parsedReq?.system ?? null,
+    requestStructured: stored !== null || parsedReq !== null,
     // Mode B bodies are scan text, not provider JSON — their structure rides
     // the persisted display_messages instead, and the stored response body IS
     // the response text (the mapper wrote it that way). A stored projection
@@ -184,14 +205,14 @@ export function buildDetail(call: CallRecord, spans: LeakSpan[]): CallDetail {
 // re-derive is wrong for it too: parseResponse REASSEMBLES a streamed answer,
 // so a key the provider split across two text_delta frames is in no single
 // frame of the stored body and re-parsing rebuilds it whole.
-function storedProjection(
-  call: CallRecord,
-): {
+interface StoredProjection {
   system?: string;
   messages: DisplayMessage[];
   responseText?: string;
   responseCalls?: ToolAction[];
-} | null {
+}
+
+function storedProjection(call: CallRecord): StoredProjection | null {
   let stored = call.displayMessages as DisplayMessage[] | undefined | null;
   if (!stored?.length) return null;
   // The reply's tool calls trail everything, in order (see Daemon.captureCall).
@@ -222,6 +243,44 @@ function storedProjection(
     responseText,
     responseCalls,
   };
+}
+
+// Claude's telemetry reports a tool invocation on the turn row, then the
+// PostToolUse hook repeats that input beside the tool result. Those are two
+// conversation boundaries, not two request cards in one call detail:
+//   turn row: invocation is what Claude asked the agent to run (response)
+//   hook row: result is what the agent sends into the next turn (request)
+// Keep the duplicated hook input in requestRaw for scanning/raw inspection,
+// but do not repeat it in the readable projection.
+function detailProjection(call: CallRecord): StoredProjection | null {
+  const stored = storedProjection(call);
+  // Endpoint names are the schema discriminator. `agent` is nullable in the
+  // store (including older rows), so using it as a second gate would make two
+  // otherwise-identical Claude captures render differently.
+  if (call.source !== "otel" || !stored) return stored;
+
+  if (call.endpoint === "otel:claude_code.turn") {
+    const callCards = stored.messages.filter((m) => m.kind === "call");
+    if (callCards.length === 0) return stored;
+    return {
+      ...stored,
+      messages: stored.messages.filter((m) => m.kind !== "call"),
+      responseCalls: [
+        ...(stored.responseCalls ?? []),
+        ...callCards.map((m) => ({
+          tool: m.tool ?? "tool",
+          detail: m.detail || undefined,
+          args: m.content || undefined,
+          callId: m.callId,
+        })),
+      ],
+    };
+  }
+
+  if (call.endpoint?.startsWith("otel:tool_output:")) {
+    return { ...stored, messages: stored.messages.filter((m) => m.kind !== "call") };
+  }
+  return stored;
 }
 
 // Every string a row stores as its own transcript, for placeholder discovery
