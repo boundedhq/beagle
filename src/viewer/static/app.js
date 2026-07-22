@@ -4,11 +4,16 @@
 // renders through JsonBody/RawBody from ./render-json.module.js — that module
 // is the single place the §6.8 and R7 (secrets always highlighted) rules live.
 import { h, render } from "preact";
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import htm from "htm";
 import { Highlighted, JsonBody, RawBody, hasFind } from "./render-json.module.js";
 
 const html = htm.bind(h);
+
+// Window-level Escape handlers back out of a VIEW — but while focus is in a
+// form field, Escape belongs to the field (clearing a search input must not
+// also tear down the screen behind it).
+const isTypingTarget = (e) => /^(?:INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName ?? "");
 
 // ---- session bootstrap: exchange the one-time URL token for a header credential ----
 let credential = null;
@@ -77,6 +82,7 @@ function App() {
   // this view always changes its prop.
   const [stitched, setStitched] = useState(null);
   const searchBox = useRef(null);
+  const searchSeq = useRef(0); // doSearch generation — stale responses drop
 
   useEffect(() => {
     api.get("/api/feed").then(setCalls);
@@ -148,8 +154,15 @@ function App() {
   async function doSearch(e) {
     e.preventDefault();
     const term = searchBox.current?.value ?? "";
+    // Generation counter: only the LATEST submission may render. Without it,
+    // whichever POST resolves last wins — submit "foo" (slow) then "food"
+    // (fast) and the late "foo" response would overwrite "food"'s results
+    // under an input that still says "food". Clearing bumps it too, so a
+    // late response can't resurrect a search the user already dismissed.
+    const gen = ++searchSeq.current;
     if (!term) return setSearch(null);
     const r = await api.post("/api/search", { term });
+    if (gen !== searchSeq.current) return; // superseded while in flight
     // Tolerate the store-missing shape (a bare []) — render it as no hits.
     setSearch({ term, hits: r?.hits ?? [], truncated: !!r?.truncated });
   }
@@ -160,6 +173,11 @@ function App() {
   const callCount = stats?.calls ?? calls.length;
   const sessionCount = stats?.sessions ?? new Set(calls.map((x) => x.sessionId)).size;
   const agentCount = stats?.agents ?? new Set(calls.map((x) => x.agent).filter(Boolean)).size;
+  // ONE derived view mode — the four main-area screens are mutually exclusive
+  // by construction (a future view is one added case here, not a gate to
+  // remember on every sibling). Search sits on top of whatever was open;
+  // clearing it falls back to the state underneath, untouched.
+  const view = search != null ? "search" : openSession != null ? "session" : tab;
 
   return html`
     <header>
@@ -239,11 +257,14 @@ function App() {
       </div>
     </header>
     <nav class="tabs" role="tablist">
-      <button role="tab" aria-selected=${tab === "calls" && !openSession ? "true" : "false"}
-        class=${tab === "calls" && !openSession ? "tab active" : "tab"}
+      <!-- selection derives from the view mode, so an active SEARCH deselects
+           both tabs — a screen reader must never hear "calls, selected" while
+           the search results have replaced the calls list -->
+      <button role="tab" aria-selected=${view === "calls" ? "true" : "false"}
+        class=${view === "calls" ? "tab active" : "tab"}
         onClick=${() => { setSearch(null); setTab("calls"); setOpenSession(null); }}>calls</button>
-      <button role="tab" aria-selected=${tab === "sessions" || openSession ? "true" : "false"}
-        class=${tab === "sessions" || openSession ? "tab active" : "tab"}
+      <button role="tab" aria-selected=${view === "sessions" || view === "session" ? "true" : "false"}
+        class=${view === "sessions" || view === "session" ? "tab active" : "tab"}
         onClick=${() => { setSearch(null); setTab("sessions"); setOpenSession(null); }}>sessions${
           sessionCount > 0 ? html` <span class="tab-count">${sessionCount}</span>` : ""
         }</button>
@@ -253,10 +274,10 @@ function App() {
       html`<div class="banner" onClick=${() => setBanner(null)}>
         ▲ ${banner.title}${banner.subtitle ? ` — ${banner.subtitle}` : ""} — ${banner.body}
       </div>`}
-      ${search != null && html`<${SearchView} search=${search}
+      ${view === "search" && html`<${SearchView} search=${search} leaksOnly=${leaksOnly}
         onClear=${() => setSearch(null)}
         onSession=${(sid) => { setSearch(null); setOpenSession({ id: sid, row: null }); }} />`}
-      ${search == null && openSession != null &&
+      ${view === "session" &&
       html`<${SessionTranscript} sessionId=${openSession.id} row=${openSession.row}
         refresh=${stitched?.sessionId === openSession.id ? stitched.n : 0}
         onBack=${() => setOpenSession(null)}
@@ -266,10 +287,10 @@ function App() {
           api.get("/api/leaks").then(setLeaks);
           api.get("/api/stats").then(setStats);
         }} />`}
-      ${search == null && openSession == null && tab === "sessions" &&
+      ${view === "sessions" &&
       html`<${Sessions} leaksOnly=${leaksOnly}
         onOpen=${(s) => setOpenSession({ id: s.sessionId, row: s })} />`}
-      ${search == null && openSession == null && tab === "calls" && html`
+      ${view === "calls" && html`
         ${visible.length === 0 && html`<div class="empty">
           no calls${leaksOnly ? " with leaks" : ""} yet — run an agent under
           ${" "}<code>beagle run</code> and its traffic appears here live<br />
@@ -499,7 +520,9 @@ function SessionTranscript({ sessionId, row, refresh, onBack, onPurged }) {
     setConfirmDel(false);
   }
   useEffect(() => {
-    const onKey = (e) => { if (e.key === "Escape") onBack(); };
+    // Same typing guard as the search view: Esc in the header's search input
+    // clears the input (the browser's own behavior), not the whole transcript.
+    const onKey = (e) => { if (e.key === "Escape" && !isTypingTarget(e)) onBack(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey); // else it fires on the list view
   }, [onBack]);
@@ -824,11 +847,18 @@ function Detail({ id, refresh, onSession, find }) {
   const fresh = newFrom != null ? messages.slice(newFrom) : messages.slice(-1);
   // A context message that holds a leak must never sit behind the collapsed
   // fold — R7: detected secrets are ALWAYS visibly highlighted. When one does,
-  // show the whole history inline (correctness beats brevity here). The
-  // searched term earns the same treatment: a search hit whose match sits in
-  // resent context must not open onto a view with the match folded away.
-  const leakInOlder = context.some((m) => leaks.some((l) => l.value && String(m.content ?? "").includes(l.value)));
-  const findInOlder = context.some(
+  // show the whole history inline (correctness beats brevity here). `detail`
+  // counts as much as `content`: a derived-only redaction can leave its
+  // placeholder in a card's detail line and nowhere else (see storedText in
+  // detail.ts) — every sibling surface (findInOlder, readableText,
+  // leakNotVisible) already scans both, and a folded card renders NEITHER.
+  // The searched term earns the same treatment: a search hit whose match sits
+  // in resent context must not open onto a view with the match folded away.
+  const leakInOlder = context.some((m) =>
+    leaks.some((l) =>
+      l.value && (String(m.content ?? "").includes(l.value) || String(m.detail ?? "").includes(l.value))),
+  );
+  const findInOlder = find != null && context.some(
     (m) => hasFind(String(m.content ?? ""), find) || hasFind(String(m.detail ?? ""), find),
   );
   const showOlderInline = (newFrom == null && context.length <= 3) || leakInOlder || findInOlder;
@@ -925,7 +955,7 @@ function Detail({ id, refresh, onSession, find }) {
           `
         : html`
             ${system != null &&
-            html`<${Chip} label="system prompt" body=${system} />`}
+            html`<${Chip} label="system prompt" body=${system} find=${find} />`}
             ${messages.length > 0 &&
             html`<div class="dir-label sent"
               title=${detail.source === "wire"
@@ -958,27 +988,36 @@ function Detail({ id, refresh, onSession, find }) {
 }
 
 // Same collapsible card the transcript uses for its system prompt — one
-// visual for one concept, on both screens.
-function Chip({ label, body }) {
-  const [open, setOpen] = useState(false);
+// visual for one concept, on both screens. The system prompt IS indexed for
+// search, so a hit can live only here: when it does, the chip starts open and
+// the term is amber-marked (leak marking stays out of this card by design —
+// the leakbar's "open raw" pointer owns that case; Highlighted with no leaks
+// renders text nodes + find marks only).
+function Chip({ label, body, find }) {
+  const [open, setOpen] = useState(() => hasFind(body, find));
   return html`
     <div class="syscard">
       <div class="sys-head" onClick=${() => setOpen(!open)}>${open ? "▾" : "▸"} ${label}</div>
-      ${open && html`<pre>${body}</pre>`}
+      ${open && html`<pre><${Highlighted} text=${body} find=${find} /></pre>`}
     </div>
   `;
 }
 
-// One context snippet: the matched text marked amber inside its surroundings.
-// pre/post render through Highlighted — same invariants as every body: text
-// nodes only (§6.8), and a detected secret in the context gets its red mark
-// (R7 — the server widens windows so a value is never half-shown). The match
-// segment ALSO renders through Highlighted: when the searched term is itself
-// the leaked secret (the "did my key leave?" search), the red leak mark must
-// win inside the amber find mark, exactly as it does in every body.
+// One context snippet, rendered as ONE Highlighted pass over the whole window
+// (pre + match + post joined back together). One pass, not three: a detected
+// secret can STRADDLE the match boundary — searching a prefix of your own
+// leaked key is the flagship use — and a value split across segments would
+// slip past each segment's whole-value check, rendering a secret without its
+// red mark. Joined, the leak split runs first and wins whole; the term's own
+// occurrences (the central match included — it is a verbatim slice of this
+// text) get the amber find mark from the same pass. Same two invariants as
+// every body (§6.8 text nodes, R7 marks); the server's window widening keeps
+// values whole at the window's outer edges. Known residual: a term whose own
+// text was altered by whitespace collapse loses its amber (the header still
+// names it); red leak marks are unaffected.
 function Snippet({ s, leaks, term }) {
   return html`<div class="sv-snippet">
-    <${Highlighted} text=${s.pre} leaks=${leaks} find=${term} /><mark class="find"><${Highlighted} text=${s.match} leaks=${leaks} /></mark><${Highlighted} text=${s.post} leaks=${leaks} find=${term} />
+    <${Highlighted} text=${s.pre + s.match + s.post} leaks=${leaks} find=${term} />
   </div>`;
 }
 
@@ -996,7 +1035,9 @@ function SearchHit({ h, term, open, onToggle, onSession }) {
         <span class=${h.hasLeak ? "dot err" : "dot"}></span>
         <span class="sv-time">${fmtDivider(h.tsRequest, true)}</span>
         <span class="sv-sum" title=${h.summary ?? ""}>${h.summary ?? "(no summary)"}</span>
-        ${h.matchCount > 1 && html`<span class="chip">${h.matchCount} matches</span>`}
+        ${h.matchCount > 1 && html`<span class="chip"
+          title=${"the term occurs " + h.matchCount + " times in this call's sent text — " +
+            "the snippets window the first few; open the call to see every occurrence marked"}>${h.matchCount} matches</span>`}
         ${h.hasLeak && html`<span class="chip leak">leak</span>`}
         <button class="linklike sv-toggle"
           onClick=${(e) => { e.stopPropagation(); onToggle(); }}>
@@ -1013,52 +1054,78 @@ function SearchHit({ h, term, open, onToggle, onSession }) {
 // The search view — a first-class screen that REPLACES the list while active
 // (results and feed no longer interleave). Hits group by session, newest
 // session first, conversation order inside; Esc or ✕ returns to the view the
-// user was on, and the header input still holds the term for a re-run.
-function SearchView({ search, onClear, onSession }) {
+// user was on, and the header input still holds the term for a re-run. The
+// header's "leaks only" toggle narrows THIS list too, the same way it narrows
+// the feed and the sessions tab — a control that visibly reacts must never be
+// a silent no-op on the screen it's shown beside.
+function SearchView({ search, leaksOnly, onClear, onSession }) {
   const { term, hits, truncated } = search;
   const [openHit, setOpenHit] = useState(null);
   useEffect(() => { setOpenHit(null); }, [search]); // new results → no stale open pane
   useEffect(() => {
-    const onKey = (e) => { if (e.key === "Escape") onClear(); };
+    // Esc backs out of the results — but while the user is typing in a field
+    // (the search input above), the browser's own Escape (clear the text)
+    // must win alone, not also tear down the view they're refining.
+    const onKey = (e) => { if (e.key === "Escape" && !isTypingTarget(e)) onClear(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClear]);
 
-  // Group by session, preserving arrival order (newest-first) for the groups;
-  // inside a group the hits flip to chronological — a conversation reads down.
-  const groups = [];
-  const bySession = new Map();
-  for (const h of hits) {
-    let g = bySession.get(h.sessionId);
-    if (!g) {
-      g = { sessionId: h.sessionId, agent: h.agent, hits: [] };
-      bySession.set(h.sessionId, g);
-      groups.push(g);
+  // Group by session: groups keep arrival order (newest-first — a Map holds
+  // insertion order), hits inside flip to chronological so a conversation
+  // reads down. Memoized: the App re-renders on every SSE frame, and
+  // regrouping an unchanged result set each time is avoidable churn.
+  const { shown, groups } = useMemo(() => {
+    const kept = leaksOnly ? hits.filter((h) => h.hasLeak) : hits;
+    const bySession = new Map();
+    for (const h of kept) {
+      let g = bySession.get(h.sessionId);
+      if (!g) {
+        g = { sessionId: h.sessionId, agent: h.agent, hits: [] };
+        bySession.set(h.sessionId, g);
+      }
+      g.hits.push(h);
     }
-    g.hits.push(h);
-  }
-  for (const g of groups) g.hits.reverse();
+    const gs = [...bySession.values()];
+    for (const g of gs) g.hits.reverse();
+    return { shown: kept, groups: gs };
+  }, [search, leaksOnly]);
+  const hidden = hits.length - shown.length;
+
+  // The plural stays open-ended ("1+ calls") whenever the server page was cut:
+  // with "leaks only" narrowing a truncated page, even a single shown call
+  // can't claim to be the only one.
+  const plus = truncated ? "+" : "";
+  const headline = `sent in ${shown.length}${plus} ${shown.length === 1 && !plus ? "call" : "calls"}` +
+    ` across ${groups.length}${plus} ${groups.length === 1 && !plus ? "session" : "sessions"}`;
 
   return html`
-    <div class="searchview">
+    <div class="searchview" role="region" aria-label="search results">
       <div class="sv-head">
         <span class="sv-q">“${term}”</span>
-        ${hits.length === 0
-          ? html`<span class="sv-count">no matches — not in any call still in the store.</span>`
-          : html`<span class="sv-count">sent in ${hits.length}${truncated ? "+" : ""}${" "}
-              call${hits.length === 1 && !truncated ? "" : "s"} across${" "}
-              ${groups.length}${truncated ? "+" : ""}${" "}
-              session${groups.length === 1 && !truncated ? "" : "s"}</span>`}
+        ${shown.length > 0
+          ? html`<span class="sv-count" aria-live="polite">${headline}</span>`
+          : hits.length === 0
+            ? html`<span class="sv-count" aria-live="polite">no matches — not in any call still in the store.</span>`
+            : html`<span class="sv-count" aria-live="polite">all ${hits.length}${plus} matching
+                call${hits.length === 1 ? "" : "s"} hidden by leaks only</span>`}
         <button onClick=${onClear} title="back to where you were (Esc)">✕ clear</button>
       </div>
       ${truncated &&
       html`<div class="sv-note">showing only the ${hits.length} newest matching calls — narrow the term to reach older ones</div>`}
+      ${hidden > 0 && shown.length > 0 &&
+      html`<div class="sv-note">leaks only — ${hidden} clean call${hidden === 1 ? "" : "s"} hidden</div>`}
       ${hits.length === 0 &&
       html`<div class="empty">
         search covers what your agents <span class="hl">sent</span>${" "}
         — prompts and tool inputs, exact text — not what models replied.<br />
         <span class="hint">purged or expired calls are no longer searchable; a match here${" "}
         is proof the text left the machine, absence is not proof it never did</span>
+      </div>`}
+      ${hits.length > 0 && shown.length === 0 &&
+      html`<div class="empty">
+        none of the matching calls leaked a secret — turn off${" "}
+        <span class="hl">leaks only</span> to see all ${hits.length}${plus} of them.
       </div>`}
       ${groups.map(
         (g) => html`

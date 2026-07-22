@@ -2,7 +2,7 @@
 // out of the core Store so display queries don't count against the R9
 // security-path budget — reads a read-only handle via Store.queryAll.
 import { escapeLike, type Store } from "../core/store/store";
-import { detailLeaks, leakSpansFor, type DetailLeak } from "./detail";
+import { leakValuesFor, type DetailLeak } from "./detail";
 
 export interface LeakEvent {
   id: string;
@@ -130,6 +130,11 @@ export interface SearchCall {
 // ASCII-only lowercase, length-preserving — the same case model as SQLite's
 // LIKE, so offsets found on the folded copy slice the ORIGINAL text exactly
 // (full Unicode folding can change length: "İ".toLowerCase() is two chars).
+// Mirrors asciiLower in static/render-json.module.js: the client re-finds the
+// term with ITS copy for the marks and fold-opens, so the two must fold
+// identically — change both together, or a hit opens with its match hidden.
+// (No shared import on purpose: the render module pulls in preact/htm, which
+// has no place in the server's feed-projection graph.)
 function asciiLower(s: string): string {
   return s.replace(/[A-Z]/g, (c) => c.toLowerCase());
 }
@@ -159,13 +164,19 @@ function snip(
     // can't be red-marked (the client highlights by whole-value match), so a
     // straddled one widens the window instead. One pass per value — the
     // residual (a value straddling another value's extension) is vanishing,
-    // and the row's leak chip + the expanded detail still carry it. Same
-    // accepted residual for a value holding a whitespace RUN, which display
-    // collapse would alter: it won't red-mark in the snippet, chip/detail do.
+    // and the row's leak chip + the expanded detail still carry it. Two more
+    // accepted residuals of the same shape, both still flagged by chip+detail:
+    // a value holding a whitespace RUN (display collapse alters it), and a
+    // value whose byte form differs between this PARSED search text and the
+    // raw body the spans were cut from (an escaped-form secret) — value
+    // equality can't bridge either.
     for (const v of leakValues) {
+      // The loop guard re-reads `end` each pass, so an occurrence straddling
+      // an already-extended end still widens it further; inside the body
+      // j < end always holds, so only the far side needs testing.
       for (let j = content.indexOf(v); j !== -1 && j < end; j = content.indexOf(v, j + 1)) {
         if (j < start && j + v.length > start) start = j;
-        if (j < end && j + v.length > end) end = j + v.length;
+        if (j + v.length > end) end = j + v.length;
       }
     }
     windowEnd = end;
@@ -198,10 +209,12 @@ export function searchCalls(
   const truncated = rows.length > limit;
   const hits = rows.slice(0, limit).map((r) => {
     const id = r.id as string;
-    // Leak values ride only on flagged rows (rare), where they cost one call
-    // fetch each — the price of never rendering a detected secret unmarked.
-    const call = r.has_leak ? store.getCall(id) : null;
-    const leaks = call ? detailLeaks(call, leakSpansFor(store, id)) : [];
+    // Leak values ride only on flagged rows, via a NARROW fetch (request body
+    // + stored transcript) — the price of never rendering a detected secret
+    // unmarked, without dragging every flagged row's response/sse payloads
+    // through memory (the "searched for the leaked key itself" case flags
+    // every hit at once).
+    const leaks = r.has_leak ? leakValuesFor(store, id) : [];
     const { matchCount, snippets } = snip(
       String(r.content ?? ""),
       term,

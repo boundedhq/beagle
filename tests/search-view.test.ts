@@ -195,6 +195,66 @@ describe("searchCalls (viewer search projection)", () => {
     expect(clean.leaks).toEqual([]);
   });
 
+  test("a redacted row's placeholders ride as its leak values — no raw body needed", () => {
+    // Redact-on-capture rows carry [REDACTED:type:shorthash] placeholders in
+    // body and search text alike; the placeholders ARE the highlightable
+    // values, and the TYPE between the colons labels the chip (a legacy
+    // hash-less "[REDACTED:type]" must parse to the same clean type).
+    const c = mkCall({
+      id: "redacted-row",
+      searchText: "needle then [REDACTED:github-pat:ab12cd] inline",
+      requestBody: new TextEncoder().encode('{"m":"use [REDACTED:github-pat:ab12cd] here"}'),
+      redacted: true,
+    });
+    store.insertCall(c);
+    store.upsertLeakEvent({
+      fingerprint: "fp-r", sessionId: "s1", detector: "gitleaks", secretType: "github-pat",
+      severity: "high", confidenceTier: "structured", destination: "api.anthropic.com",
+      callId: "redacted-row", ts: Date.now(),
+    });
+    const h = searchCalls(store, "needle").hits[0]!;
+    expect(h.leaks).toEqual([
+      { value: "[REDACTED:github-pat:ab12cd]", secretType: "github-pat", tier: "structured" },
+    ]);
+    // legacy hash-less placeholder: same clean type, bracket never leaks in
+    store.insertCall(mkCall({
+      id: "redacted-legacy",
+      searchText: "needle legacy [REDACTED:github-pat] here",
+      requestBody: new TextEncoder().encode("[REDACTED:github-pat]"),
+      redacted: true,
+    }));
+    store.upsertLeakEvent({
+      fingerprint: "fp-r2", sessionId: "s1", detector: "gitleaks", secretType: "github-pat",
+      severity: "high", confidenceTier: "structured", destination: "api.anthropic.com",
+      callId: "redacted-legacy", ts: Date.now(),
+    });
+    const legacy = searchCalls(store, "needle").hits.find((x) => x.callId === "redacted-legacy")!;
+    expect(legacy.leaks[0]!.secretType).toBe("github-pat");
+  });
+
+  test("one corrupt display_messages row degrades to body-only values, not a failed search", () => {
+    const token = "ghp_CorruptCorruptCorruptCorruptCorr1234";
+    const body = `{"content":"${token}"}`;
+    store.insertCall(mkCall({
+      id: "corrupt-dm",
+      searchText: `needle with ${token}`,
+      requestBody: new TextEncoder().encode(body),
+    }));
+    const at = body.indexOf(token);
+    store.upsertLeakEvent({
+      fingerprint: "fp-c", sessionId: "s1", detector: "gitleaks", secretType: "github-pat",
+      severity: "high", confidenceTier: "structured", destination: "api.anthropic.com",
+      callId: "corrupt-dm", ts: Date.now(), spanStart: at, spanEnd: at + token.length,
+    });
+    // Corrupt the stored transcript out from under the row — the search must
+    // still answer (the old getCall path would THROW here and 500 the whole
+    // request; the narrow path guards its parse).
+    store.queryAll(`UPDATE payloads SET display_messages='{not json' WHERE exchange_id='corrupt-dm'`);
+    const { hits } = searchCalls(store, "needle");
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.leaks.map((l) => l.value)).toEqual([token]);
+  });
+
   test("a snippet window extends rather than bisect a detected secret value", () => {
     const token = "ghp_EdgeEdgeEdgeEdgeEdgeEdgeEdgeEdge1234";
     // Place the token so the default post-window (100 chars) would cut it in

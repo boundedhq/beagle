@@ -16,6 +16,10 @@ const html = htm.bind(h);
 // ASCII-only lowercase, length-preserving — matches the store's LIKE matching
 // (which made the call a search hit), and keeps folded offsets valid on the
 // original text (full Unicode folding can change length: "İ" → "i̇").
+// Mirrors asciiLower in src/viewer/feed-query.ts: the server folds the same
+// way to find and window matches, and a hit it flags must re-match HERE for
+// the marks and fold-opens. Change both together, or a search hit opens with
+// its match unmarked and folded away.
 const asciiLower = (s) => s.replace(/[A-Z]/g, (c) => c.toLowerCase());
 
 // Pure splitter behind the search-term marks: runs of text, hit or not, for a
@@ -46,9 +50,14 @@ export function hasFind(text, find) {
 
 // A text run with its search-term matches wrapped in an amber <mark> — text
 // nodes only (§6.8). Display-only: never consulted for parse/fold decisions.
+// One scan: findRuns already answers "no match" with a single plain run, so a
+// hasFind pre-check would fold and scan the same text a second time for
+// nothing (this runs per key, string leaf, and prose run of a searched body).
 function findMarked(text, find) {
-  if (!find || !hasFind(text, find)) return text;
-  return findRuns(text, find).map((r) => (r.hit ? html`<mark class="find">${r.text}</mark>` : r.text));
+  if (!find || typeof text !== "string") return text;
+  const runs = findRuns(text, find);
+  if (runs.length === 1 && !runs[0].hit) return text;
+  return runs.map((r) => (r.hit ? html`<mark class="find">${r.text}</mark>` : r.text));
 }
 
 // Renders text, wrapping each detected secret value in a red <mark>. Splits on
@@ -293,11 +302,17 @@ function JsonNode({ k, v, leaks, depth, find }) {
     </div>`;
   }
   const entries = Array.isArray(v) ? v.map((x, i) => [i, x]) : Object.entries(v);
-  const json = JSON.stringify(v);
   // A subtree carrying a secret must not start folded (R7). One carrying the
   // searched term starts open too — the user came here to see that match.
-  const holdsLeak = (leaks ?? []).some((l) => l.value && json.includes(l.value));
-  const [open, setOpen] = useState(holdsLeak || hasFind(json, find) || depth === 0 || json.length <= 160);
+  // Lazy initializer, and the stringify lives inside it: the serialization and
+  // the leak/find scans only decide the MOUNT state, and every SSE refresh
+  // re-renders the whole transcript — paying a per-node subtree stringify on
+  // each of those renders was pure waste.
+  const [open, setOpen] = useState(() => {
+    const json = JSON.stringify(v);
+    const holdsLeak = (leaks ?? []).some((l) => l.value && json.includes(l.value));
+    return holdsLeak || hasFind(json, find) || depth === 0 || json.length <= 160;
+  });
   const [o, c] = Array.isArray(v) ? ["[", "]"] : ["{", "}"];
   if (entries.length === 0) return html`<div class="jt-row">${key}<span class="jt-p">${o}${c}</span></div>`;
   return html`<div>
@@ -320,7 +335,8 @@ function JsonNode({ k, v, leaks, depth, find }) {
 // searched term starts expanded — the fold must not hide the match the user
 // came for (they can still collapse it).
 function ClampedText({ content, leaks, threshold, hasLeak, find }) {
-  const [expanded, setExpanded] = useState(hasFind(content, find));
+  // Lazy: the fold of the whole body decides only the mount state.
+  const [expanded, setExpanded] = useState(() => hasFind(content, find));
   const clampable = content.length > threshold && !hasLeak;
   if (!clampable) return html`<${Highlighted} text=${content} leaks=${leaks} find=${find} />`;
   return html`
@@ -338,7 +354,8 @@ function ClampedText({ content, leaks, threshold, hasLeak, find }) {
 // leak-bearing case never clamps (R7), the find-bearing case starts expanded,
 // and the text is never sliced.
 function MixedBody({ segments, content, leaks, threshold, hasLeak, find }) {
-  const [expanded, setExpanded] = useState(hasFind(content, find));
+  // Lazy: same as ClampedText — mount-only decision, don't refold per render.
+  const [expanded, setExpanded] = useState(() => hasFind(content, find));
   const clampable = content.length > threshold && !hasLeak;
   const body = segments.map((s, i) =>
     s.kind === "text"

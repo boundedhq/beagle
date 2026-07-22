@@ -288,6 +288,12 @@ export class ViewerServer {
             // Rich hits (snippets + metadata) so the search view stands alone;
             // searchCalls itself refuses the match-everything empty term.
             this.json(res, 200, searchCalls(store, term));
+          } catch {
+            // This runs detached from the outer try/catch (the .then fires
+            // after apiRoute returned), so without a catch a throw — e.g. one
+            // corrupt row among the per-hit leak fetches — would write NO
+            // response and leave the browser's fetch hanging. Fail loud + fast.
+            try { this.json(res, 500, { error: "search failed" }); } catch { /* headers already sent */ }
           } finally {
             store.close();
           }
