@@ -21,15 +21,15 @@ npm install -g @boundedhq/beagle
 
 ## Quick start
 
-### 1. [Try it safely](#without-an-agent)
+### 1. Try it safely
 
 ```sh
 beagle demo
 ```
 
 This runs a self-contained drill through Beagle's real capture and alert path,
-then opens the result in the dashboard. No agent, account, tokens, or network
-connection required.
+then opens the result in the dashboard. No agent, account, tokens, or outbound
+connection required — [more ways to test](#test-the-alert-safely).
 
 ### 2. Capture a real session
 
