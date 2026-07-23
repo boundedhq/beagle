@@ -3,7 +3,7 @@
 [![CI](https://github.com/boundedhq/beagle/actions/workflows/ci.yml/badge.svg)](https://github.com/boundedhq/beagle/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**See what your AI coding agents send to model providers — and get alerted
+**See what your AI agents send to model providers — and get alerted
 when a secret goes with it.**
 
 Beagle gives you a local, searchable record of sessions from Claude Code,
@@ -84,7 +84,8 @@ agent's own report — see **Capture modes**.)
 If you build agents, Beagle doubles as a context debugger: develop under
 `beagle run`, then read what the model actually saw. (In the shot above,
 `redact-on-capture` — the default — masked the key before it was ever
-written to disk; turn it off if you want Beagle's copy byte-exact.)
+written to disk; run `beagle config redact-on-capture off` if you want Beagle's
+copy byte-exact.)
 
 ## Capture modes
 
@@ -92,14 +93,17 @@ The command is the same for every agent — `beagle run <agent>` for one
 session, `beagle watch <agent>` for always-on. What changes is *how* Beagle
 captures, and it picks that automatically from how the agent is signed in:
 
-| Your agent | Signed in with | What happens |
+| Your agent | Using | What happens |
 |---|---|---|
 | **Claude Code** | Anthropic API key | wire capture — full fidelity |
 | **Claude Code** | Claude.ai subscription (Pro/Max) | telemetry capture, auto-detected |
 | **Codex** | OpenAI API key | wire capture — full fidelity |
 | **Codex** | "Sign in with ChatGPT" | telemetry capture, auto-detected |
-| **opencode** | API key **or** ChatGPT sign-in | wire capture — full fidelity |
-| **pi** | API key **or** ChatGPT sign-in | wire capture — full fidelity |
+| **opencode** | OpenAI provider | wire capture — full fidelity |
+| **pi** | OpenAI provider | wire capture — full fidelity |
+
+For opencode and pi, both OpenAI API keys and ChatGPT sign-in are supported.
+Anthropic/Claude and other providers are future support targets.
 
 `beagle detect` only checks your local PATH and known application or
 configuration directories; it sends nothing anywhere. Recognized agents that
@@ -126,28 +130,9 @@ Nothing leaves your machine: the report goes to a loopback receiver on
 `127.0.0.1`, and the vendor's reporting flags are set per run, never written
 to your agent's config. One footnote: if your agent already exports telemetry
 to a company collector, that export is redirected to Beagle for the duration
-of the run — your collector won't receive events from that session.
-(opencode's and pi's ChatGPT sign-ins need none of this — their traffic
-proxies normally at full fidelity.)
-
-**And telemetry sessions still read like conversations.** The vendors' exports
-arrive scattered — one event per tool execution, and Codex's omits the
-assistant's reply entirely — but the dashboard sequences them with the same
-request/response pattern as a wire-captured Pi session: a model response asks
-for a tool, and the next request carries that tool's result. The final answer
-appears after the final result (for Codex, it is recovered from the session log
-Codex itself writes and arrives a beat later). Every captured telemetry row
-also remains in the calls feed, so a live tool row never disappears after a
-refresh; reconstructed cards link back to that row's raw detail.
-
-This sequencing is a display projection and fails open: rollout links provide
-Codex's tool order, Claude hook ids keep results within their user prompt, and
-an event that cannot be placed stays standalone. Codex reports each execution
-twice — a harness step and the inner tool — so both appear, as they do in
-Codex's own UI. The underlying rows remain independently captured, scanned,
-redacted, and searchable. The one gap wire capture doesn't have: Codex encrypts
-its reasoning, so what the model was thinking between tools is the one thing a
-telemetry transcript can't show.
+of the run — your collector won't receive events from that session. One
+limitation: Codex encrypts its reasoning, so telemetry capture cannot show what
+the model was thinking between tools.
 
 ## Always-on (`beagle watch`)
 
@@ -225,39 +210,6 @@ beagle config [...]        # redact-on-capture, exclusions, per-agent run-mode
 
 `beagle help` lists them all. The whole loop works headless — a skeptic never
 has to start the viewer.
-
-## Budgets (published, enforced in CI)
-
-Trust needs numbers, not adjectives:
-
-| Budget | Design target | CI gate |
-|---|---|---|
-| Dependency-free runtime core | ≤ 2,000 LOC | `bun run loc:check` fails the build over budget |
-| Capture-to-alert trust path (the core counts inside this, not on top of it) | ≤ 5,000 LOC | `bun run loc:check` fails over budget, or if a manifest file goes missing |
-| Scan time, 1 MB body | p99 ~10 ms | `tests/budget.test.ts` (median < 50 ms ceiling for CI variance); pathological inputs are bounded separately by per-rule/probe caps and the scan worker's 500 ms deadline |
-| Added request latency | p50 ≤ 5 ms | `tests/budget.test.ts` (< 25 ms ceiling for CI variance) |
-| Install size | ≤ 100 MB | CI binary-size check |
-
-Scanner resource bounds fail safe: reaching a finding cap, exhausting the
-decode-probe budget, or exceeding the worker deadline marks the exchange
-`incomplete`; with default redaction, unverified content is withheld rather
-than stored under a clean verdict.
-
-Zero third-party runtime dependencies in the core; `bun:*` imports confined
-to `src/adapters/`; the viewer's Preact+htm is vendored and pinned. `src/core/`
-is that portability boundary, not the whole security audit scope. The wider
-capture-to-alert trust path is declared explicitly in
-[`TRUST_PATH_SCOPE`](scripts/loc-report.ts): core interception, scanning,
-alerting, and persistence plus daemon ingestion, telemetry/format parsers,
-redact-on-capture, scanner hosting, rollout capture, SQLite adaptation, and
-alert delivery, plus the demo's loopback-only/fail-closed orchestration.
-`bun run loc` labels both `CORE` and non-core `TRUST` files;
-the core is counted once inside the trust-path total (the two budgets are
-nested, not additive). This is a legibility gate, not a claim that code
-outside the manifest needs no security review: the viewer's read-time
-rendering (which chooses the redacted projection over re-deriving the raw
-body), plus CLI orchestration and installation, remain reviewed and visible
-in the total LOC report though outside the budgeted manifest.
 
 ## Trust properties
 
@@ -470,6 +422,13 @@ bun run build          # → dist/beagle (self-contained binary)
 export PATH="$PWD/dist:$PATH"                     # this shell only (add to your shell rc to persist)
 ln -sf "$PWD/dist/beagle" /usr/local/bin/beagle   # or install it system-wide (may need sudo)
 ```
+
+CI keeps the trust-critical surface small and testable: the dependency-free
+core is capped at 2,000 lines, the declared capture-to-alert trust path at
+5,000 lines, and the release binary at 100 MB. Scanner and proxy-latency
+regression tests are also release gates. If a scan reaches a resource limit,
+Beagle marks it incomplete and, with default redaction, withholds unverified
+content.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Beagle is a product of
 [Bounded](https://github.com/boundedhq), MIT-licensed.
