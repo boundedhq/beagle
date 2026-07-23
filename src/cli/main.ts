@@ -5,6 +5,7 @@ import {
   cmdStatus, cmdStop, cmdUninstall, cmdUnwatch, cmdUnwatchAll, cmdUnwatchSelect, cmdWatch,
   defaultStateDir, offerRefreshedShell, parseWatchArgs, readLineSync,
 } from "./commands";
+import { cmdDemo } from "./demo";
 import { BEAGLE_VERSION } from "../core/version";
 
 export const VERSION = BEAGLE_VERSION;
@@ -31,6 +32,8 @@ usage:
                                  always-on service until the next watch
                                  (refuses while a session is being captured)
   beagle detect                  find supported agents on this machine
+  beagle demo                    safely trigger a local canary alert; no agent,
+                                 external network, or saved data
   beagle status                  trust strip: coverage, store, retention
   beagle search [string]         was this ever sent? definitive answer
                                  (no argument: reads the term from stdin, so
@@ -104,6 +107,9 @@ export async function run(argv: string[]): Promise<number> {
     case "detect":
       console.log(cmdDetect());
       return 0;
+    case "demo":
+      if (rest.length > 0) { console.error("usage: beagle demo"); return 2; }
+      return cmdDemo();
     case "status": {
       const { controlRequest } = await import("../daemon/control");
       const { readFileSync } = await import("node:fs");

@@ -12,7 +12,7 @@ import {
   serializeRequest,
   type HeaderList,
 } from "./http1";
-import type { RunRegistry, ResolvedRun } from "./registry";
+import type { ResolvedRun } from "./registry";
 
 // Hard ceiling on a single buffered request. Beagle buffers the whole request
 // before forwarding, so an unbounded (or stalled) local request would grow
@@ -39,8 +39,15 @@ export interface CapturedCall extends Call {
   meta: Call["meta"] & { captureState: "ok" | "truncated" };
 }
 
+/** The proxy only needs run resolution. Production supplies RunRegistry;
+ *  small, non-persistent callers (such as the local demo) can supply an
+ *  in-memory lookup without constructing a Store. */
+export interface RunLookup {
+  resolve(runId: string): ResolvedRun | null;
+}
+
 export interface ProxyOptions {
-  registry: RunRegistry;
+  registry: RunLookup;
   scan: (bytes: Uint8Array, ctx: ScanContext) => Promise<unknown>;
   onCall: (call: CapturedCall) => void;
   captureBufferCap: number;
