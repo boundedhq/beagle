@@ -53,6 +53,18 @@ it sends nothing anywhere.
 Desktop applications are reported separately from same-named CLIs: finding
 Claude Desktop or the Codex app does not imply their sessions are captured.
 
+Want to see Beagle fire before trusting it with an agent? Run:
+
+```sh
+beagle demo
+```
+
+The demo generates a fake AWS-shaped canary, sends it through Beagle's real
+local proxy and production scanner to a mock bound to `127.0.0.1`, and triggers
+the normal OS notification. It needs no agent, account, or API key; opens no
+external connection; and stores nothing. Its terminal result closes the loop
+even when OS notifications are unavailable.
+
 `beagle run` wraps **one** session. It touches none of *your* files or
 config — captures land in Beagle's own store (`~/.local/state/beagle`), and
 the only thing it starts is a local capture daemon that idle-exits when
@@ -214,6 +226,7 @@ What Beagle is **not**:
 
 ```sh
 beagle detect              # find supported agents and recognized coverage gaps
+beagle demo                # prove local proxy + scanner + alert; stores nothing
 beagle run <agent>         # capture one session; nothing changed on your system
 beagle watch <agent>       # make that agent always-on (guided; asks before each change)
 beagle unwatch [<agent>]   # stop watching; restores your setup
@@ -257,7 +270,8 @@ capture-to-alert trust path is declared explicitly in
 [`TRUST_PATH_SCOPE`](scripts/loc-report.ts): core interception, scanning,
 alerting, and persistence plus daemon ingestion, telemetry/format parsers,
 redact-on-capture, scanner hosting, rollout capture, SQLite adaptation, and
-alert delivery. `bun run loc` labels both `CORE` and non-core `TRUST` files;
+alert delivery, plus the demo's loopback-only/no-persistence orchestration.
+`bun run loc` labels both `CORE` and non-core `TRUST` files;
 the core is counted once inside the trust-path total (the two budgets are
 nested, not additive). This is a legibility gate, not a claim that code
 outside the manifest needs no security review: the viewer's read-time
@@ -430,8 +444,9 @@ capture fails, your agent's traffic still flows; the gap is recorded as
   delivery; **on the trust path** (budgeted)
 - `src/daemon/` — capture → ingest → alert orchestration (`daemon.ts`, budgeted)
   plus the control-plane socket (`control.ts`, outside the manifest)
-- `src/viewer/`, `src/cli/`, `src/install/` — application and orchestration code:
-  reviewed and disclosed in the total LOC report, but not in the budgeted trust manifest
+- `src/viewer/`, `src/install/`, and most of `src/cli/` — application and
+  orchestration code: reviewed and disclosed in the total LOC report, but not
+  in the budgeted trust manifest (`src/cli/demo.ts` is the explicit exception)
 - `rules/` — vendored, pinned detection rules (data; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md))
 
 ## Development

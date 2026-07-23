@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 describe("compiled binary", () => {
   test(
-    "binary works OUTSIDE the repo: daemon starts, embedded scanner catches a leak",
+    "binary works OUTSIDE the repo: stateless demo and daemon scanner both work",
     async () => {
       // Regression for the v1 ship-blocker: rules, viewer statics, and the
       // scan worker must be embedded — no repo checkout at runtime.
@@ -21,6 +21,17 @@ describe("compiled binary", () => {
       const run = Bun.spawnSync([out, "--version"], { cwd: dir });
       expect(run.exitCode).toBe(0);
       expect(run.stdout.toString()).toMatch(/^beagle \d+\.\d+\.\d+/);
+
+      // The demo must carry its rules + scan worker in the binary, work with
+      // no notifier command available, and leave no state behind.
+      const demoStateDir = join(dir, "demo-state-must-not-exist");
+      const demo = Bun.spawnSync([out, "demo"], {
+        cwd: dir,
+        env: { ...process.env, BEAGLE_STATE_DIR: demoStateDir, PATH: "/nonexistent" },
+      });
+      expect(demo.exitCode).toBe(0);
+      expect(demo.stdout.toString()).toContain("nothing was retained");
+      expect(existsSync(demoStateDir)).toBe(false);
 
       // fake upstream
       const { createServer, connect } = await import("node:net");

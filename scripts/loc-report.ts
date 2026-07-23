@@ -23,12 +23,12 @@ export const TRUST_PATH_SCOPE = {
     "src/transform/", // redact-on-capture
   ],
   // Individually-listed files from a directory that is only PARTLY in scope.
-  // src/daemon holds daemon.ts (the capture → ingest → scan → alert orchestrator)
-  // alongside control.ts (the control-plane socket transport, deliberately out),
-  // so it can't be a whole-directory entry — a new src/daemon file must be added
-  // here consciously. These explicit files are also the deletion tripwires
+  // src/daemon and src/cli are only PARTLY in scope: daemon.ts owns the
+  // capture → ingest → scan → alert path, while demo.ts owns the drill's
+  // loopback-only / no-persistence guarantees. Their neighboring control and
+  // application commands stay out. Explicit files are also deletion tripwires
   // (missingTrustPathFiles): a rename that drops one fails CI loudly.
-  files: ["src/daemon/daemon.ts"],
+  files: ["src/daemon/daemon.ts", "src/cli/demo.ts"],
 } as const;
 
 export interface LocResult {

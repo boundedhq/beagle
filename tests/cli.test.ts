@@ -894,6 +894,7 @@ describe("beagle help / detect surfaces", () => {
       const run = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "cli", "main.ts"), arg]);
       expect(run.exitCode).toBe(0);
       expect(run.stdout.toString()).toContain("beagle run <agent>");
+      expect(run.stdout.toString()).toContain("beagle demo");
       expect(run.stdout.toString()).toContain("beagle stop");
     }
   });

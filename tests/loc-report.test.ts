@@ -50,7 +50,7 @@ describe("locReport", () => {
     expect(r.perFile.find((f) => f.file.endsWith("main.ts"))?.trustPath).toBe(false);
   });
 
-  test("the complex capture/redaction modules are actually attributed to the trust path", () => {
+  test("the complex capture/redaction/demo modules are actually attributed to the trust path", () => {
     // Exercise the real isTrustPath logic (not just the manifest constant): a
     // directory-covered module and the explicit daemon file must both count.
     const root = scratch();
@@ -60,6 +60,7 @@ describe("locReport", () => {
       "src/transform/redact.ts", // directory-covered (src/transform/)
       "src/notifier/notifier.ts", // directory-covered (src/notifier/)
       "src/daemon/daemon.ts", // explicit file entry
+      "src/cli/demo.ts", // explicit file entry (loopback/no-persistence drill)
     ]) {
       mkdirSync(join(root, rel, ".."), { recursive: true });
       writeFileSync(join(root, rel), "const a = 1;\n");
@@ -75,6 +76,7 @@ describe("locReport", () => {
       "src/transform/redact.ts",
       "src/notifier/notifier.ts",
       "src/daemon/daemon.ts",
+      "src/cli/demo.ts",
     ]) {
       expect(byName(rel)?.trustPath).toBe(true);
     }
@@ -82,16 +84,19 @@ describe("locReport", () => {
   });
 
   test("a missing explicit manifest file is flagged; a fully-present tree flags nothing", () => {
-    // daemon.ts absent → surfaced (never silently shrinks scope).
+    // Explicit files absent → surfaced (never silently shrinks scope).
     const missing = scratch();
     mkdirSync(join(missing, "src/core"), { recursive: true });
     writeFileSync(join(missing, "src/core/x.ts"), "const x = 1;\n");
     expect(locReport(missing).missingTrustPathFiles).toContain("src/daemon/daemon.ts");
-    // daemon.ts present → missing list is EMPTY (the case CI actually runs; a
+    expect(locReport(missing).missingTrustPathFiles).toContain("src/cli/demo.ts");
+    // Both present → missing list is EMPTY (the case CI actually runs; a
     // guard that flagged present files would fail the build forever).
     const present = scratch();
     mkdirSync(join(present, "src/daemon"), { recursive: true });
+    mkdirSync(join(present, "src/cli"), { recursive: true });
     writeFileSync(join(present, "src/daemon/daemon.ts"), "const d = 1;\n");
+    writeFileSync(join(present, "src/cli/demo.ts"), "const e = 1;\n");
     expect(locReport(present).missingTrustPathFiles).toEqual([]);
   });
 
@@ -160,14 +165,18 @@ describe("locReport", () => {
     const clean = scratch();
     mkdirSync(join(clean, "src/core"), { recursive: true });
     mkdirSync(join(clean, "src/daemon"), { recursive: true });
+    mkdirSync(join(clean, "src/cli"), { recursive: true });
     writeFileSync(join(clean, "src/core/x.ts"), "const a = 1;\n");
     writeFileSync(join(clean, "src/daemon/daemon.ts"), "const b = 2;\n");
+    writeFileSync(join(clean, "src/cli/demo.ts"), "const c = 3;\n");
     expect(run(clean, true).exitCode).toBe(0);
 
     const overCore = scratch();
     mkdirSync(join(overCore, "src/core"), { recursive: true });
     mkdirSync(join(overCore, "src/daemon"), { recursive: true });
+    mkdirSync(join(overCore, "src/cli"), { recursive: true });
     writeFileSync(join(overCore, "src/daemon/daemon.ts"), "const b = 2;\n");
+    writeFileSync(join(overCore, "src/cli/demo.ts"), "const c = 3;\n");
     writeFileSync(
       join(overCore, "src/core/big.ts"),
       Array.from({ length: CORE_BUDGET + 1 }, (_, i) => `const v${i} = ${i};`).join("\n") + "\n",
