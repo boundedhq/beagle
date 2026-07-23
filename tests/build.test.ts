@@ -45,6 +45,14 @@ describe("compiled binary", () => {
         env: { ...process.env, BEAGLE_STATE_DIR: demoStateDir },
       }).stdout.toString();
       expect(demoLeaks).toContain("2 [demo] drill events");
+      const demoCallId = demoLeaks.match(/call ([0-9A-Z]{26})/)?.[1];
+      expect(demoCallId).toBeDefined();
+      const demoShow = Bun.spawnSync([out, "show", demoCallId!], {
+        cwd: dir,
+        env: { ...process.env, BEAGLE_STATE_DIR: demoStateDir },
+      }).stdout.toString();
+      expect(demoShow).toContain("staging deploy cannot authenticate");
+      expect(demoShow).toContain("matching secret access key is configured for staging");
       const cleanDemo = Bun.spawnSync([out, "demo", "--clean"], {
         cwd: dir,
         env: { ...process.env, BEAGLE_STATE_DIR: demoStateDir },

@@ -48,11 +48,13 @@ export function generateDemoCanary(bytes: Uint8Array = randomBytes(16)): string 
 }
 
 const CANNED_SSE = [
-  'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_beagle_demo","type":"message","role":"assistant","model":"beagle-loopback-demo","content":[],"usage":{"input_tokens":20,"output_tokens":0}}}',
+  'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_beagle_demo","type":"message","role":"assistant","model":"claude-sonnet-4-demo","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":53,"output_tokens":0}}}',
   'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
-  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Beagle demo complete. This response came from the local mock."}}',
+  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"That line contains an AWS access key ID. Check that the matching secret access key is configured for staging, "}}',
+  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"confirm the credentials belong to the intended account, and rotate them if they may have been exposed. "}}',
+  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Avoid pasting credentials into chats or logs."}}',
   'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
-  'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":12}}',
+  'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":48}}',
   'event: message_stop\ndata: {"type":"message_stop"}',
   "",
 ].join("\n\n");
@@ -63,6 +65,7 @@ export async function startDemoMock(): Promise<DemoMock> {
     response.writeHead(200, {
       "content-type": "text/event-stream",
       "content-length": String(Buffer.byteLength(CANNED_SSE)),
+      "request-id": "req_beagle_demo",
       connection: "close",
     });
     response.end(CANNED_SSE);
@@ -104,9 +107,18 @@ export async function runDemoExchange(
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: "beagle-loopback-demo",
-        max_tokens: 32,
-        messages: [{ role: "user", content: `AWS_ACCESS_KEY_ID=${canary}` }],
+        model: "claude-sonnet-4-demo",
+        max_tokens: 128,
+        stream: true,
+        system: "You are a coding assistant helping troubleshoot a deployment configuration.",
+        messages: [{
+          role: "user",
+          content:
+            "I'm debugging why our staging deploy cannot authenticate. " +
+            "This is the relevant line from the local .env file:\n\n" +
+            `AWS_ACCESS_KEY_ID=${canary}\n\n` +
+            "What should I check?",
+        }],
       }),
     },
   );

@@ -651,7 +651,7 @@ function SessionTranscript({ sessionId, row, refresh, onBack, onPurged }) {
               ${i === turns.length - 1 && !view.truncated && (t.responseCalls ?? []).length > 0 &&
               html`<div class="turn-note">results not captured yet (session ended or still running)</div>`}
               ${leakNotVisible(t) &&
-              html`<div class="turn-note warn">a detected secret is not visible in the readable cards — open ▸ details → raw (for a reconstructed tool card, its own ▸ call detail)</div>`}
+              html`<div class="turn-note warn">Beagle detected a secret outside the readable text. Open ▸ details and choose raw; if a card shows ▸ call, open that card instead.</div>`}
               ${t.messages.length === 0 && !t.responseText && (t.responseCalls ?? []).length === 0 &&
               html`<div class="turn-empty">(no parsed content — open details for raw bytes)</div>`}
             </div>

@@ -37,7 +37,8 @@ describe("persisted local demo", () => {
       expect(response.headers.get("content-type")).toContain("text/event-stream");
       const body = await response.text();
       expect(body).toContain("event: message_start");
-      expect(body).toContain("Beagle demo complete");
+      expect(body).toContain("matching secret access key is configured for staging");
+      expect(body).toContain("Avoid pasting credentials into chats or logs");
     } finally {
       await mock.close();
     }
