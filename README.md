@@ -21,17 +21,20 @@ npm install -g @boundedhq/beagle
 
 ## Quick start
 
-### 1. Find your agents
+### 1. Try it safely
 
 ```sh
-beagle detect
+beagle demo
 ```
 
-Beagle prints the exact command for each supported agent it finds.
+This runs a self-contained drill through Beagle's real capture and alert path,
+then opens the result in the dashboard. No agent, account, tokens, or network
+connection required.
 
-### 2. Capture one session
+### 2. Capture a real session
 
 ```sh
+beagle detect              # find supported agents
 beagle run claude          # or codex, opencode, pi
 ```
 
