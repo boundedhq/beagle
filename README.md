@@ -3,120 +3,51 @@
 [![CI](https://github.com/boundedhq/beagle/actions/workflows/ci.yml/badge.svg)](https://github.com/boundedhq/beagle/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**See what your AI agents actually send to model providers — and get alerted
+**See what your AI coding agents send to model providers — and get alerted
 when a secret goes with it.**
 
-AI agents read your files, your shell output, your git history — and ship
-chunks of all of it to a model provider on every turn. Today that traffic is
-invisible: you can't see what left, you can't search it, and if your AWS secret
-key went with it, nobody tells you. Beagle is a local transparency proxy that
-makes that traffic visible, searchable, and scanned for secrets — in one command,
-without changing your setup.
+Beagle gives you a local, searchable record of sessions from Claude Code,
+Codex, opencode, and pi. It captures prompts, responses, and tool use, then
+scans every captured call for secrets. No Beagle account, no cloud service,
+and no permanent agent configuration changes.
+
+```sh
+npm install -g @boundedhq/beagle
+```
+
+[Other install options](#install) · macOS and Linux · arm64 and x64
 
 ![The Beagle dashboard: a live feed of every model call — what was asked, what came back — with leaks flagged in red](docs/assets/dashboard.png)
 
 ## Quick start
 
-Install, then let Beagle find your agents and tell you exactly what to run:
+### 1. Find your agents
 
 ```sh
-npm install -g @boundedhq/beagle   # single self-contained binary — more options under Install
 beagle detect
 ```
 
-```
-Found 4 supported agents — to capture one session, run the command shown:
+Beagle prints the exact command for each supported agent it finds.
 
-  claude    → beagle run claude
-              signed in with a subscription — captured via the agent's own usage report
-  codex     → beagle run codex
-              signed in with a subscription — captured via the agent's own usage report
-  opencode  → beagle run opencode
-              captured on the wire, full fidelity
-  pi        → beagle run pi
-              captured on the wire, full fidelity
-
-To capture every session automatically:  beagle watch <agent>
-```
-
-That's this machine — Claude Code and Codex happen to be signed in with a
-subscription here; yours may say *"captured on the wire"* instead (the
-difference is explained under **Capture modes**). Either way, you run the
-exact command it prints.
-
-If Beagle finds local evidence of another recognized agent it cannot capture
-yet, `detect` lists it separately with a link to the
-[agent-support vote](https://github.com/boundedhq/beagle/issues/154). Detection
-only checks your local PATH and known application or configuration directories;
-it sends nothing anywhere.
-
-Desktop applications are reported separately from same-named CLIs: finding
-Claude Desktop or the Codex app does not imply their sessions are captured.
-
-Want to see Beagle fire before trusting it with an agent? Run:
+### 2. Capture one session
 
 ```sh
-beagle demo
+beagle run claude          # or codex, opencode, pi
 ```
 
-The demo generates a synthetic AWS-secret-shaped canary, asks a mock agent to
-find the project's AWS secret access key, and lets the agent choose to read the
-local `.env` file. The tool result travels through Beagle's normal daemon,
-proxy, capture, scanner, alert, and storage path. Its provider is an in-process
-mock bound to `127.0.0.1`; if that mock cannot bind, the demo aborts before
-contacting the daemon. It needs no agent, account, or API key and opens no
-external connection.
+Use the agent normally. Beagle automatically chooses the right capture mode
+for the way that agent is signed in.
 
-When desktop notifications are available, the normal OS notification fires;
-the captured drill is saved with a `[demo]` badge, and the dashboard opens
-directly to its session. On Linux, notification banners use `notify-send`.
-Demo drills stay out of the dashboard's real-leak total. Run `beagle demo`
-again to test notification delivery again, `beagle demo --clean` to remove
-every demo session, or the normal `beagle purge` to erase all captured data
-including drills.
-
-Want to see the same alert during a real agent session? This paste-ready canary
-is a fixed synthetic value with the shape of an AWS secret access key and no
-paired access key ID, so it cannot authenticate
-([AWS access-key documentation](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html)):
+### 3. Inspect what happened
 
 ```sh
-mkdir -p /tmp/beagle-canary
-CANARY='wJa1rXUtnF3MI4K7MDENGbPxRf9CYZ8qLm2Vt0Bn'
-printf 'AWS_SECRET_ACCESS_KEY=%s\n' "$CANARY" > /tmp/beagle-canary/.env
-beagle run claude        # or codex / opencode / pi
-# then ask: "read /tmp/beagle-canary/.env and tell me what's in it"
+beagle ui                  # searchable dashboard
+beagle leaks               # secrets detected across captured sessions
 ```
 
-The moment the agent sends that file's contents upstream, Beagle notifies you;
-`beagle leaks` records the event and the dashboard highlights where it left.
-For telemetry-captured agents the alert can lag a few seconds because Beagle
-scans the agent's report, including captured tool output. Never test with real
-keys. Clean up the file afterward with `rm -r /tmp/beagle-canary`.
-
-AWS's familiar documentation example ends in `EXAMPLE`; Beagle intentionally
-suppresses obvious example/placeholder values, so the synthetic canary above
-is what exercises the detector.
-
-`beagle run` wraps **one** session. It touches none of *your* files or
-config — captures land in Beagle's own store (`~/.local/state/beagle`), and
-the only background component it starts is a local capture daemon that
-idle-exits when unused.
-
-Every model call is captured locally, and every captured call is scanned.
-If a secret goes out you get an OS notification — dashboard open or not,
-and one per distinct secret, not one per call, even as the agent re-sends
-its history every turn. Afterwards:
-
-```console
-$ beagle leaks             # did anything leak? every call was already scanned
-1 leak event across 1 session — newest first:
-
-  Fix the deploy script — opencode · session 01KXAK6K2P
-      Jul 17 at 11:57 PM   AWS secret key → anthropic   ×1   call 01KXT07ZKK7RB6Y12N51Y8NNJX
-
-$ beagle ui                # or browse it all in the dashboard — leaks highlighted inline
-```
+Every captured call is already scanned. If a secret leaves, Beagle sends an
+OS notification and highlights the exact call in the dashboard. To capture
+future sessions automatically, run `beagle watch <agent>`.
 
 ## More than a leak detector
 
@@ -164,6 +95,12 @@ captures, and it picks that automatically from how the agent is signed in:
 | **Codex** | "Sign in with ChatGPT" | telemetry capture, auto-detected |
 | **opencode** | API key **or** ChatGPT sign-in | wire capture — full fidelity |
 | **pi** | API key **or** ChatGPT sign-in | wire capture — full fidelity |
+
+`beagle detect` only checks your local PATH and known application or
+configuration directories; it sends nothing anywhere. Recognized agents that
+Beagle cannot capture yet — including desktop apps — are listed separately
+with a link to the
+[agent-support vote](https://github.com/boundedhq/beagle/issues/154).
 
 If Beagle can't tell how an agent is signed in, it asks once at the terminal
 and remembers your answer (`beagle config run-mode <agent> wire|telemetry|auto`
@@ -223,6 +160,10 @@ Every change is marker-owned and recorded; `beagle unwatch` (name an agent,
 pick from a list, or `--all`) reverts them all.
 
 ## How it works (and what it is *not*)
+
+`beagle run` wraps one session without modifying your agent configuration.
+Captures stay in Beagle's local store (`~/.local/state/beagle`), and its local
+daemon exits after it has been idle.
 
 In wire-capture mode, `beagle run` starts a loopback proxy and points the agent
 at it for that run — via `ANTHROPIC_BASE_URL` for Claude Code, via a per-run
@@ -362,6 +303,45 @@ bun install && bun run build     # → dist/beagle
 
 (A Homebrew formula lives in `packaging/beagle.rb` for a future tap; npm already
 covers macOS and Linux, so the tap isn't wired into releases yet.)
+
+## Test the alert safely
+
+### Without an agent
+
+```sh
+beagle demo
+```
+
+The demo sends a synthetic AWS-secret-shaped canary through Beagle's real
+capture, scan, alert, and storage path using an in-process mock on `127.0.0.1`.
+It needs no agent, account, or API key and opens no external connection. If the
+mock cannot bind, the demo aborts.
+
+The normal OS notification fires and the dashboard opens the saved drill,
+clearly badged `[demo]`. Demo records stay out of real-leak totals. Run
+`beagle demo --clean` to remove them.
+
+### In a real agent session
+
+This synthetic value has the shape of an AWS secret access key but no paired
+access key ID, so it cannot authenticate
+([AWS access-key documentation](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html)):
+
+```sh
+mkdir -p /tmp/beagle-canary
+CANARY='wJa1rXUtnF3MI4K7MDENGbPxRf9CYZ8qLm2Vt0Bn'
+printf 'AWS_SECRET_ACCESS_KEY=%s\n' "$CANARY" > /tmp/beagle-canary/.env
+beagle run claude          # or codex, opencode, pi
+# ask: "read /tmp/beagle-canary/.env and tell me what's in it"
+```
+
+When the agent sends the file contents, Beagle notifies you and highlights the
+captured call. Telemetry-captured sessions can lag a few seconds. Never test
+with real credentials; remove the canary afterward with
+`rm -r /tmp/beagle-canary`.
+
+AWS's familiar documentation example ends in `EXAMPLE`; Beagle suppresses
+obvious example and placeholder values, so use the synthetic canary above.
 
 ## Update
 
