@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { buildCallDetail, buildDetail, detailLeaks, detailMessages, type LeakSpan } from "../src/viewer/detail";
 import type { CallRecord } from "../src/core/store/store";
 import type { DisplayMessage } from "../src/parsers/parsers";
+import { DEMO_AGENT } from "../src/core/call";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 
@@ -20,6 +21,11 @@ function call(overrides: Partial<CallRecord> = {}): CallRecord {
 }
 
 describe("buildDetail — response reassembly (UI fix 1)", () => {
+  test("demo identity reaches call detail", () => {
+    expect(buildDetail(call({ agent: DEMO_AGENT }), []).demo).toBe(true);
+    expect(buildDetail(call(), []).demo).toBe(false);
+  });
+
   test("reassembles a streamed Anthropic SSE response into readable text", () => {
     const sse =
       'event: message_start\ndata: {"type":"message_start","message":{"model":"claude-sonnet-5"}}\n\n' +

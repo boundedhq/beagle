@@ -4,6 +4,11 @@
 
 export type CaptureSource = "wire" | "otel";
 
+// Reserved capture identity for the built-in drill. Keeping this as data on
+// the ordinary call/session path (rather than a parallel demo schema) lets
+// every projection badge and clean drills without changing the DB format.
+export const DEMO_AGENT = "beagle-demo";
+
 export interface Message {
   role: string;
   content: string;

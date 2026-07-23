@@ -31,8 +31,9 @@ usage:
                                  always-on service until the next watch
                                  (refuses while a session is being captured)
   beagle detect                  find supported agents on this machine
-  beagle demo                    safely trigger a local canary alert; no agent,
-                                 external network, or saved data
+  beagle demo                    safely trigger a local canary alert, save a
+                                 badged drill, and open it in the dashboard
+  beagle demo --clean            remove saved demo sessions
   beagle status                  trust strip: coverage, store, retention
   beagle search [string]         was this ever sent? definitive answer
                                  (no argument: reads the term from stdin, so
@@ -107,8 +108,14 @@ export async function run(argv: string[]): Promise<number> {
       console.log(cmdDetect());
       return 0;
     case "demo":
-      if (rest.length > 0) { console.error("usage: beagle demo"); return 2; }
-      return (await import("./demo")).cmdDemo();
+      if (rest.length === 0) return (await import("./demo")).cmdDemo(stateDir);
+      if (rest.length === 1 && rest[0] === "--clean") {
+        const result = await cmdPurge(stateDir, "demo");
+        console.log(result);
+        return result.startsWith("purge failed:") ? 1 : 0;
+      }
+      console.error("usage: beagle demo [--clean]");
+      return 2;
     case "status": {
       const { controlRequest } = await import("../daemon/control");
       const { readFileSync } = await import("node:fs");

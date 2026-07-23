@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 describe("compiled binary", () => {
   test(
-    "binary works OUTSIDE the repo: stateless demo and daemon scanner both work",
+    "binary works OUTSIDE the repo: persisted demo and daemon scanner both work",
     async () => {
       // Regression for the v1 ship-blocker: rules, viewer statics, and the
       // scan worker must be embedded — no repo checkout at runtime.
@@ -22,16 +22,44 @@ describe("compiled binary", () => {
       expect(run.exitCode).toBe(0);
       expect(run.stdout.toString()).toMatch(/^beagle \d+\.\d+\.\d+/);
 
-      // The demo must carry its rules + scan worker in the binary, work with
-      // no notifier command available, and leave no state behind.
-      const demoStateDir = join(dir, "demo-state-must-not-exist");
+      // The demo must carry its rules, scanner, mock, and viewer in the binary,
+      // work with no notifier/browser command available, and save a badged row.
+      const demoStateDir = join(dir, "demo-state");
       const demo = Bun.spawnSync([out, "demo"], {
         cwd: dir,
         env: { ...process.env, BEAGLE_STATE_DIR: demoStateDir, PATH: "/nonexistent" },
       });
       expect(demo.exitCode).toBe(0);
-      expect(demo.stdout.toString()).toContain("nothing was retained");
-      expect(existsSync(demoStateDir)).toBe(false);
+      expect(demo.stdout.toString()).toContain("[demo] badge");
+      expect(demo.stdout.toString()).toContain("dashboard:");
+      expect(existsSync(join(demoStateDir, "beagle.db"))).toBe(true);
+      // A second run is a fresh drill: it traverses the path again and mints
+      // another event instead of disappearing into ordinary alert dedup.
+      const demoAgain = Bun.spawnSync([out, "demo"], {
+        cwd: dir,
+        env: { ...process.env, BEAGLE_STATE_DIR: demoStateDir, PATH: "/nonexistent" },
+      });
+      expect(demoAgain.exitCode).toBe(0);
+      const demoLeaks = Bun.spawnSync([out, "leaks"], {
+        cwd: dir,
+        env: { ...process.env, BEAGLE_STATE_DIR: demoStateDir },
+      }).stdout.toString();
+      expect(demoLeaks).toContain("2 [demo] drill events");
+      const cleanDemo = Bun.spawnSync([out, "demo", "--clean"], {
+        cwd: dir,
+        env: { ...process.env, BEAGLE_STATE_DIR: demoStateDir },
+      });
+      expect(cleanDemo.exitCode).toBe(0);
+      expect(cleanDemo.stdout.toString()).toContain("purged (demo)");
+      const afterClean = Bun.spawnSync([out, "leaks"], {
+        cwd: dir,
+        env: { ...process.env, BEAGLE_STATE_DIR: demoStateDir },
+      }).stdout.toString();
+      expect(afterClean).toContain("no detected leaks");
+      Bun.spawnSync([out, "stop", "--force"], {
+        cwd: dir,
+        env: { ...process.env, BEAGLE_STATE_DIR: demoStateDir },
+      });
 
       // fake upstream
       const { createServer, connect } = await import("node:net");

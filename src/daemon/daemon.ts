@@ -8,7 +8,7 @@ import { randomBytes } from "node:crypto";
 import type { Server, Socket } from "node:net";
 import { AlertEngine, type AlertEvent, type CallMeta } from "../core/alert/engine";
 import { loadConfig, saveConfig, loadOrCreateInstallKey, type BeagleConfig } from "../core/config/config";
-import type { Message } from "../core/call";
+import { DEMO_AGENT, type Message } from "../core/call";
 import { ProxyServer, type CapturedCall, type ScanContext } from "../core/proxy/server";
 import { RunRegistry, type RunRegistration } from "../core/proxy/registry";
 import { SessionResolver, type Resolution } from "../core/session/resolver";
@@ -18,7 +18,7 @@ import type { Finding } from "../core/scanner/engine";
 import { applyCaptureRedaction, clampRedacted, derivedScanText, derivedSplitAt, redactDerivedParts, redactRawStream, redactValuesInText, secretKeys } from "../transform/redact";
 import { scrubAuthHeaders } from "../core/normalize/normalize";
 import { Notifier, type AlertMessage } from "../notifier/notifier";
-import { buildAlertMessage } from "../notifier/alert-copy";
+import { buildAlertMessage, buildDemoAlertMessage } from "../notifier/alert-copy";
 import { detectFormat, extractActions, parseRequest, parseResponse, DISPLAY_RESULT_CAP, type DisplayMessage, type Format, type ParsedRequest, type ToolAction } from "../parsers/parsers";
 import { startControlServer, type ControlRequest, type ControlResponse } from "./control";
 import { ViewerServer } from "../viewer/server";
@@ -980,6 +980,7 @@ export class Daemon {
       // scan has already completed by here, so the findings are final. The
       // "leak" frame refreshes the feed for any straggler orderings.
       hasLeak: (stash?.findings.length ?? 0) > 0 || derivedLeaks > 0,
+      demo: call.agent === DEMO_AGENT,
     });
   }
 
@@ -1378,7 +1379,7 @@ export class Daemon {
     // Core emits the facts; the human wording is built HERE, once, and every
     // surface (dashboard banner, OS notification, terminal, test sink) gets
     // the same enriched event — facts plus copy.
-    const msg = buildAlertMessage(a);
+    const msg = a.agent === DEMO_AGENT ? buildDemoAlertMessage(a) : buildAlertMessage(a);
     const alert: EmittedAlert = { ...a, ...msg };
     this.viewer?.broadcast("alert", alert);
     if (this.opts.alertSinkForTest) {
@@ -1516,6 +1517,7 @@ export class Daemon {
       case "purge": {
         const args = (req.args ?? {}) as { kind?: string; sessionId?: string; ts?: number };
         if (args.kind === "all") this.store.purge({ kind: "all" });
+        else if (args.kind === "demo") this.store.purge({ kind: "demo" });
         else if (args.kind === "panic") this.store.panicPurge();
         else if (args.kind === "session" && args.sessionId)
           this.store.purge({ kind: "session", sessionId: args.sessionId });

@@ -8,6 +8,7 @@ import { SCHEMA_SQL } from "../src/core/store/schema";
 import { listLeakEvents } from "../src/viewer/feed-query";
 import type { CallRecord } from "../src/core/store/store";
 import { ulid } from "../src/core/store/ulid";
+import { DEMO_AGENT } from "../src/core/call";
 
 function tmpRoot(): string {
   return mkdtempSync(join(tmpdir(), "beagle-store-"));
@@ -565,6 +566,27 @@ describe("Leak events", () => {
     expect(listLeakEvents(store).length).toBe(2);
     store.close();
   });
+
+  test("demo events stay visible and badged but are excluded from real-leak totals", () => {
+    const store = Store.open(dir);
+    const demo = fakeCall({ sessionId: "demo-s", runId: "demo-r", agent: DEMO_AGENT });
+    const real = fakeCall({ sessionId: "real-s", runId: "real-r" });
+    store.insertSession({ id: demo.sessionId, agent: DEMO_AGENT, firstTs: 1, lastTs: 2 });
+    store.insertSession({ id: real.sessionId, agent: real.agent, firstTs: 1, lastTs: 2 });
+    store.insertCall(demo);
+    store.insertCall(real);
+    for (const [call, fingerprint] of [[demo, "demo-fp"], [real, "real-fp"]] as const) {
+      store.upsertLeakEvent({
+        fingerprint, sessionId: call.sessionId, detector: "d", secretType: "t",
+        severity: "high", confidenceTier: "structured", destination: "x",
+        callId: call.id, ts: Date.now(),
+      });
+    }
+
+    expect(listLeakEvents(store).map((e) => e.demo).sort()).toEqual([false, true]);
+    expect(store.countLeakEvents()).toBe(1);
+    store.close();
+  });
 });
 
 describe("Retention & purge", () => {
@@ -809,6 +831,64 @@ describe("Retention & purge", () => {
     store.purge({ kind: "session", sessionId: "s1" });
     expect(store.getCall(a.id)).toBeNull();
     expect(store.getCall(b.id)).not.toBeNull();
+    store.close();
+  });
+
+  test("demo purge removes only demo calls, events, sessions, and runs", () => {
+    const store = Store.open(dir);
+    const demo = fakeCall({ sessionId: "demo-s", runId: "demo-r", agent: DEMO_AGENT });
+    const real = fakeCall({ sessionId: "real-s", runId: "real-r" });
+    store.insertSession({ id: demo.sessionId, agent: DEMO_AGENT, firstTs: 1, lastTs: 2 });
+    store.insertSession({ id: real.sessionId, agent: real.agent, firstTs: 1, lastTs: 2 });
+    store.insertRun({ id: demo.runId, agent: DEMO_AGENT, provider: "loopback-demo", upstream: "http://127.0.0.1:1", authLocation: null, extraHeaders: null, createdTs: 1 });
+    store.insertRun({ id: real.runId, agent: "claude-code", provider: "anthropic", upstream: "http://127.0.0.1:2", authLocation: null, extraHeaders: null, createdTs: 1 });
+    store.insertCall(demo);
+    store.insertCall(real);
+    for (const [call, fingerprint] of [[demo, "demo-fp"], [real, "real-fp"]] as const) {
+      store.upsertLeakEvent({
+        fingerprint, sessionId: call.sessionId, detector: "d", secretType: "t",
+        severity: "high", confidenceTier: "structured", destination: "x",
+        callId: call.id, ts: Date.now(),
+      });
+    }
+
+    store.purge({ kind: "demo" });
+    expect(store.getCall(demo.id)).toBeNull();
+    expect(store.getCall(real.id)).not.toBeNull();
+    expect(listLeakEvents(store).map((e) => e.sessionId)).toEqual(["real-s"]);
+    expect(store.queryAll(`SELECT id FROM sessions WHERE id='demo-s'`)).toEqual([]);
+    expect(store.listRuns().map((r) => r.id)).toEqual(["real-r"]);
+    store.close();
+  });
+
+  test("purge all includes demo session and run metadata without dropping real identity", () => {
+    const store = Store.open(dir);
+    store.insertSession({ id: "demo-s", agent: DEMO_AGENT, firstTs: 1, lastTs: 2 });
+    store.insertSession({ id: "real-s", agent: "claude-code", firstTs: 1, lastTs: 2 });
+    store.insertRun({ id: "demo-r", agent: DEMO_AGENT, provider: "loopback-demo", upstream: "http://127.0.0.1:1", authLocation: null, extraHeaders: null, createdTs: 1 });
+    store.insertRun({ id: "real-r", agent: "claude-code", provider: "anthropic", upstream: "http://127.0.0.1:2", authLocation: null, extraHeaders: null, createdTs: 1 });
+
+    store.purge({ kind: "all" });
+    expect(store.queryAll<{ id: string }>(`SELECT id FROM sessions ORDER BY id`)).toEqual([{ id: "real-s" }]);
+    expect(store.listRuns().map((r) => r.id)).toEqual(["real-r"]);
+    store.close();
+  });
+
+  test("demo events age out before their identity session is removed", () => {
+    const store = Store.open(dir);
+    const old = Date.now() - 10_000;
+    const demo = fakeCall({ sessionId: "demo-s", agent: DEMO_AGENT, tsRequest: old });
+    store.insertSession({ id: demo.sessionId, agent: DEMO_AGENT, firstTs: old, lastTs: old });
+    store.insertCall(demo);
+    store.upsertLeakEvent({
+      fingerprint: "demo-fp", sessionId: demo.sessionId, detector: "d", secretType: "t",
+      severity: "high", confidenceTier: "structured", destination: "x",
+      callId: demo.id, ts: old,
+    });
+
+    store.sweep({ payloadWindowMs: 1_000, eventWindowMs: Infinity, sizeCapBytes: Infinity });
+    expect(listLeakEvents(store)).toEqual([]);
+    expect(store.countLeakEvents()).toBe(0);
     store.close();
   });
 

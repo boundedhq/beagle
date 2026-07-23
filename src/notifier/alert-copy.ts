@@ -74,3 +74,13 @@ export function buildAlertMessage(a: AlertEvent): AlertMessage {
   const body = `Already sent by ${sender}.${ownKey}\nRun "beagle ui" for details.`;
   return { title, subtitle, body };
 }
+
+/** Drill wording stays explicit on every alert surface and deliberately
+ * ignores seenBefore: each demo run is meant to prove notification delivery. */
+export function buildDemoAlertMessage(a: AlertEvent): AlertMessage {
+  return {
+    title: "Beagle [demo] — canary detected",
+    subtitle: secretName(a.secretType),
+    body: "Drill only — sent to a loopback mock.\nOpen the dashboard to inspect the captured demo.",
+  };
+}
