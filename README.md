@@ -93,17 +93,17 @@ The command is the same for every agent — `beagle run <agent>` for one
 session, `beagle watch <agent>` for always-on. What changes is *how* Beagle
 captures, and it picks that automatically from how the agent is signed in:
 
-| Your agent | Signed in with | What happens |
+| Your agent | Using | What happens |
 |---|---|---|
 | **Claude Code** | Anthropic API key | wire capture — full fidelity |
 | **Claude Code** | Claude.ai subscription (Pro/Max) | telemetry capture, auto-detected |
 | **Codex** | OpenAI API key | wire capture — full fidelity |
 | **Codex** | "Sign in with ChatGPT" | telemetry capture, auto-detected |
-| **opencode** | OpenAI API key **or** ChatGPT sign-in | wire capture — full fidelity |
-| **pi** | OpenAI API key **or** ChatGPT sign-in | wire capture — full fidelity |
+| **opencode** | OpenAI provider | wire capture — full fidelity |
+| **pi** | OpenAI provider | wire capture — full fidelity |
 
-For opencode and pi, Beagle currently captures only their OpenAI providers;
-Anthropic and other provider sign-ins are not covered yet.
+For opencode and pi, both OpenAI API keys and ChatGPT sign-in are supported.
+Anthropic/Claude and other providers are future support targets.
 
 `beagle detect` only checks your local PATH and known application or
 configuration directories; it sends nothing anywhere. Recognized agents that
