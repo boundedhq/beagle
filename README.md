@@ -8,10 +8,10 @@ when a secret goes with it.**
 
 AI agents read your files, your shell output, your git history — and ship
 chunks of all of it to a model provider on every turn. Today that traffic is
-invisible: you can't see what left, you can't search it, and if your AWS key
-went with it, nobody tells you. Beagle is a local transparency proxy that
-makes that traffic visible, searchable, and scanned for secrets — in one
-command, without changing your setup.
+invisible: you can't see what left, you can't search it, and if your AWS secret
+key went with it, nobody tells you. Beagle is a local transparency proxy that
+makes that traffic visible, searchable, and scanned for secrets — in one command,
+without changing your setup.
 
 ![The Beagle dashboard: a live feed of every model call — what was asked, what came back — with leaks flagged in red](docs/assets/dashboard.png)
 
@@ -61,17 +61,19 @@ beagle demo
 
 The demo generates a synthetic AWS-secret-shaped canary, asks a mock agent to
 find the project's AWS secret access key, and lets the agent choose to read the
-local `.env` file. The tool result travels through Beagle's normal daemon, proxy, capture,
-scanner, alert, and storage path. Its provider is an in-process mock bound to
-`127.0.0.1`; if that
-mock cannot bind, the demo aborts before contacting the daemon. It needs no
-agent, account, or API key and opens no external connection.
+local `.env` file. The tool result travels through Beagle's normal daemon,
+proxy, capture, scanner, alert, and storage path. Its provider is an in-process
+mock bound to `127.0.0.1`; if that mock cannot bind, the demo aborts before
+contacting the daemon. It needs no agent, account, or API key and opens no
+external connection.
 
-The normal OS notification fires, the captured drill is saved with a `[demo]`
-badge, and the dashboard opens directly to its session. Demo drills stay out of
-the dashboard's real-leak total. Run `beagle demo` again to test notification
-delivery again, `beagle demo --clean` to remove every demo session, or the
-normal `beagle purge` to erase all captured data including drills.
+When desktop notifications are available, the normal OS notification fires;
+the captured drill is saved with a `[demo]` badge, and the dashboard opens
+directly to its session. On Linux, notification banners use `notify-send`.
+Demo drills stay out of the dashboard's real-leak total. Run `beagle demo`
+again to test notification delivery again, `beagle demo --clean` to remove
+every demo session, or the normal `beagle purge` to erase all captured data
+including drills.
 
 Want to see the same alert during a real agent session? This paste-ready canary
 is a fixed synthetic value with the shape of an AWS secret access key and no
@@ -98,8 +100,8 @@ is what exercises the detector.
 
 `beagle run` wraps **one** session. It touches none of *your* files or
 config — captures land in Beagle's own store (`~/.local/state/beagle`), and
-the only thing it starts is a local capture daemon that idle-exits when
-unused.
+the only background component it starts is a local capture daemon that
+idle-exits when unused.
 
 Every model call is captured locally, and every captured call is scanned.
 If a secret goes out you get an OS notification — dashboard open or not,
@@ -111,7 +113,7 @@ $ beagle leaks             # did anything leak? every call was already scanned
 1 leak event across 1 session — newest first:
 
   Fix the deploy script — opencode · session 01KXAK6K2P
-      Jul 17 at 11:57 PM   AWS access key → anthropic   ×1   call 01KXT07ZKK7RB6Y12N51Y8NNJX
+      Jul 17 at 11:57 PM   AWS secret key → anthropic   ×1   call 01KXT07ZKK7RB6Y12N51Y8NNJX
 
 $ beagle ui                # or browse it all in the dashboard — leaks highlighted inline
 ```
@@ -222,13 +224,13 @@ pick from a list, or `--all`) reverts them all.
 
 ## How it works (and what it is *not*)
 
-`beagle run` starts a loopback proxy and points the agent at it for that run —
-via `ANTHROPIC_BASE_URL` for Claude Code, via a per-run provider override for
-Codex, via a temporary merged config file for opencode, and via a one-run
-`-e` extension for pi. Your real config files are never modified, and anything
-Beagle generates is deleted when the run ends. The agent talks to `127.0.0.1`;
-Beagle streams the bytes to the real provider unmodified and unbuffered (SSE
-reaches your agent immediately) and keeps a copy locally:
+In wire-capture mode, `beagle run` starts a loopback proxy and points the agent
+at it for that run — via `ANTHROPIC_BASE_URL` for Claude Code, via a per-run
+provider override for Codex, via a temporary merged config file for opencode,
+and via a one-run `-e` extension for pi. Your real config files are never
+modified, and anything Beagle generates is deleted when the run ends. The agent
+talks to `127.0.0.1`; Beagle streams the bytes to the real provider unmodified
+and unbuffered (SSE reaches your agent immediately) and keeps a copy locally:
 
 ```
 agent ──HTTP──▶ beagle (127.0.0.1) ──HTTPS──▶ api.anthropic.com
@@ -248,9 +250,9 @@ What Beagle is **not**:
   covered.)
 - **Not a cloud service.** No account, no server, no phone-home — Beagle
   itself sends nothing anywhere.
-- **Not a blocker.** v1 observes and alerts; it never rewrites, drops, or
-  delays anything. (An optional setting censors detected secrets in
-  *Beagle's own local records* — that changes what Beagle keeps, never what
+- **Not a blocker.** v1 observes and alerts; a finding never causes Beagle to
+  rewrite or drop agent traffic. (An optional setting censors detected secrets
+  in *Beagle's own local records* — that changes what Beagle keeps, never what
   goes over the wire.)
 
 ## Commands
@@ -259,7 +261,7 @@ What Beagle is **not**:
 beagle detect              # find supported agents and recognized coverage gaps
 beagle demo                # run a local drill, save it as [demo], open dashboard
 beagle demo --clean        # remove saved demo sessions
-beagle run <agent>         # capture one session; nothing changed on your system
+beagle run <agent>         # capture one session; your agent config stays untouched
 beagle watch <agent>       # make that agent always-on (guided; asks before each change)
 beagle unwatch [<agent>]   # stop watching; restores your setup
                            # (no agent: pick from a list; --all for everything)
@@ -315,7 +317,8 @@ in the total LOC report though outside the budgeted manifest.
 
 - **Local only.** The only outbound connections are the ones your agent was
   already making, forwarded verbatim.
-- **Your setup, untouched.** `beagle run` mutates nothing. `beagle watch`
+- **Your setup, untouched.** `beagle run` does not modify your agent config.
+  `beagle watch`
   asks before each change, records every one in a manifest, and reverts them
   all on `unwatch`/uninstall — see **Always-on** above for exactly what it
   touches.
@@ -335,9 +338,10 @@ in the total LOC report though outside the budgeted manifest.
 
 ## Install
 
-No runtime dependencies — Beagle ships as a single self-contained binary
-(macOS and Linux, x64 and arm64; Windows is post-v1). The npm route needs
-npm; the script route needs only curl.
+No language/runtime dependencies — Beagle ships as a single self-contained
+binary (macOS and Linux, x64 and arm64; Windows is post-v1). Linux desktop
+notification banners use `notify-send` when it is available. The npm route
+needs npm; the script route needs only curl.
 
 ```sh
 # npm (primary) — the prebuilt binary for your platform. No post-install
@@ -347,8 +351,9 @@ npm install -g @boundedhq/beagle
 # or the one-line script (downloads from GitHub Releases, verifies the
 # sha256 checksum before installing, never runs post-install code). For a
 # transparency tool, read it before you pipe it:
-#   curl -fsSL .../packaging/install.sh -o install.sh && less install.sh && sh install.sh
-curl -fsSL https://raw.githubusercontent.com/boundedhq/beagle/main/packaging/install.sh | sh
+#   curl -fsSL https://github.com/boundedhq/beagle/releases/latest/download/install.sh -o install.sh
+#   less install.sh && sh install.sh
+curl -fsSL https://github.com/boundedhq/beagle/releases/latest/download/install.sh | sh
 
 # or build from source (requires Bun ≥ 1.3)
 git clone https://github.com/boundedhq/beagle && cd beagle
@@ -369,7 +374,7 @@ promise. Updating is the same channel you installed with:
 npm install -g @boundedhq/beagle@latest
 
 # install script — re-run it; it fetches the latest release and verifies the checksum
-curl -fsSL https://raw.githubusercontent.com/boundedhq/beagle/main/packaging/install.sh | sh
+curl -fsSL https://github.com/boundedhq/beagle/releases/latest/download/install.sh | sh
 
 # from source
 git pull && bun run build        # → dist/beagle (if you symlinked it into
@@ -423,8 +428,8 @@ changed is listed by `beagle status` while it's installed.
 ## FAQ
 
 **Does my API key pass through Beagle?**
-In flight, yes (that's what a proxy is); at rest, never. Auth headers are
-stripped before capture and are not stored, logged, or displayed.
+In wire-capture mode, yes (that's what a proxy is); at rest, never. Auth
+headers are stripped before capture and are not stored, logged, or displayed.
 
 **What exactly is stored, and where?**
 Request/response bodies, headers (minus credentials), timing and token
@@ -465,9 +470,9 @@ for conservative redact-on-capture, but they are identifiers rather than
 credentials, so they never create a leak event or alert.
 
 **What happens if Beagle crashes mid-run?**
-The proxy fails open for observation, never blocking your agent: if
-capture fails, your agent's traffic still flows; the gap is recorded as
-`capture truncated` rather than silently papered over.
+In wire-capture mode, the proxy fails open for observation, never blocking
+your agent: if capture fails, your agent's traffic still flows; the gap is
+recorded as `capture truncated` rather than silently papered over.
 
 ## Layout
 

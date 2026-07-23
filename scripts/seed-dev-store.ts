@@ -2,7 +2,7 @@
 // the viewer/dashboard without running a real agent session (which needs an
 // installed, authenticated agent and makes a live provider call — and a fresh
 // session has no leaks to render). Everything here is fabricated; the one
-// "secret" is Amazon's documented example key, not a real credential.
+// "secret" is a masked synthetic AWS secret access key, not a real credential.
 //
 //   bun scripts/seed-dev-store.ts [dir]     # default: /tmp/beagle-dev-store
 //   BEAGLE_STATE_DIR=<dir> bun src/cli/main.ts ui   # then view it
@@ -73,15 +73,15 @@ seedCall({ id: ulid(at(0)), sessionId: "devA", tsRequest: at(0), requestBody: en
 
 // The leak turn. redact-on-capture (the default) masks the secret before it is
 // written, so the stored body shows the placeholder — highlighted at its span.
-const MASK = "[REDACTED:aws-access-key-id:7f3a91d2]";
+const MASK = "[REDACTED:aws-secret-access-key:7f3a91d2]";
 const a2 = body([{ role: "user", content: `Deploy to the prod bucket — the AWS key is ${MASK}.` }]);
 const leakId = ulid(at(2));
 seedCall({ id: leakId, sessionId: "devA", tsRequest: at(2), redacted: true, requestBody: enc(a2),
   responseBody: enc(reply("I won't use a pasted access key — rotate it and use a short-lived credential.")),
   summary: '"Deploy to the prod bucket — the AWS key…" → I won\'t use a pasted access key…', searchText: a2 });
 const span = a2.indexOf(MASK);
-store.upsertLeakEvent({ fingerprint: "dev-aws", sessionId: "devA", detector: "aws-access-key-id",
-  secretType: "aws-access-key-id", severity: "high", confidenceTier: "structured",
+store.upsertLeakEvent({ fingerprint: "dev-aws", sessionId: "devA", detector: "aws-secret-access-key",
+  secretType: "aws-secret-access-key", severity: "high", confidenceTier: "structured",
   destination: "openai", callId: leakId, ts: at(2), spanStart: span, spanEnd: span + MASK.length });
 
 // Session B — a telemetry-captured (self-reported) turn, so the `self-reported`
