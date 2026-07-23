@@ -11,14 +11,14 @@ import { BEAGLE_VERSION } from "../core/version";
 import { controlRequest } from "../daemon/control";
 import { cmdUi, ensureDaemon, staleDaemonRemedy, type DaemonInfo } from "./commands";
 
-const CANARY_ALPHABET = "BCDFGHJKLMNPQRSTVWYZ23456789";
+const CANARY_ALPHABET = "BCDFGHJKLMNPQRSTVWYZbcdfghjklmnpqrstvwxyz0123456789+/";
 const DEMO_STEP_TIMEOUT_MS = 3_000;
 const DEMO_PERSIST_TIMEOUT_MS = 5_000;
 const DEMO_MODEL = "claude-sonnet-4-demo";
 const DEMO_FILE = "/tmp/beagle-canary/.env";
 const DEMO_TOOL_ID = "toolu_beagle_demo";
 const DEMO_PROMPT =
-  "Can you find the AWS access key ID configured for the project in /tmp/beagle-canary?";
+  "Can you find the AWS secret access key configured for the project in /tmp/beagle-canary?";
 
 export interface DemoMock {
   port: number;
@@ -40,16 +40,21 @@ interface DemoDependencies {
   err: (text: string) => void;
 }
 
-/** Generate a detector-valid but unusable AWS-shaped value. The alphabet has
- *  no vowels or X, so scanner stopwords such as EXAMPLE and XXXXXX cannot
- *  occur by chance. It is only an access-key ID shape, with no secret half. */
-export function generateDemoCanary(bytes: Uint8Array = randomBytes(16)): string {
-  if (bytes.length < 16) throw new Error("demo canary generation needs 16 random bytes");
-  let suffix = "";
-  for (const byte of bytes.subarray(0, 16)) {
-    suffix += CANARY_ALPHABET[byte % CANARY_ALPHABET.length];
+/** Generate a detector-valid but never-issued AWS-secret-shaped value. A
+ *  shuffled alphabet makes all 40 characters distinct, guaranteeing the
+ *  production rule's entropy gate; excluding vowels prevents stopwords. */
+export function generateDemoCanary(
+  bytes: Uint8Array = randomBytes(CANARY_ALPHABET.length - 1),
+): string {
+  if (bytes.length < CANARY_ALPHABET.length - 1) {
+    throw new Error(`demo canary generation needs ${CANARY_ALPHABET.length - 1} random bytes`);
   }
-  return `AKIA${suffix}`;
+  const chars = [...CANARY_ALPHABET];
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = bytes[chars.length - 1 - i]! % (i + 1);
+    [chars[i], chars[j]] = [chars[j]!, chars[i]!];
+  }
+  return chars.slice(0, 40).join("");
 }
 
 const TOOL_CALL_SSE = [
@@ -67,8 +72,8 @@ const TOOL_CALL_SSE = [
 const FINAL_ANSWER_SSE = [
   'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_beagle_demo_answer","type":"message","role":"assistant","model":"claude-sonnet-4-demo","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":89,"output_tokens":0}}}',
   'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
-  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I found an AWS access key ID in the project’s .env file. Check that the matching secret access key is configured for staging, "}}',
-  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"confirm the credentials belong to the intended account, and rotate them if they may have been exposed. "}}',
+  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I found an AWS secret access key in the project’s .env file. Confirm that it belongs to the intended staging account "}}',
+  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"and rotate it if it may have been exposed. "}}',
   'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Avoid pasting credentials into chats or logs."}}',
   'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
   'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":48}}',
@@ -173,7 +178,7 @@ export async function runDemoExchange(
       content: [{
         type: "tool_result",
         tool_use_id: DEMO_TOOL_ID,
-        content: `AWS_ACCESS_KEY_ID=${canary}`,
+        content: `AWS_SECRET_ACCESS_KEY=${canary}`,
       }],
     },
   ]);
@@ -247,7 +252,7 @@ export async function cmdDemo(
     if (!dashboard.startsWith("dashboard:")) throw new Error(dashboard);
     deps.out(
       "beagle demo complete\n\n" +
-      "  ✓ Generated a synthetic AWS-shaped canary\n" +
+      "  ✓ Generated a synthetic AWS-secret-shaped canary\n" +
       "  ✓ Simulated an agent reading it from a local .env file\n" +
       "  ✓ Captured and detected it through Beagle's normal daemon path\n" +
       "  ✓ Sent it only to an in-process mock on 127.0.0.1\n" +

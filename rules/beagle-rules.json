@@ -4,12 +4,13 @@
   "rules": [
     {
       "id": "aws-access-key-id",
-      "description": "AWS access key ID",
+      "description": "AWS access key ID. This is an identifier, not the secret used to sign requests. AWS requires the separately-issued secret access key to authenticate, although the ID can reveal its AWS account ID through STS GetAccessKeyInfo. Detect it internally so overlap suppression and redact-on-capture remain conservative, but never create a leak event or alert.",
       "regex": "\\b((?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16})\\b",
       "keywords": ["akia", "asia", "abia", "acca"],
       "secretGroup": 1,
-      "severity": "high",
-      "tier": "structured"
+      "severity": "low",
+      "tier": "structured",
+      "alert": false
     },
     {
       "id": "aws-secret-access-key",

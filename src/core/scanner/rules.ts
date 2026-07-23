@@ -13,6 +13,9 @@ export interface RuleSpec {
   secretGroup: number;
   severity: "high" | "medium" | "low";
   tier: "structured" | "possible";
+  /** False for structured identifiers that are useful to recognize and
+   *  redact conservatively but are not credential leaks. */
+  alert?: boolean;
   entropy?: number;
   validators?: string[];
 }

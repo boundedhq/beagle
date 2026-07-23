@@ -15,18 +15,21 @@ const rules = compileRules(
 );
 
 describe("persisted local demo", () => {
-  test("the generated fake value is AWS-shaped and fires the production structured rule", () => {
-    const canary = generateDemoCanary(new Uint8Array(Array.from({ length: 16 }, (_, i) => i)));
-    expect(canary).toMatch(/^AKIA[A-Z0-9]{16}$/);
+  test("the generated fake value is AWS-secret-shaped and fires the production structured rule", () => {
+    const canary = generateDemoCanary(
+      new Uint8Array(Array.from({ length: 63 }, (_, i) => i)),
+    );
+    expect(canary).toMatch(/^[A-Za-z0-9/+]{40}$/);
+    expect(new Set(canary).size).toBe(40);
     expect(canary.toLowerCase()).not.toMatch(/example|sample|placeholder|dummy|xxxxxx|changeme/);
 
     const report = scan(
-      new TextEncoder().encode(`AWS_ACCESS_KEY_ID=${canary}`),
+      new TextEncoder().encode(`AWS_SECRET_ACCESS_KEY=${canary}`),
       {},
       rules,
     );
     expect(report.findings.some(
-      (finding) => finding.tier === "structured" && finding.secretType === "aws-access-key-id",
+      (finding) => finding.tier === "structured" && finding.secretType === "aws-secret-access-key",
     )).toBe(true);
   });
 
@@ -43,7 +46,7 @@ describe("persisted local demo", () => {
 
       const second = await fetch(`http://127.0.0.1:${mock.port}/v1/messages`, { method: "POST" });
       const answer = await second.text();
-      expect(answer).toContain("I found an AWS access key ID in the project’s .env file");
+      expect(answer).toContain("I found an AWS secret access key in the project’s .env file");
       expect(answer).toContain("Avoid pasting credentials into chats or logs");
     } finally {
       await mock.close();
@@ -63,7 +66,7 @@ describe("persisted local demo", () => {
     };
 
     const exitCode = await cmdDemo("/tmp/beagle-demo-test", {
-      generateCanary: () => generateDemoCanary(new Uint8Array(16).fill(9)),
+      generateCanary: () => generateDemoCanary(new Uint8Array(63).fill(9)),
       startMock: async () => { calls.push("mock"); return mock; },
       ensureDaemon: async () => { calls.push("daemon"); return daemon; },
       exchange: async (_daemon, usedMock, _canary, runId) => {
@@ -137,7 +140,7 @@ describe("persisted local demo", () => {
   });
 
   test("demo notification copy never implies a real provider leak", () => {
-    const message = buildDemoAlertMessage({ secretType: "aws-access-key-id" } as AlertEvent);
+    const message = buildDemoAlertMessage({ secretType: "aws-secret-access-key" } as AlertEvent);
     expect(message.title).toContain("Beagle [demo]");
     expect(message.body).toContain("Drill only");
     expect(message.body).toContain("loopback mock");

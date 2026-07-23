@@ -1,7 +1,8 @@
 // Adversarial corpus regression (R5): every case pins an explicit verdict —
-// caught (with the exact detector), clean (decoys must stay silent at every
-// tier), or out-of-scope (a documented product decision, asserted so a rule
-// change that starts covering it surfaces here and gets promoted to caught).
+// caught (with the exact detector), suppressed (recognized internally but
+// never reported as a leak), clean (decoys stay silent at every tier), or
+// out-of-scope (a documented product decision, asserted so a rule change that
+// starts covering it surfaces here and gets promoted to caught).
 // Corpus adapted from leakproof (Apache-2.0); see the fixture's _notice.
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -22,7 +23,7 @@ interface CorpusCase {
   kind: "leak" | "decoy";
   text: string;
   detectors: string[];
-  outcome: "caught" | "clean" | "out-of-scope";
+  outcome: "caught" | "suppressed" | "clean" | "out-of-scope";
 }
 
 const corpus: { cases: CorpusCase[] } = JSON.parse(
@@ -40,6 +41,9 @@ describe("leakproof adversarial corpus", () => {
         // a false-positive regression hiding behind a real catch.
         const extras = findings.filter((f) => f.tier === "structured" && !c.detectors.includes(f.detector));
         expect(extras).toEqual([]);
+      } else if (c.outcome === "suppressed") {
+        for (const d of c.detectors) expect(found).toContain(d);
+        expect(findings.filter((f) => f.alert !== false)).toEqual([]);
       } else {
         // clean AND out-of-scope: zero findings at any tier. If a new rule
         // starts catching an out-of-scope case, this fails on purpose —
@@ -171,8 +175,8 @@ describe("quiet-tier fallbacks", () => {
     expect(kept.some((x) => x.detector === "aws-secret-access-key" && x.tier === "structured")).toBe(true);
   });
 
-  test("base64-wrapped AKIA key: decoded and re-scanned", () => {
-    const f = scanText("config_blob = 'QUtJQTJFMEE4RjNCOUMxRDdLNFA='");
+  test("base64-wrapped AWS secret access key: decoded and re-scanned", () => {
+    const f = scanText("config_blob = 'QVdTX1NFQ1JFVF9BQ0NFU1NfS0VZPXdKYTFyWFV0bkYzTUk0SzdNREVOR2JQeFJmOUNZWjhxTG0yVnQwQm4='");
     const hit = f.find((x) => x.detector === "base64-wrapped-secret");
     expect(hit).toBeDefined();
     expect(hit?.tier).toBe("possible");
@@ -187,10 +191,10 @@ describe("quiet-tier fallbacks", () => {
 
   test("a real wrapped secret is still found after many benign base64 blobs", () => {
     // Probe budget is a deadline backstop, not a detection cap: a genuine
-    // wrapped AKIA key must survive a wall of benign high-entropy base64.
+    // wrapped secret must survive a wall of benign high-entropy base64.
     const noise = Array.from({ length: 2000 }, (_, i) =>
       `"t":"${Buffer.from(`benign-token-${i}-xyz`).toString("base64")}"`).join(",");
-    const f = scanText(`{${noise},"real":"QUtJQTJFMEE4RjNCOUMxRDdLNFA="}`);
+    const f = scanText(`{${noise},"real":"QVdTX1NFQ1JFVF9BQ0NFU1NfS0VZPXdKYTFyWFV0bkYzTUk0SzdNREVOR2JQeFJmOUNZWjhxTG0yVnQwQm4="}`);
     expect(f.some((x) => x.detector === "base64-wrapped-secret")).toBe(true);
   });
 
@@ -294,7 +298,7 @@ describe("precision fixes", () => {
   });
 
   test("VAR=base64: '=' is a valid leading delimiter for the base64 rule", () => {
-    const f = scanText("BLOB=QUtJQTJFMEE4RjNCOUMxRDdLNFA=");
+    const f = scanText("BLOB=QVdTX1NFQ1JFVF9BQ0NFU1NfS0VZPXdKYTFyWFV0bkYzTUk0SzdNREVOR2JQeFJmOUNZWjhxTG0yVnQwQm4=");
     expect(f.some((x) => x.detector === "base64-wrapped-secret")).toBe(true);
   });
 

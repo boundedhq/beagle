@@ -53,9 +53,9 @@ describe("compiled binary", () => {
         cwd: dir,
         env: { ...process.env, BEAGLE_STATE_DIR: demoStateDir },
       }).stdout.toString();
-      expect(demoShow).toContain("find the AWS access key ID configured for the project");
-      expect(demoShow).toContain("[REDACTED:aws-access-key-id:");
-      expect(demoShow).toContain("I found an AWS access key ID in the project’s .env file");
+      expect(demoShow).toContain("find the AWS secret access key configured for the project");
+      expect(demoShow).toContain("[REDACTED:aws-secret-access-key:");
+      expect(demoShow).toContain("I found an AWS secret access key in the project’s .env file");
 
       // The dashboard must tell the same story as the synthetic agent loop:
       // user asks for a file, model requests Read, tool returns the canary,
@@ -68,7 +68,7 @@ describe("compiled binary", () => {
         const session = buildSessionTurns(demoStore, demoCall!.sessionId);
         expect(session.turns).toHaveLength(2);
         expect(session.turns[0]!.messages[0]!.content).toContain(
-          "find the AWS access key ID configured for the project",
+          "find the AWS secret access key configured for the project",
         );
         expect(session.turns[0]!.responseCalls[0]).toMatchObject({
           tool: "Read",
@@ -76,10 +76,10 @@ describe("compiled binary", () => {
         });
         expect(session.turns[1]!.messages[0]).toMatchObject({
           kind: "result",
-          content: expect.stringContaining("[REDACTED:aws-access-key-id:"),
+          content: expect.stringContaining("[REDACTED:aws-secret-access-key:"),
         });
         expect(session.turns[1]!.responseText).toContain(
-          "I found an AWS access key ID in the project’s .env file",
+          "I found an AWS secret access key in the project’s .env file",
         );
       } finally {
         demoStore.close();
@@ -141,20 +141,20 @@ describe("compiled binary", () => {
         // send a leaking request through the proxy
         await fetch(`http://127.0.0.1:${info!.proxyPort}/run/bt/v1/messages`, {
           method: "POST",
-          body: '{"messages":[{"role":"user","content":"key AKIAZQ3DRSTUVWXY2345"}]}',
+          body: '{"messages":[{"role":"user","content":"AWS_SECRET_ACCESS_KEY=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"}]}',
         });
 
         // the embedded scanner must record the leak — poll, don't guess a
         // fixed delay (slow CI runners)
         let leaksOut = "";
-        for (let i = 0; i < 40 && !leaksOut.includes("aws-access-key-id"); i++) {
+        for (let i = 0; i < 40 && !leaksOut.includes("aws-secret-access-key"); i++) {
           await Bun.sleep(150);
           leaksOut = Bun.spawnSync([out, "leaks"], {
             cwd: dir,
             env: { ...process.env, BEAGLE_STATE_DIR: stateDir },
           }).stdout.toString();
         }
-        expect(leaksOut).toContain("aws-access-key-id");
+        expect(leaksOut).toContain("aws-secret-access-key");
       } finally {
         daemon.kill();
         upstream.close();

@@ -22,6 +22,7 @@ const corpusRules = compileRules(
   new Uint8Array(32).fill(7),
 );
 const scanRaw = (text: string) => scan(new TextEncoder().encode(text), {}, corpusRules).findings;
+const ALERT_SECRET = "ghp_A7hK9mP2qR5tW8xZ1cV4bN6jL3gF0dSe2aYb";
 
 // fake upstream that replies with a fixed Anthropic-ish JSON body
 function fakeUpstream(replyBody?: string): Promise<{ server: Server; port: number; seen: string[] }> {
@@ -461,22 +462,43 @@ describe("Daemon end-to-end", () => {
   test("leak in request body alerts in real time and records the event", async () => {
     await sendThroughProxy(
       daemon.proxyPort, "run-e2e",
-      requestBody('here is my key: AKIAZQ3DRSTUVWXY2345'),
+      requestBody(`here is my key: ${ALERT_SECRET}`),
     );
     await Bun.sleep(150);
     expect(alerts.length).toBe(1);
-    expect(alerts[0]!.secretType).toBe("aws-access-key-id");
+    expect(alerts[0]!.secretType).toBe("github-pat");
     // the daemon enriches the event with rendered copy before it reaches any
     // surface (this is what the dashboard banner + OS notification consume) —
     // guard the facts→copy wiring, not just the facts.
     expect(alerts[0]!.title).toContain("Beagle");
-    expect(alerts[0]!.subtitle).toBe("AWS access key");
+    expect(alerts[0]!.subtitle).toBe("GitHub personal access token");
     expect(alerts[0]!.body).toContain("beagle ui");
 
     const store = Store.openReadOnly(stateDir);
     const events = listLeakEvents(store);
     expect(events.length).toBe(1);
     expect(events[0]!.destination).toBe("anthropic");
+    store.close();
+  });
+
+  test("an AWS access key ID is redacted but never reported as a credential leak", async () => {
+    const accessKeyId = "AKIAZQ3DRSTUVWXY2345";
+    await sendThroughProxy(
+      daemon.proxyPort, "run-e2e",
+      requestBody(`account identifier ${accessKeyId}`),
+    );
+    await Bun.sleep(150);
+
+    expect(alerts).toEqual([]);
+    const store = Store.openReadOnly(stateDir);
+    expect(listLeakEvents(store)).toEqual([]);
+    expect(listCalls(store, 5).some((call) => call.hasLeak)).toBe(false);
+    const hit = store.searchLiteral("account identifier")[0];
+    expect(hit).toBeDefined();
+    const call = store.getCall(hit!.callId)!;
+    const stored = new TextDecoder().decode(call.requestBody!);
+    expect(stored).not.toContain(accessKeyId);
+    expect(stored).toContain("[REDACTED:aws-access-key-id:");
     store.close();
   });
 
@@ -494,23 +516,24 @@ describe("Daemon end-to-end", () => {
         messages: [{
           role: "user",
           content: [
-            { type: "text", text: "block one ends AKIAZQ3DRSTUV" },
-            { type: "text", text: "WXY2345 begins block two" },
+            { type: "text", text: `block one ends ${ALERT_SECRET.slice(0, 14)}` },
+            { type: "text", text: ALERT_SECRET.slice(14, 27) },
+            { type: "text", text: `${ALERT_SECRET.slice(27)} begins block three` },
           ],
         }],
       }),
     );
     await Bun.sleep(150);
     expect(alerts.length).toBe(1);
-    expect(alerts[0]!.secretType).toBe("aws-access-key-id");
+    expect(alerts[0]!.secretType).toBe("github-pat");
     const store = Store.openReadOnly(stateDir);
     expect(listLeakEvents(store).length).toBe(1);
     // The stored body keeps its bytes — no rule ever matched them, and neither
     // half is a secret on its own.
     const call = store.getCall(store.searchLiteral("block one ends")[0]!.callId)!;
     expect(call.redacted).toBe(true); // the derived surfaces WERE rewritten
-    expect(call.summary).not.toContain("AKIAZQ3DRSTUVWXY2345");
-    expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
+    expect(call.summary).not.toContain(ALERT_SECRET);
+    expect(store.searchLiteral(ALERT_SECRET)).toEqual([]);
     // …and the VIEWER, which is the surface a human actually reads. A wire row
     // normally carries no stored transcript and the viewer re-parses the body —
     // which would re-join these two blocks and render the assembled key, with
@@ -518,12 +541,12 @@ describe("Daemon end-to-end", () => {
     // redacted projection precisely so that re-derive can't happen.
     const { buildDetail, leakSpansFor } = await import("../src/viewer/detail");
     const detail = buildDetail(call, leakSpansFor(store, call.id));
-    expect(JSON.stringify(detail.messages)).not.toContain("AKIAZQ3DRSTUVWXY2345");
-    expect(JSON.stringify(detail.messages)).toContain("[REDACTED:aws-access-key-id:");
+    expect(JSON.stringify(detail.messages)).not.toContain(ALERT_SECRET);
+    expect(JSON.stringify(detail.messages)).toContain("[REDACTED:github-pat:");
     // The placeholder lives only in the transcript (the body never held the
     // assembled key), so R7's highlight has to find it there or the one masked
     // surface renders unmarked.
-    expect(detail.leaks.map((l) => l.secretType)).toContain("aws-access-key-id");
+    expect(detail.leaks.map((l) => l.secretType)).toContain("github-pat");
     store.close();
   });
 
@@ -918,8 +941,9 @@ describe("Daemon end-to-end", () => {
       messages: [{
         role: "user",
         content: [
-          { type: "text", text: `${marker} AKIAZQ3DRSTUV` },
-          { type: "text", text: "WXY6789 goes out in the same message" },
+          { type: "text", text: `${marker} ${ALERT_SECRET.slice(0, 14)}` },
+          { type: "text", text: ALERT_SECRET.slice(14, 27) },
+          { type: "text", text: `${ALERT_SECRET.slice(27)} goes out in the same message` },
         ],
       }],
     });
@@ -932,19 +956,20 @@ describe("Daemon end-to-end", () => {
       const call = await streamedCall(
         "run-split-noredact",
         marker,
-        deltaFrame("key AKIAZQ3DRSTUV") + deltaFrame("WXY2345 done"),
+        deltaFrame(`key ${ALERT_SECRET.slice(0, 24)}`) +
+          deltaFrame(`${ALERT_SECRET.slice(24)} done`),
         "",
         reqBody,
       );
       // The outbound manufactured key alerted — and only it: the response-side
       // key came FROM the provider and inbound findings never alert.
       expect(alerts.length).toBe(1);
-      expect(alerts[0]!.secretType).toBe("aws-access-key-id");
+      expect(alerts[0]!.secretType).toBe("github-pat");
       store = Store.openReadOnly(stateDir);
       const { leakSpansFor, leakTypesFor } = await import("../src/viewer/detail");
       // The derived-only event really is recorded on this call (this guard is
       // what keeps the [] below from passing because nothing was written)…
-      expect(leakTypesFor(store, call.id).map((t) => t.secretType)).toContain("aws-access-key-id");
+      expect(leakTypesFor(store, call.id).map((t) => t.secretType)).toContain("github-pat");
       // …and its occurrence stored NULL spans: leakSpansFor filters
       // span_start IS NOT NULL, so a derived-only row must yield nothing.
       const spans = leakSpansFor(store, call.id);
@@ -955,14 +980,14 @@ describe("Daemon end-to-end", () => {
       // fragment of the body cut at transcript offsets.
       expect(d.leaks).toEqual([]);
       // Both manufactured keys are masked in the projection…
-      expect(JSON.stringify(d.messages)).not.toContain("AKIAZQ3DRSTUVWXY6789");
-      expect(JSON.stringify(d.messages)).toContain("[REDACTED:aws-access-key-id:");
-      expect(d.responseText).not.toContain("AKIAZQ3DRSTUVWXY2345");
-      expect(d.responseText).toContain("[REDACTED:aws-access-key-id:");
+      expect(JSON.stringify(d.messages)).not.toContain(ALERT_SECRET);
+      expect(JSON.stringify(d.messages)).toContain("[REDACTED:github-pat:");
+      expect(d.responseText).not.toContain(ALERT_SECRET);
+      expect(d.responseText).toContain("[REDACTED:github-pat:");
       // …and the raw panes still show every byte as received — that IS the
       // setting.
-      expect(new TextDecoder().decode(call.requestBody!)).toContain("AKIAZQ3DRSTUV");
-      expect(new TextDecoder().decode(call.sseRaw!)).toContain("AKIAZQ3DRSTUV");
+      expect(new TextDecoder().decode(call.requestBody!)).toContain(ALERT_SECRET.slice(0, 14));
+      expect(new TextDecoder().decode(call.sseRaw!)).toContain(ALERT_SECRET.slice(0, 24));
     } finally {
       store?.close();
       await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
@@ -1327,7 +1352,7 @@ describe("Daemon end-to-end", () => {
     // opts into raw capture — redaction is on by default now (secure default),
     // which would mask the value out of the search index.
     await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: false } });
-    const secret = 'key AKIAZQ3DRSTUVWXY2345';
+    const secret = `key ${ALERT_SECRET}`;
     const turn1 = JSON.stringify({
       model: "m", system: "s",
       messages: [{ role: "user", content: secret }],
@@ -1350,7 +1375,7 @@ describe("Daemon end-to-end", () => {
     const events = listLeakEvents(store);
     expect(events.length).toBe(1);
     expect(events[0]!.occurrences).toBe(2); // both calls marked
-    const sessions = new Set(store.searchLiteral("AKIAZQ3DRSTUVWXY2345").map((h) => h.sessionId));
+    const sessions = new Set(store.searchLiteral(ALERT_SECRET).map((h) => h.sessionId));
     expect(sessions.size).toBe(1);
     store.close();
   });
@@ -1613,17 +1638,17 @@ describe("Daemon end-to-end", () => {
     await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
     await sendThroughProxy(
       daemon.proxyPort, "run-e2e",
-      requestBody("my aws key AKIAZQ3DRSTUVWXY2345 here"),
+      requestBody(`my token ${ALERT_SECRET} here`),
     );
     await Bun.sleep(200);
     const store = Store.openReadOnly(stateDir);
     // the leak event still exists (audit value kept)...
     expect(listLeakEvents(store).length).toBe(1);
     // ...but the raw secret is gone from the stored payload and the index
-    expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
+    expect(store.searchLiteral(ALERT_SECRET)).toEqual([]);
     const anyEx = listCalls(store, 10).find((e) => e.hasLeak);
     const full = store.getCall(anyEx!.id)!;
-    expect(new TextDecoder().decode(full.requestBody!)).toContain("[REDACTED:aws-access-key-id:");
+    expect(new TextDecoder().decode(full.requestBody!)).toContain("[REDACTED:github-pat:");
     store.close();
   });
 
@@ -1648,12 +1673,16 @@ describe("Daemon end-to-end", () => {
   test("redact-on-capture scrubs the secret from the summary", async () => {
     await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
     const silent = await silentRun("run-summary");
-    await sendThroughProxy(daemon.proxyPort, "run-summary", requestBody("my key AKIAZQ3DRSTUVWXY2345 leaked"));
+    await sendThroughProxy(
+      daemon.proxyPort,
+      "run-summary",
+      requestBody(`my key ${ALERT_SECRET} leaked`),
+    );
     await Bun.sleep(200);
     const store = Store.openReadOnly(stateDir);
     const ex = listCalls(store, 10).find((e) => e.hasLeak)!;
-    expect(ex.summary).not.toContain("AKIAZQ3DRSTUVWXY2345");
-    expect(ex.summary).toContain("[REDACTED:aws-access-key-id:");
+    expect(ex.summary).not.toContain(ALERT_SECRET);
+    expect(ex.summary).toContain("[REDACTED:github-pat:");
     store.close();
     silent.server.close();
   });
@@ -1709,15 +1738,15 @@ describe("Daemon end-to-end", () => {
     // keep the secret's head, so the scrub must run before the cap.
     await sendThroughProxy(
       daemon.proxyPort, "run-straddle",
-      requestBody("p".repeat(94) + " AKIAZQ3DRSTUVWXY2345"),
+      requestBody("p".repeat(94) + ` ${ALERT_SECRET}`),
     );
     await Bun.sleep(200);
     const store = Store.openReadOnly(stateDir);
     const ex = listCalls(store, 10).find((e) => e.hasLeak)!;
-    expect(ex.summary).not.toContain("AKIA");
+    expect(ex.summary).not.toContain("ghp_");
     // ...and the cap lands past the placeholder, not through it: a `[RED…`
     // stump reads as a corrupted line and names no secret type.
-    expect(ex.summary).toMatch(/\[REDACTED:aws-access-key-id:[0-9a-f]{6}\]/);
+    expect(ex.summary).toMatch(/\[REDACTED:github-pat:[0-9a-f]{6}\]/);
     store.close();
     silent.server.close();
   });

@@ -68,6 +68,12 @@ describe("AlertEngine", () => {
     expect(events[0]?.confidenceTier).toBe("possible");
   });
 
+  test("a non-secret identifier creates no leak event or alert", () => {
+    engine.process(callMeta(), [finding({ severity: "low", alert: false })]);
+    expect(alerts).toEqual([]);
+    expect(listLeakEvents(store)).toEqual([]);
+  });
+
   test("the event carries the structured facts; wording is built downstream", () => {
     engine.process(callMeta(), [finding()]);
     const a = alerts[0]!;

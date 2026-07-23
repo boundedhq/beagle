@@ -16,6 +16,7 @@ export interface Finding {
   secretType: string;
   severity: string;
   tier: "structured" | "possible";
+  alert?: boolean;
   start: number;
   end: number;
   fingerprint: string;
@@ -386,11 +387,12 @@ function matchAll(raw: string, text: string, ctx: ScanCtx, compiled: CompiledRul
       if (spec.entropy !== undefined && shannonEntropy(secret) < spec.entropy) continue;
       if (spec.validators?.includes("luhn") && !luhnValid(secret)) continue;
       // base64-secret validator: the blob only counts if it DECODES to
-      // something a structured rule recognizes — base64 of anything else stays
-      // silent, which is what keeps this rule viable on agent traffic full of
-      // benign base64. The decoded text runs the SAME stopword gate as a direct
-      // match, so a wrapped documentation key (base64 of AKIA…EXAMPLE) is
-      // suppressed just like the plaintext one. Validator-bearing rules are
+      // something an alertable structured rule recognizes — base64 of anything
+      // else stays silent, which is what keeps this rule viable on agent traffic
+      // full of benign base64. Non-secret identifiers must not become a
+      // "wrapped secret" merely because they were encoded. The decoded text
+      // runs the SAME stopword gate as a direct match, so a wrapped documentation
+      // key is suppressed just like the plaintext one. Validator-bearing rules are
       // excluded from the probe, so it can't recurse and the base64 rule's own
       // in-flight cursor is never touched; probed regexes need no lastIndex
       // restore because this loop resets lastIndex before every rule's scan.
@@ -402,7 +404,8 @@ function matchAll(raw: string, text: string, ctx: ScanCtx, compiled: CompiledRul
         budget.probes--;
         const decoded = Buffer.from(secret, "base64").toString("utf8");
         if (decoded.length < 8 || STOPWORDS.some((w) => decoded.toLowerCase().includes(w)) || !compiled.rules.some(({ spec: s, re: r }) =>
-          s.tier === "structured" && !s.validators?.length && ((r.lastIndex = 0), r.test(decoded)))) continue;
+          s.tier === "structured" && s.alert !== false && !s.validators?.length &&
+          ((r.lastIndex = 0), r.test(decoded)))) continue;
       }
       ruleFindings++;
       findings.push({
@@ -410,6 +413,7 @@ function matchAll(raw: string, text: string, ctx: ScanCtx, compiled: CompiledRul
         secretType: spec.id,
         severity: spec.severity,
         tier: spec.tier,
+        alert: spec.alert,
         start,
         end,
         fingerprint: fingerprint(secretRaw, compiled.hmacKey),
