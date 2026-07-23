@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { findRuns, parseSegments } from "../src/viewer/static/render-json.module.js";
+import { findRuns, parseSegments, rawCanFold } from "../src/viewer/static/render-json.module.js";
 
 // Mode B tool rows persist mixed prose+JSON bodies (`tool\n{args}\noutput…`),
 // which the whole-document tree path can't fold — the args JSON rendered flat.
@@ -68,6 +68,30 @@ describe("parseSegments (mixed prose+JSON bodies)", () => {
     const leaks = [{ value: "ghp_tokentokentokentoken", secretType: "github-pat", tier: "structured" }];
     const body = 'header ghp_tokentokentokentoken\n{"a":1}';
     expect(parseSegments(body, leaks)).not.toBeNull();
+  });
+});
+
+describe("rawCanFold (detail raw payloads)", () => {
+  test("the demo's JSON request and SSE response both expose JSON folds", () => {
+    const request = JSON.stringify({
+      model: "claude-sonnet-4-demo",
+      messages: [{ role: "user", content: "find the key" }],
+      tools: [{ name: "Read", input_schema: { type: "object" } }],
+    });
+    const response = [
+      "event: message_start",
+      'data: {"type":"message_start","message":{"content":[]}}',
+      "",
+      "event: content_block_delta",
+      'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"done"}}',
+    ].join("\n");
+
+    expect(rawCanFold(request, [])).toBe(true);
+    expect(rawCanFold(response, [])).toBe(true);
+  });
+
+  test("plain raw text stays verbatim", () => {
+    expect(rawCanFold("tool output with no structured payload", [])).toBe(false);
   });
 });
 

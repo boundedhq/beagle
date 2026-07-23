@@ -374,9 +374,16 @@ button.linklike:hover { text-decoration: underline; }
 .detail pre, .rawblock {
   background: var(--bg); padding: 11px 12px; border-radius: 7px;
   border: 1px solid var(--border); overflow-x: auto; overflow-y: auto;
-  white-space: pre-wrap; word-break: normal; overflow-wrap: anywhere;
+  word-break: normal; overflow-wrap: anywhere;
   max-height: 460px; line-height: 1.5; font-size: var(--content);
 }
+.detail pre, .raw-verbatim { white-space: pre-wrap; }
+.raw-tools { display: flex; justify-content: flex-end; margin-bottom: 6px; }
+.raw-tools button {
+  border: 0; background: transparent; color: var(--muted);
+  font-size: 11px; padding: 2px 4px;
+}
+.raw-tools button:hover { color: var(--accent); }
 /* Section labels above each raw block — same typography as the transcript's
    .mc-name labels, colored the same way (request accent, response ok). */
 /* Only the raw stream's label still uses an h4 — request/response sections

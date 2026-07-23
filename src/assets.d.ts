@@ -31,6 +31,10 @@ declare module "*.module.js" {
     content: string,
     leaks: Array<{ value?: string }> | undefined,
   ): Array<{ kind: "text"; text: string } | { kind: "tree"; head: string | null; value: unknown }> | null;
+  export function rawCanFold(
+    body: string | null | undefined,
+    leaks: Array<{ value?: string }> | undefined,
+  ): boolean;
   export function findRuns(
     text: string | null | undefined,
     find: string | null | undefined,

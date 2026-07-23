@@ -5,8 +5,8 @@
 // or clamp ever hides one. Everything that shows a stored body goes through
 // JsonBody (readable), RawBody (raw), or Highlighted (search snippets — flat
 // text that still owes both invariants); those are the only RENDER exports
-// (parseSegments, findRuns, and hasFind are also exported, but they are pure
-// functions returning plain data — they never touch the DOM).
+// (rawCanFold, parseSegments, findRuns, and hasFind are also exported, but
+// they are pure functions returning plain data — they never touch the DOM).
 import { h } from "preact";
 import { useMemo, useState } from "preact/hooks";
 import htm from "htm";
@@ -360,12 +360,31 @@ export function JsonBody({ content, leaks, threshold, hasLeak, find }) {
     threshold=${threshold ?? 2500} hasLeak=${hasLeak} find=${find} />`;
 }
 
-// The raw view is deliberately VERBATIM rather than another JsonBody tree.
-// Parsing/pretty-printing made raw look identical to readable and changed the
-// stored whitespace/escaping users open this view to inspect. Highlighted
-// still renders text nodes only and marks every leak/search hit, so the two
-// safety invariants remain intact without normalizing the payload.
+// Raw payloads keep all protocol fields that the readable projection omits,
+// but JSON should still be navigable. The default is the same safe foldable
+// tree used elsewhere; "exact text" remains one click away for inspecting the
+// stored whitespace and escaping. Bodies that contain no structurally safe
+// JSON stay verbatim, without offering a meaningless toggle.
+export function rawCanFold(body, leaks) {
+  if (!body) return false;
+  return parseForTree(body, leaks) !== null || parseSegments(body, leaks) !== null;
+}
+
 export function RawBody({ body, leaks, find }) {
+  const foldable = useMemo(() => rawCanFold(body, leaks), [body, leaks]);
+  const [exact, setExact] = useState(false);
   if (!body) return html`<pre>(empty)</pre>`;
-  return html`<pre class="rawblock"><${Highlighted} text=${body} leaks=${leaks} find=${find} /></pre>`;
+  if (!foldable) {
+    return html`<pre class="rawblock"><${Highlighted} text=${body} leaks=${leaks} find=${find} /></pre>`;
+  }
+  return html`
+    <div class="rawblock">
+      <div class="raw-tools">
+        <button onClick=${() => setExact(!exact)}>${exact ? "fold JSON" : "exact text"}</button>
+      </div>
+      ${exact
+        ? html`<div class="raw-verbatim"><${Highlighted} text=${body} leaks=${leaks} find=${find} /></div>`
+        : html`<${JsonBody} content=${body} leaks=${leaks} hasLeak=${(leaks ?? []).length > 0} find=${find} />`}
+    </div>
+  `;
 }
