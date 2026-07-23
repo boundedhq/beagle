@@ -424,9 +424,11 @@ ln -sf "$PWD/dist/beagle" /usr/local/bin/beagle   # or install it system-wide (m
 ```
 
 CI keeps the trust-critical surface small and testable: the dependency-free
-core is capped at 2,000 lines, the complete capture-to-alert path at 5,000
-lines, and the release binary at 100 MB. Scanner and proxy-latency regression
-tests are also release gates.
+core is capped at 2,000 lines, the declared capture-to-alert trust path at
+5,000 lines, and the release binary at 100 MB. Scanner and proxy-latency
+regression tests are also release gates. If a scan reaches a resource limit,
+Beagle marks it incomplete and, with default redaction, withholds unverified
+content.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Beagle is a product of
 [Bounded](https://github.com/boundedhq), MIT-licensed.

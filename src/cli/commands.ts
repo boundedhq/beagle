@@ -374,12 +374,13 @@ export function cmdSearch(stateDir: string, term: string): string {
   const hits = store.searchLiteral(term);
   store.close();
   if (hits.length === 0) return "no matches — not in any captured call still in the store (payloads are pruned on a rolling window, so this isn't proof it was never sent).";
-  const sessions = new Set(hits.map((h) => h.sessionId));
+  const orderedHits = [...hits].sort((a, b) => b.tsRequest - a.tsRequest);
+  const sessions = new Set(orderedHits.map((h) => h.sessionId));
   const lines = [
     `found in ${hits.length} call${hits.length === 1 ? "" : "s"} across ${sessions.size} session${sessions.size === 1 ? "" : "s"}:`,
   ];
-  const bySession = new Map<string, typeof hits>();
-  for (const h of hits) {
+  const bySession = new Map<string, typeof orderedHits>();
+  for (const h of orderedHits) {
     const group = bySession.get(h.sessionId) ?? [];
     group.push(h);
     bySession.set(h.sessionId, group);
@@ -387,7 +388,7 @@ export function cmdSearch(stateDir: string, term: string): string {
   for (const [sessionId, group] of bySession) {
     lines.push("", `  session id: ${clean(sessionId)}`);
     for (const h of group) {
-      lines.push(`    ${new Date(h.tsRequest).toISOString()}  call ${clean(h.callId)}`);
+      lines.push(`    ${fmtWhen(h.tsRequest)}   call ${clean(h.callId)}`);
     }
   }
   lines.push(
@@ -397,6 +398,7 @@ export function cmdSearch(stateDir: string, term: string): string {
   for (const sessionId of sessions) {
     lines.push(`  beagle ui --session ${clean(sessionId)}`);
   }
+  lines.push("", "inspect one call here in the terminal: beagle show <call-id>");
   return lines.join("\n");
 }
 

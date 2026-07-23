@@ -48,25 +48,35 @@ describe("CLI commands (headless loop, R12)", () => {
     expect(out).toContain("session id: s1");
     expect(out).toContain(`call ${callId}`);
     expect(out).toContain("beagle ui --session s1");
+    expect(out).toContain("beagle show <call-id>");
   });
 
-  test("search: prints the complete session id in results and the dashboard command", () => {
+  test("search: prints complete session ids and dashboard commands, newest first", () => {
     const store = Store.open(stateDir);
-    const sessionId = "session-0123456789abcdef";
-    store.insertCall({
-      id: ulid(), sessionId, runId: "search-run", source: "wire",
-      agent: "claude-code", provider: "anthropic", endpoint: "/v1/messages",
-      tsRequest: Date.now(), scanState: "ok", captureState: "ok",
-      sessionTier: "run", requestBody: null, requestHeaders: null,
-      responseBody: null, responseHeaders: null, sseRaw: null,
-      searchText: "unique-dashboard-needle",
-    });
+    const older = { sessionId: "session-older-0123456789", ts: 1_000 };
+    const newer = { sessionId: "session-newer-9876543210", ts: 2_000 };
+    for (const row of [older, newer]) {
+      store.insertCall({
+        id: ulid(row.ts), sessionId: row.sessionId, runId: "search-run", source: "wire",
+        agent: "claude-code", provider: "anthropic", endpoint: "/v1/messages",
+        tsRequest: row.ts, scanState: "ok", captureState: "ok",
+        sessionTier: "run", requestBody: null, requestHeaders: null,
+        responseBody: null, responseHeaders: null, sseRaw: null,
+        searchText: "unique-dashboard-needle",
+      });
+    }
     store.close();
 
     const out = cmdSearch(stateDir, "unique-dashboard-needle");
-    expect(out).toContain(`session id: ${sessionId}`);
-    expect(out).toContain(`beagle ui --session ${sessionId}`);
-    expect(out).not.toContain(`beagle ui --session ${sessionId.slice(0, 8)}\n`);
+    expect(out.indexOf(`session id: ${newer.sessionId}`))
+      .toBeLessThan(out.indexOf(`session id: ${older.sessionId}`));
+    const commands = out.split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("beagle ui --session "));
+    expect(commands).toEqual([
+      `beagle ui --session ${newer.sessionId}`,
+      `beagle ui --session ${older.sessionId}`,
+    ]);
   });
 
   test("search: a miss is bounded, not a categorical 'never sent'", () => {
