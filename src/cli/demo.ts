@@ -41,9 +41,9 @@ interface DemoDependencies {
   err: (text: string) => void;
 }
 
-/** Generate a detector-valid but never-issued AWS-secret-shaped value. A
- *  shuffled alphabet makes all 40 characters distinct, guaranteeing the
- *  production rule's entropy gate; excluding vowels prevents stopwords. */
+/** Generate a detector-valid but unpaired AWS-secret-shaped value. A shuffled
+ *  alphabet makes all 40 characters distinct, guaranteeing the production
+ *  rule's entropy gate; excluding vowels prevents stopwords. */
 export function generateDemoCanary(
   bytes: Uint8Array = randomBytes(CANARY_ALPHABET.length - 1),
 ): string {
@@ -193,8 +193,12 @@ export async function waitForDemoLeak(stateDir: string, runId: string): Promise<
       store = Store.openReadOnly(stateDir);
       const row = store.queryAll<{ session_id: string }>(
         `SELECT e.session_id FROM exchanges e
+         JOIN leak_occurrences lo ON lo.exchange_id = e.id
          WHERE e.run_id = ? AND e.agent = ?
-           AND EXISTS(SELECT 1 FROM leak_occurrences lo WHERE lo.exchange_id = e.id)
+           AND (SELECT COUNT(*) FROM exchanges x
+                WHERE x.run_id = e.run_id
+                  AND x.agent = e.agent
+                  AND x.session_id = e.session_id) >= 2
          ORDER BY e.ts_request DESC LIMIT 1`,
         [runId, DEMO_AGENT],
       )[0];
@@ -207,7 +211,7 @@ export async function waitForDemoLeak(stateDir: string, runId: string): Promise<
     }
     await Bun.sleep(50);
   }
-  throw new Error("demo alert was not persisted by the daemon");
+  throw new Error("the complete demo exchange was not persisted by the daemon");
 }
 
 function productionDependencies(): DemoDependencies {

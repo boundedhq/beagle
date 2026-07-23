@@ -994,11 +994,11 @@ function Detail({ id, refresh, onSession, find }) {
           : html`
               <div class="dir-label sent">⇢ request</div>
               <${RawBody} body=${detail.requestRaw} leaks=${leaks} find=${find} />
-              <div class="dir-label recv">⇠ response</div>
-              <${RawBody} body=${detail.responseRaw} leaks=${leaks} find=${find} />
-              ${detail.sseRaw &&
-              html`<h4>raw stream (as received)</h4>
-                <${RawBody} body=${detail.sseRaw} leaks=${respHighlights} find=${find} />`}
+              ${detail.sseRaw
+                ? html`<h4>raw stream (as received)</h4>
+                    <${RawBody} body=${detail.sseRaw} leaks=${respHighlights} find=${find} />`
+                : html`<div class="dir-label recv">⇠ response</div>
+                    <${RawBody} body=${detail.responseRaw} leaks=${respHighlights} find=${find} />`}
             `
         : html`
             ${system != null &&

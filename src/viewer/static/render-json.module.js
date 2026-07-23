@@ -374,6 +374,7 @@ export function RawBody({ body, leaks, find }) {
   const foldable = useMemo(() => rawCanFold(body, leaks), [body, leaks]);
   const [exact, setExact] = useState(false);
   if (!body) return html`<pre>(empty)</pre>`;
+  const hasLeak = (leaks ?? []).some((l) => l.value && body.includes(l.value));
   if (!foldable) {
     return html`<pre class="rawblock"><${Highlighted} text=${body} leaks=${leaks} find=${find} /></pre>`;
   }
@@ -384,7 +385,7 @@ export function RawBody({ body, leaks, find }) {
       </div>
       ${exact
         ? html`<div class="raw-verbatim"><${Highlighted} text=${body} leaks=${leaks} find=${find} /></div>`
-        : html`<${JsonBody} content=${body} leaks=${leaks} hasLeak=${(leaks ?? []).length > 0} find=${find} />`}
+        : html`<${JsonBody} content=${body} leaks=${leaks} hasLeak=${hasLeak} find=${find} />`}
     </div>
   `;
 }

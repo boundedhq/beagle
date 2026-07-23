@@ -74,8 +74,8 @@ delivery again, `beagle demo --clean` to remove every demo session, or the
 normal `beagle purge` to erase all captured data including drills.
 
 Want to see the same alert during a real agent session? This paste-ready canary
-has the shape of an AWS secret access key, but it was never issued by AWS and
-has no paired access key ID, so it cannot authenticate
+is a fixed synthetic value with the shape of an AWS secret access key and no
+paired access key ID, so it cannot authenticate
 ([AWS access-key documentation](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html)):
 
 ```sh

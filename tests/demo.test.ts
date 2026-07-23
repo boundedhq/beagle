@@ -1,14 +1,20 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
-  cmdDemo, generateDemoCanary, startDemoMock, type DemoMock,
+  cmdDemo, generateDemoCanary, startDemoMock, waitForDemoLeak, type DemoMock,
 } from "../src/cli/demo";
 import { compileRules, scan } from "../src/core/scanner/engine";
 import { loadRuleFile } from "../src/core/scanner/rules";
+import { Store, type CallRecord } from "../src/core/store/store";
+import { ulid } from "../src/core/store/ulid";
 import { buildDemoAlertMessage } from "../src/notifier/alert-copy";
 import rulesRaw from "../rules/beagle-rules.json" with { type: "text" };
 import type { AlertEvent } from "../src/core/alert/engine";
 import { BEAGLE_VERSION } from "../src/core/version";
 import { VIEWER_ASSET_ID } from "../src/viewer/server";
+import { DEMO_AGENT } from "../src/core/call";
 
 const rules = compileRules(
   loadRuleFile(rulesRaw as unknown as string),
@@ -52,6 +58,59 @@ describe("persisted local demo", () => {
     } finally {
       await mock.close();
     }
+  });
+
+  test("persistence waits for both demo turns, not only the leaking second call", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "beagle-demo-wait-"));
+    const runId = "demo-race";
+    const sessionId = "session-demo-race";
+    const now = Date.now();
+    const record = (id: string, tsRequest: number): CallRecord => ({
+      id,
+      sessionId,
+      runId,
+      source: "wire",
+      agent: DEMO_AGENT,
+      provider: "loopback-demo",
+      tsRequest,
+      scanState: "ok",
+      captureState: "ok",
+      sessionTier: "prefix",
+      requestBody: new TextEncoder().encode("{}"),
+      requestHeaders: [],
+      responseBody: new TextEncoder().encode("{}"),
+      responseHeaders: [],
+      sseRaw: null,
+      searchText: "demo",
+    });
+    const secondId = ulid(now);
+    let store = Store.open(stateDir);
+    store.insertCall(record(secondId, now));
+    store.upsertLeakEvent({
+      fingerprint: "demo-fingerprint",
+      sessionId,
+      detector: "aws-secret-access-key",
+      secretType: "aws-secret-access-key",
+      severity: "high",
+      confidenceTier: "structured",
+      destination: "loopback-demo",
+      callId: secondId,
+      ts: now,
+    });
+    store.close();
+
+    let finished = false;
+    const waiting = waitForDemoLeak(stateDir, runId).then((result) => {
+      finished = true;
+      return result;
+    });
+    await Bun.sleep(100);
+    expect(finished).toBe(false);
+
+    store = Store.open(stateDir);
+    store.insertCall(record(ulid(now - 1), now - 1));
+    store.close();
+    expect(await waiting).toEqual({ sessionId });
   });
 
   test("success uses daemon persistence, opens the session, and prints cleanup", async () => {

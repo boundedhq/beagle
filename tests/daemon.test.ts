@@ -485,13 +485,42 @@ describe("Daemon end-to-end", () => {
 
   test("an AWS access key ID is redacted but never reported as a credential leak", async () => {
     const accessKeyId = "AKIAZQ3DRSTUVWXY2345";
+    const ui = await controlRequest(daemon.socketPath, { cmd: "ui" });
+    const url = new URL((ui.data as { url: string }).url);
+    const sess = await fetch(`${url.origin}/api/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ boot: url.searchParams.get("boot") }),
+    });
+    const cred = ((await sess.json()) as { credential: string }).credential;
+    const stream = await fetch(`${url.origin}/api/stream`, {
+      headers: { "x-beagle-token": cred },
+    });
+    const reader = stream.body!.getReader();
+    const dec = new TextDecoder();
+
     await sendThroughProxy(
       daemon.proxyPort, "run-e2e",
       requestBody(`account identifier ${accessKeyId}`),
     );
-    await Bun.sleep(150);
+    const timer = setTimeout(() => void reader.cancel(), 3000);
+    let frames = "";
+    try {
+      while (!frames.includes("event: call")) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        frames += dec.decode(value, { stream: true });
+      }
+    } finally {
+      clearTimeout(timer);
+      await reader.cancel().catch(() => {});
+    }
+    await captured(daemon.socketPath);
 
     expect(alerts).toEqual([]);
+    expect(frames).toContain("event: call");
+    expect(frames).toContain('"hasLeak":false');
+    expect(frames).not.toContain("event: leak");
     const store = Store.openReadOnly(stateDir);
     expect(listLeakEvents(store)).toEqual([]);
     expect(listCalls(store, 5).some((call) => call.hasLeak)).toBe(false);

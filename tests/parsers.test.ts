@@ -249,6 +249,24 @@ describe("display labels (turn clarity)", () => {
     });
   });
 
+  test("multiple anthropic tool results stay generic rather than claiming the first call", () => {
+    const body = JSON.stringify({
+      model: "claude-sonnet-5",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "toolu_1", content: "first output" },
+          { type: "tool_result", tool_use_id: "toolu_2", content: "second output" },
+        ],
+      }],
+    });
+    const parsed = parseRequest("anthropic-messages", enc(body))!;
+    expect(parsed.messages[0]).toMatchObject({
+      role: "user", content: "first outputsecond output", kind: "result",
+    });
+    expect(parsed.messages[0]!.callId).toBeUndefined();
+  });
+
   test("openai-chat role:'tool' messages stamp kind:'result'", () => {
     const body = JSON.stringify({
       messages: [
