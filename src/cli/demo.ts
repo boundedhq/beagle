@@ -5,6 +5,7 @@ import { randomBytes } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { ScanHost, type ScanResult } from "../adapters/scan-host";
+import { listenReady } from "../core/net/listen";
 import { ProxyServer, type RunLookup } from "../core/proxy/server";
 import { parseUpstream } from "../core/proxy/http1";
 import type { ResolvedRun } from "../core/proxy/registry";
@@ -17,7 +18,7 @@ import embeddedRulesPin from "../../rules/beagle-rules.sha256" with { type: "tex
 const embeddedRules = embeddedRulesRaw as unknown as string;
 const CANARY_ALPHABET = "BCDFGHJKLMNPQRSTVWYZ23456789";
 const DEMO_RUN_ID = "local-demo";
-const SCAN_WAIT_MS = 2_000;
+const DEMO_STEP_TIMEOUT_MS = 2_000;
 
 export interface DemoMock {
   port: number;
@@ -65,7 +66,7 @@ export async function startDemoMock(): Promise<DemoMock> {
     response.end(body);
   });
 
-  await listenOnLoopback(server);
+  await listenReady(server, () => server.listen(0, "127.0.0.1"));
   const address = server.address() as AddressInfo;
   if (address.address !== "127.0.0.1") {
     await closeServer(server);
@@ -115,6 +116,7 @@ export async function runDemoExchange(mock: DemoMock, canary: string): Promise<F
     const response = await fetch(`http://127.0.0.1:${proxy.port}/run/${DEMO_RUN_ID}/v1/demo`, {
       method: "POST",
       redirect: "error",
+      signal: AbortSignal.timeout(DEMO_STEP_TIMEOUT_MS),
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         model: "beagle-demo",
@@ -124,7 +126,7 @@ export async function runDemoExchange(mock: DemoMock, canary: string): Promise<F
     await response.arrayBuffer();
     if (!response.ok) throw new Error(`loopback mock returned HTTP ${response.status}`);
 
-    const result = await withTimeout(scanned, SCAN_WAIT_MS, "demo scan did not complete");
+    const result = await withTimeout(scanned, DEMO_STEP_TIMEOUT_MS, "demo scan did not complete");
     if (result.state !== "ok") throw new Error("demo scan was incomplete");
     const finding = result.findings.find(
       (item) => item.tier === "structured" && item.secretType === "aws-access-key-id",
@@ -177,22 +179,6 @@ export async function cmdDemo(overrides: Partial<DemoDependencies> = {}): Promis
   } finally {
     if (mock) await mock.close().catch(() => {});
   }
-}
-
-function listenOnLoopback(server: Server): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const onError = (error: Error) => {
-      server.off("listening", onListening);
-      reject(error);
-    };
-    const onListening = () => {
-      server.off("error", onError);
-      resolve();
-    };
-    server.once("error", onError);
-    server.once("listening", onListening);
-    server.listen(0, "127.0.0.1");
-  });
 }
 
 function closeServer(server: Server): Promise<void> {

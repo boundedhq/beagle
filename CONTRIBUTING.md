@@ -44,7 +44,8 @@ pin test; where one doesn't, review holds the line:
    `scripts/loc-report.ts`, ≤ 5,000 lines, counting the core once inside it).
    `src/core/` is the portability boundary, **not** the whole security-audit
    scope — that is the trust path (daemon ingestion, parsers, redact-on-capture,
-   scanner hosting, persistence adapters, rollout capture, alert delivery). The
+   scanner hosting, persistence adapters, rollout capture, alert delivery, and
+   the demo's loopback-only/no-persistence orchestration). The
    ceilings are published, CI-enforced trust properties — "small enough to read
    in one sitting" — so spend the headroom deliberately: prefer carving
    something out of a budgeted path to growing it, and don't treat the slack as

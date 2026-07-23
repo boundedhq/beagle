@@ -270,7 +270,8 @@ capture-to-alert trust path is declared explicitly in
 [`TRUST_PATH_SCOPE`](scripts/loc-report.ts): core interception, scanning,
 alerting, and persistence plus daemon ingestion, telemetry/format parsers,
 redact-on-capture, scanner hosting, rollout capture, SQLite adaptation, and
-alert delivery. `bun run loc` labels both `CORE` and non-core `TRUST` files;
+alert delivery, plus the demo's loopback-only/no-persistence orchestration.
+`bun run loc` labels both `CORE` and non-core `TRUST` files;
 the core is counted once inside the trust-path total (the two budgets are
 nested, not additive). This is a legibility gate, not a claim that code
 outside the manifest needs no security review: the viewer's read-time
@@ -443,8 +444,9 @@ capture fails, your agent's traffic still flows; the gap is recorded as
   delivery; **on the trust path** (budgeted)
 - `src/daemon/` — capture → ingest → alert orchestration (`daemon.ts`, budgeted)
   plus the control-plane socket (`control.ts`, outside the manifest)
-- `src/viewer/`, `src/cli/`, `src/install/` — application and orchestration code:
-  reviewed and disclosed in the total LOC report, but not in the budgeted trust manifest
+- `src/viewer/`, `src/install/`, and most of `src/cli/` — application and
+  orchestration code: reviewed and disclosed in the total LOC report, but not
+  in the budgeted trust manifest (`src/cli/demo.ts` is the explicit exception)
 - `rules/` — vendored, pinned detection rules (data; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md))
 
 ## Development

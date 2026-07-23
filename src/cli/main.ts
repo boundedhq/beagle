@@ -5,7 +5,6 @@ import {
   cmdStatus, cmdStop, cmdUninstall, cmdUnwatch, cmdUnwatchAll, cmdUnwatchSelect, cmdWatch,
   defaultStateDir, offerRefreshedShell, parseWatchArgs, readLineSync,
 } from "./commands";
-import { cmdDemo } from "./demo";
 import { BEAGLE_VERSION } from "../core/version";
 
 export const VERSION = BEAGLE_VERSION;
@@ -109,7 +108,7 @@ export async function run(argv: string[]): Promise<number> {
       return 0;
     case "demo":
       if (rest.length > 0) { console.error("usage: beagle demo"); return 2; }
-      return cmdDemo();
+      return (await import("./demo")).cmdDemo();
     case "status": {
       const { controlRequest } = await import("../daemon/control");
       const { readFileSync } = await import("node:fs");
