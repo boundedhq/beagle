@@ -368,9 +368,9 @@ button.linklike:hover { text-decoration: underline; }
 /* Raw payload / stream. Wrap at token boundaries, not mid-token: break-all
    turned indented JSON into a wall of characters. overflow-wrap only breaks a
    genuinely-unbreakable long token (e.g. a minified line) as a last resort. */
-/* The raw view's request/response blocks (.rawblock) and verbatim stream
-   (.detail pre). Same frame and the same 460px scroll cap so the section reads
-   as one thing; pre-wrap preserves the stored whitespace and indentation. */
+/* Raw payload/stream blocks share the same frame and 460px scroll cap so the
+   sections read as one thing; pre-wrap preserves stored whitespace in exact
+   text mode and in non-JSON fallback content. */
 .detail pre, .rawblock {
   background: var(--bg); padding: 11px 12px; border-radius: 7px;
   border: 1px solid var(--border); overflow-x: auto; overflow-y: auto;
