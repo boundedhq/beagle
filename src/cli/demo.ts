@@ -17,6 +17,8 @@ const DEMO_PERSIST_TIMEOUT_MS = 5_000;
 const DEMO_MODEL = "claude-sonnet-4-demo";
 const DEMO_FILE = "/tmp/beagle-canary/.env";
 const DEMO_TOOL_ID = "toolu_beagle_demo";
+const DEMO_PROMPT =
+  "Can you find the AWS access key ID configured for the project in /tmp/beagle-canary?";
 
 export interface DemoMock {
   port: number;
@@ -53,7 +55,7 @@ export function generateDemoCanary(bytes: Uint8Array = randomBytes(16)): string 
 const TOOL_CALL_SSE = [
   'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_beagle_demo_read","type":"message","role":"assistant","model":"claude-sonnet-4-demo","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":42,"output_tokens":0}}}',
   'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
-  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I’ll read that file."}}',
+  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I’ll check the project’s environment configuration."}}',
   'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
   `event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"${DEMO_TOOL_ID}","name":"Read","input":{"file_path":"${DEMO_FILE}"}}}`,
   'event: content_block_stop\ndata: {"type":"content_block_stop","index":1}',
@@ -65,7 +67,7 @@ const TOOL_CALL_SSE = [
 const FINAL_ANSWER_SSE = [
   'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_beagle_demo_answer","type":"message","role":"assistant","model":"claude-sonnet-4-demo","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":89,"output_tokens":0}}}',
   'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
-  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"The file contains an AWS access key ID. Check that the matching secret access key is configured for staging, "}}',
+  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I found an AWS access key ID in the project’s .env file. Check that the matching secret access key is configured for staging, "}}',
   'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"confirm the credentials belong to the intended account, and rotate them if they may have been exposed. "}}',
   'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Avoid pasting credentials into chats or logs."}}',
   'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
@@ -115,12 +117,12 @@ export async function runDemoExchange(
 
   const userMessage = {
     role: "user",
-    content: `Read ${DEMO_FILE} and tell me what's in it.`,
+    content: DEMO_PROMPT,
   };
   const toolUse = {
     role: "assistant",
     content: [
-      { type: "text", text: "I’ll read that file." },
+      { type: "text", text: "I’ll check the project’s environment configuration." },
       {
         type: "tool_use",
         id: DEMO_TOOL_ID,

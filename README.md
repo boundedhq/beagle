@@ -59,10 +59,11 @@ Want to see Beagle fire before trusting it with an agent? Run:
 beagle demo
 ```
 
-The demo generates a synthetic AWS-shaped canary, asks a mock agent to read it
-from a local `.env` file, and sends the tool result through Beagle's normal
-daemon, proxy, capture, scanner, alert, and storage path. Its provider is an
-in-process mock bound to `127.0.0.1`; if that
+The demo generates a synthetic AWS-shaped canary, asks a mock agent to find the
+project's AWS access key ID, and lets the agent choose to read the local `.env`
+file. The tool result travels through Beagle's normal daemon, proxy, capture,
+scanner, alert, and storage path. Its provider is an in-process mock bound to
+`127.0.0.1`; if that
 mock cannot bind, the demo aborts before contacting the daemon. It needs no
 agent, account, or API key and opens no external connection.
 

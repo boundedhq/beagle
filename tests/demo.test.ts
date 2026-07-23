@@ -43,7 +43,7 @@ describe("persisted local demo", () => {
 
       const second = await fetch(`http://127.0.0.1:${mock.port}/v1/messages`, { method: "POST" });
       const answer = await second.text();
-      expect(answer).toContain("The file contains an AWS access key ID");
+      expect(answer).toContain("I found an AWS access key ID in the project’s .env file");
       expect(answer).toContain("Avoid pasting credentials into chats or logs");
     } finally {
       await mock.close();

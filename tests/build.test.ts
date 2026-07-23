@@ -53,9 +53,9 @@ describe("compiled binary", () => {
         cwd: dir,
         env: { ...process.env, BEAGLE_STATE_DIR: demoStateDir },
       }).stdout.toString();
-      expect(demoShow).toContain("Read /tmp/beagle-canary/.env");
+      expect(demoShow).toContain("find the AWS access key ID configured for the project");
       expect(demoShow).toContain("[REDACTED:aws-access-key-id:");
-      expect(demoShow).toContain("The file contains an AWS access key ID");
+      expect(demoShow).toContain("I found an AWS access key ID in the project’s .env file");
 
       // The dashboard must tell the same story as the synthetic agent loop:
       // user asks for a file, model requests Read, tool returns the canary,
@@ -68,7 +68,7 @@ describe("compiled binary", () => {
         const session = buildSessionTurns(demoStore, demoCall!.sessionId);
         expect(session.turns).toHaveLength(2);
         expect(session.turns[0]!.messages[0]!.content).toContain(
-          "Read /tmp/beagle-canary/.env",
+          "find the AWS access key ID configured for the project",
         );
         expect(session.turns[0]!.responseCalls[0]).toMatchObject({
           tool: "Read",
@@ -79,7 +79,7 @@ describe("compiled binary", () => {
           content: expect.stringContaining("[REDACTED:aws-access-key-id:"),
         });
         expect(session.turns[1]!.responseText).toContain(
-          "The file contains an AWS access key ID",
+          "I found an AWS access key ID in the project’s .env file",
         );
       } finally {
         demoStore.close();
