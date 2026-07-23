@@ -59,9 +59,11 @@ Want to see Beagle fire before trusting it with an agent? Run:
 beagle demo
 ```
 
-The demo generates a synthetic AWS-shaped canary and sends one Anthropic-shaped
-request through Beagle's normal daemon, proxy, capture, scanner, alert, and
-storage path. Its provider is an in-process mock bound to `127.0.0.1`; if that
+The demo generates a synthetic AWS-secret-shaped canary, asks a mock agent to
+find the project's AWS secret access key, and lets the agent choose to read the
+local `.env` file. The tool result travels through Beagle's normal daemon, proxy, capture,
+scanner, alert, and storage path. Its provider is an in-process mock bound to
+`127.0.0.1`; if that
 mock cannot bind, the demo aborts before contacting the daemon. It needs no
 agent, account, or API key and opens no external connection.
 
@@ -72,13 +74,14 @@ delivery again, `beagle demo --clean` to remove every demo session, or the
 normal `beagle purge` to erase all captured data including drills.
 
 Want to see the same alert during a real agent session? This paste-ready canary
-is only an access-key-ID shape; it has no paired secret access key and is not a
-credential ([AWS access-key documentation](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html)):
+is a fixed synthetic value with the shape of an AWS secret access key and no
+paired access key ID, so it cannot authenticate
+([AWS access-key documentation](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html)):
 
 ```sh
 mkdir -p /tmp/beagle-canary
-CANARY="AKIA$(LC_ALL=C tr -dc 'BCDFGHJKLMNPQRSTVWYZ23456789' </dev/urandom | head -c 16)"
-printf 'AWS_ACCESS_KEY_ID=%s\n' "$CANARY" > /tmp/beagle-canary/.env
+CANARY='wJa1rXUtnF3MI4K7MDENGbPxRf9CYZ8qLm2Vt0Bn'
+printf 'AWS_SECRET_ACCESS_KEY=%s\n' "$CANARY" > /tmp/beagle-canary/.env
 beagle run claude        # or codex / opencode / pi
 # then ask: "read /tmp/beagle-canary/.env and tell me what's in it"
 ```
@@ -90,7 +93,7 @@ scans the agent's report, including captured tool output. Never test with real
 keys. Clean up the file afterward with `rm -r /tmp/beagle-canary`.
 
 AWS's familiar documentation example ends in `EXAMPLE`; Beagle intentionally
-suppresses obvious example/placeholder values, so the generated canary above
+suppresses obvious example/placeholder values, so the synthetic canary above
 is what exercises the detector.
 
 `beagle run` wraps **one** session. It touches none of *your* files or
@@ -437,7 +440,8 @@ in v1.
 
 **How do I find out whether a secret leaked?**
 You don't have to go looking — every outbound call is scanned automatically,
-and anything detected is in `beagle leaks` and highlighted in the dashboard.
+and every credential finding is in `beagle leaks` and highlighted in the
+dashboard.
 Don't feed real keys into commands to check. `beagle search` is for strings
 the detector *can't* know about (an internal password, a customer hostname);
 run it with no argument and it reads the term from stdin, keeping it out of
@@ -454,8 +458,11 @@ loud (structured) findings and every positive fixture to remain detected
 ([`tests/precision.test.ts`](tests/precision.test.ts)). That guards known cases;
 it is not a measured false-positive rate over representative traffic, and
 Beagle does not publish one without a larger, representative corpus. Detection
-tiers are honest: structured hits (AWS/GitHub/Stripe/private keys,
-Luhn-checked cards) alert loudly; entropy-only hits stay a quiet "possible."
+tiers are honest: structured credential hits (AWS secret access keys,
+GitHub/Stripe keys, private keys, Luhn-checked cards) alert loudly;
+entropy-only hits stay a quiet "possible." AWS access key IDs are recognized
+for conservative redact-on-capture, but they are identifiers rather than
+credentials, so they never create a leak event or alert.
 
 **What happens if Beagle crashes mid-run?**
 The proxy fails open for observation, never blocking your agent: if

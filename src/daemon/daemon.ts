@@ -21,7 +21,7 @@ import { Notifier, type AlertMessage } from "../notifier/notifier";
 import { buildAlertMessage, buildDemoAlertMessage } from "../notifier/alert-copy";
 import { detectFormat, extractActions, parseRequest, parseResponse, DISPLAY_RESULT_CAP, type DisplayMessage, type Format, type ParsedRequest, type ToolAction } from "../parsers/parsers";
 import { startControlServer, type ControlRequest, type ControlResponse } from "./control";
-import { ViewerServer } from "../viewer/server";
+import { ViewerServer, VIEWER_ASSET_ID } from "../viewer/server";
 import { OtlpReceiver } from "../core/otlp/receiver";
 import { BEAGLE_VERSION } from "../core/version";
 import type { OtelCall } from "../parsers/otlp-map";
@@ -338,12 +338,14 @@ export class Daemon {
       },
       result.findings,
     );
-    // Tell open dashboards a leak landed — WHATEVER the tier. The loud alert
-    // frame fires only for fresh structured events, so without this a
-    // possible-tier finding updates nothing and the header/feed sit stale
-    // until a manual reload (the sessions tab, fetching fresh on every click,
-    // would disagree with both).
-    if (result.findings.length > 0) this.viewer?.broadcast("leak", { callId: ctx.callId });
+    // Tell open dashboards a reportable finding landed — WHATEVER its tier.
+    // The loud alert frame fires only for fresh structured events, so without
+    // this a possible-tier finding updates nothing and the header/feed sit
+    // stale until a manual reload. Identifier-only findings stay out: they
+    // redact conservatively but create no event for the dashboard to display.
+    if (reportableFindingCount(result.findings) > 0) {
+      this.viewer?.broadcast("leak", { callId: ctx.callId });
+    }
   }
 
   // Scan a call's DERIVED display strings on their own and offset-redact them
@@ -511,7 +513,8 @@ export class Daemon {
   // Two passes because alertEngine.process takes the span flag per CALL, not per
   // finding: re-anchored values carry real body offsets and highlight, the rest
   // are span-less because their offsets index the derived text. Returns how many
-  // were reported, for the caller's leak frame.
+  // reportable findings reached the alert engine, for the caller's leak frame;
+  // identifier-only findings still redact but never make the dashboard say leak.
   //
   // Each pass is attempted even if the other throws — process() opens a store
   // transaction per finding, so it can. Splitting one call into two would
@@ -540,7 +543,10 @@ export class Daemon {
     pass(derived.anchoredFindings, true);
     pass(derived.leakFindings, false);
     if (failed) throw failure;
-    return derived.anchoredFindings.length + derived.leakFindings.length;
+    return (
+      reportableFindingCount(derived.anchoredFindings) +
+      reportableFindingCount(derived.leakFindings)
+    );
   }
 
   private async captureCall(call: CapturedCall): Promise<void> {
@@ -979,7 +985,7 @@ export class Daemon {
       // Honest at broadcast time: with redact-on-capture (the default) the
       // scan has already completed by here, so the findings are final. The
       // "leak" frame refreshes the feed for any straggler orderings.
-      hasLeak: (stash?.findings.length ?? 0) > 0 || derivedLeaks > 0,
+      hasLeak: reportableFindingCount(stash?.findings) > 0 || derivedLeaks > 0,
       demo: call.agent === DEMO_AGENT,
     });
   }
@@ -1341,7 +1347,8 @@ export class Daemon {
       );
       // Same silent leak frame as the wire path — possible-tier findings must
       // refresh open dashboards too.
-      if (scanResult.findings.length + derivedLeaks > 0) {
+      const reportableLeaks = reportableFindingCount(scanResult.findings) + derivedLeaks;
+      if (reportableLeaks > 0) {
         this.viewer?.broadcast("leak", { callId: call.id });
       }
       this.viewer?.broadcast("call", {
@@ -1361,7 +1368,7 @@ export class Daemon {
         sessionTier: resolution.tier,
         source: "otel",
         // Both scans completed above — final.
-        hasLeak: scanResult.findings.length + derivedLeaks > 0,
+        hasLeak: reportableLeaks > 0,
       });
       // A real (non-rollout) Codex OTel call means that conversation is live —
       // ensure a rollout tailer for it. Triggered here, AFTER the turn row is
@@ -1461,9 +1468,18 @@ export class Daemon {
   private async handleControl(req: ControlRequest, socket: Socket): Promise<ControlResponse> {
     switch (req.cmd) {
       case "ping":
-        // Report the running daemon's version so an upgraded CLI can detect a
-        // stale daemon (old binary still serving after an upgrade) and warn.
-        return { ok: true, data: { pid: process.pid, proxyPort: this.proxyPort, version: BEAGLE_VERSION } };
+        // Report both release and embedded-viewer identity. A development
+        // rebuild can change the dashboard without changing 0.1.0, while the
+        // previous daemon process keeps serving its older embedded assets.
+        return {
+          ok: true,
+          data: {
+            pid: process.pid,
+            proxyPort: this.proxyPort,
+            version: BEAGLE_VERSION,
+            viewerAssetId: VIEWER_ASSET_ID,
+          },
+        };
       case "lease": {
         // The caller holds this connection for a watched agent's lifetime;
         // count it as a live run so the daemon doesn't idle-exit. Closing the
@@ -1567,6 +1583,14 @@ async function aliveDaemon(stateDir: string): Promise<{ pid: number } | null> {
   } catch {
     return null;
   }
+}
+
+// A scanner finding can be useful for conservative redaction without being a
+// credential incident (AWS access key IDs are identifiers). Persistence asks
+// the alert engine, which applies the same flag; live dashboard frames must use
+// it too or the transient row contradicts the stored feed until the next fetch.
+function reportableFindingCount(findings?: Finding[]): number {
+  return findings?.filter((finding) => finding.alert !== false).length ?? 0;
 }
 
 // Secret values recovered from the scan findings (string offsets into the

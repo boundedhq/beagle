@@ -19,6 +19,8 @@ const corpusRules = compileRules(
   new Uint8Array(32).fill(7),
 );
 const scanRaw = (text: string) => scan(new TextEncoder().encode(text), {}, corpusRules).findings;
+const ALERT_SECRET = "ghp_A7hK9mP2qR5tW8xZ1cV4bN6jL3gF0dSe2aYb";
+const ALERT_SECRET_2 = "ghp_B8iL0nQ3rS6uV9yA2dE5gH8kM1pT4wZ7cF0j";
 
 // Claude Code's real Mode-B export (event schema, verified in the Phase-0
 // spike): a turn is a user_prompt + api_request + assistant_response sharing
@@ -231,8 +233,9 @@ describe("Mode B end-to-end through the daemon", () => {
     const prompt = JSON.stringify([{
       role: "user",
       content: [
-        { type: "text", text: "here is the key AKIAZQ3DRSTUV" },
-        { type: "text", text: "WXY2345 use it" },
+        { type: "text", text: `here is the key ${ALERT_SECRET.slice(0, 14)}` },
+        { type: "text", text: ALERT_SECRET.slice(14, 27) },
+        { type: "text", text: `${ALERT_SECRET.slice(27)} use it` },
       ],
     }]);
     await post(otlpBody(token, prompt, "otel-conv-split", null));
@@ -241,15 +244,15 @@ describe("Mode B end-to-end through the daemon", () => {
     // It alerts — the whole point. The scanned bytes hold no secret, so this
     // event can only have come from scanning the rendered text.
     expect(alerts.length).toBe(1);
-    expect(alerts[0]!.secretType).toBe("aws-access-key-id");
+    expect(alerts[0]!.secretType).toBe("github-pat");
     expect(listLeakEvents(store).length).toBe(1);
     const call = store.getCall(store.searchLiteral("here is the key")[0]!.callId)!;
     expect(call.redacted).toBe(true); // derived text WAS rewritten
     const dm = JSON.stringify(call.displayMessages);
-    expect(dm).not.toContain("AKIAZQ3DRSTUVWXY2345");
-    expect(dm).toContain("[REDACTED:aws-access-key-id:");
-    expect(call.summary).not.toContain("AKIAZQ3DRSTUVWXY2345");
-    expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
+    expect(dm).not.toContain(ALERT_SECRET);
+    expect(dm).toContain("[REDACTED:github-pat:");
+    expect(call.summary).not.toContain(ALERT_SECRET);
+    expect(store.searchLiteral(ALERT_SECRET)).toEqual([]);
     store.close();
   });
 
@@ -373,7 +376,7 @@ describe("Mode B end-to-end through the daemon", () => {
     // first ten characters inside the cap and the rest beyond it. The filler
     // ends in a space because the rule is \b-anchored and would not match
     // mid-word.
-    const output = "f".repeat(3990 - 1) + " AKIAZQ3DRSTUVWXY2345 trailing";
+    const output = "f".repeat(3990 - 1) + ` ${ALERT_SECRET} trailing`;
     await post({
       resourceLogs: [{
         scopeLogs: [{
@@ -397,10 +400,10 @@ describe("Mode B end-to-end through the daemon", () => {
     expect(listLeakEvents(store).length).toBe(1); // the body scan fires as it always did
     const call = store.getCall(store.searchLiteral("exec_command")[0]!.callId)!;
     const dm = JSON.stringify(call.displayMessages);
-    expect(dm).not.toContain("AKIAZQ3DRSTUVWXY2345");
-    expect(dm).not.toContain("AKIAZQ3DRS"); // …nor the prefix the cap used to spare
-    expect(dm).toContain("[REDACTED:aws-access-key-id:");
-    expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
+    expect(dm).not.toContain(ALERT_SECRET);
+    expect(dm).not.toContain(ALERT_SECRET.slice(0, 10)); // …nor the prefix the cap used to spare
+    expect(dm).toContain("[REDACTED:github-pat:");
+    expect(store.searchLiteral(ALERT_SECRET)).toEqual([]);
     // Still capped: the transcript keeps a bounded slice, it just cuts a
     // redacted string now instead of a raw one. The cut runs to the end of the
     // placeholder it landed inside (clampRedacted) rather than leaving a stump,
@@ -424,15 +427,18 @@ describe("Mode B end-to-end through the daemon", () => {
         "conversation.id": "otel-conv-split", call_id: "call-7",
         tool_name: "exec_command", arguments: '{"cmd":"cat key.txt"}', output,
       });
-    await post(codexLogs([chunk("the key is AKIAZQ3DRS"), chunk("TUVWXY2345 and the rest")]));
+    await post(codexLogs([
+      chunk(`the key is ${ALERT_SECRET.slice(0, 24)}`),
+      chunk(`${ALERT_SECRET.slice(24)} and the rest`),
+    ]));
     await settled(daemon.socketPath);
     const store = Store.openReadOnly(stateDir);
     expect(listLeakEvents(store).length).toBe(1); // reassembled → detected
     const call = store.getCall(store.searchLiteral("cat key.txt")[0]!.callId)!;
     expect(call.redacted).toBe(true);
     const body = new TextDecoder().decode(call.requestBody!);
-    expect(body).not.toContain("AKIAZQ3DRSTUVWXY2345");
-    expect(body).toContain("[REDACTED:aws-access-key-id:");
+    expect(body).not.toContain(ALERT_SECRET);
+    expect(body).toContain("[REDACTED:github-pat:");
     store.close();
   });
 
@@ -489,10 +495,10 @@ describe("Mode B end-to-end through the daemon", () => {
   });
 
   test("a leaked secret in an OTel-reported prompt fires the same alert", async () => {
-    await post(otlpBody(token, "the key is AKIAZQ3DRSTUVWXY2345"));
+    await post(otlpBody(token, `the key is ${ALERT_SECRET}`));
     await settled(daemon.socketPath);
     expect(alerts.length).toBe(1);
-    expect(alerts[0]!.secretType).toBe("aws-access-key-id");
+    expect(alerts[0]!.secretType).toBe("github-pat");
     const store = Store.openReadOnly(stateDir);
     expect(listLeakEvents(store).length).toBe(1);
     store.close();
@@ -516,8 +522,8 @@ describe("Mode B end-to-end through the daemon", () => {
     await post({ resourceLogs: [{ scopeLogs: [{
       scope: { name: "com.anthropic.claude_code.events" },
       logRecords: [
-        ev("otel-two-a", "first key AKIAZQ3DRSTUVWXY2345 here"),
-        ev("otel-two-b", "second key AKIAZQ3DRSTUVWXY6789 here"),
+        ev("otel-two-a", `first key ${ALERT_SECRET} here`),
+        ev("otel-two-b", `second key ${ALERT_SECRET_2} here`),
       ],
     }] }] });
     await settled(daemon.socketPath, 2);
@@ -531,21 +537,21 @@ describe("Mode B end-to-end through the daemon", () => {
     await controlRequest(daemon.socketPath, { cmd: "set-config", args: { redactOnCapture: true } });
     // No assistant_response in the batch: the summary falls back to the raw
     // prompt line — exactly where the secret sits.
-    await post(otlpBody(token, "my key AKIAZQ3DRSTUVWXY2345 leaked", "otel-conv-r", null));
+    await post(otlpBody(token, `my key ${ALERT_SECRET} leaked`, "otel-conv-r", null));
     await settled(daemon.socketPath);
     const store = Store.openReadOnly(stateDir);
     // the leak event still exists (audit value kept)...
     expect(listLeakEvents(store).length).toBe(1);
     // ...but the raw secret is gone from the body, the index, and the summary
-    expect(store.searchLiteral("AKIAZQ3DRSTUVWXY2345")).toEqual([]);
+    expect(store.searchLiteral(ALERT_SECRET)).toEqual([]);
     const hit = store.searchLiteral("my key")[0]!;
     const call = store.getCall(hit.callId)!;
     expect(call.redacted).toBe(true);
     const body = new TextDecoder().decode(call.requestBody!);
-    expect(body).not.toContain("AKIAZQ3DRSTUVWXY2345");
-    expect(body).toContain("[REDACTED:aws-access-key-id:");
-    expect(call.summary).not.toContain("AKIAZQ3DRSTUVWXY2345");
-    expect(call.summary).toContain("[REDACTED:aws-access-key-id:");
+    expect(body).not.toContain(ALERT_SECRET);
+    expect(body).toContain("[REDACTED:github-pat:");
+    expect(call.summary).not.toContain(ALERT_SECRET);
+    expect(call.summary).toContain("[REDACTED:github-pat:");
     store.close();
   });
 
@@ -674,7 +680,7 @@ describe("Mode B end-to-end through the daemon", () => {
             { key: "session.id", value: { stringValue: "otel-conv-tooled" } },
             { key: "prompt.id", value: { stringValue: "prompt-x" } },
             { key: "tool_name", value: { stringValue: "Bash" } },
-            { key: "tool_input", value: { stringValue: '{"command":"deploy --key AKIAZQ3DRSTUVWXY2345"}' } },
+            { key: "tool_input", value: { stringValue: `{"command":"deploy --key ${ALERT_SECRET}"}` } },
           ],
         },
         {
@@ -696,7 +702,7 @@ describe("Mode B end-to-end through the daemon", () => {
     // two rows: the question, and the tool+answer partial that could not stitch
     expect(listCalls(store, 50).length).toBe(2);
     // and the secret in the TOOL INPUT still alerted — the whole point
-    expect(alerts.some((a) => a.secretType === "aws-access-key-id")).toBe(true);
+    expect(alerts.some((a) => a.secretType === "github-pat")).toBe(true);
     // the input is searchable, and so is the tool NAME: a Claude Code turn
     // reports the name as its own attribute, outside the scanned body the
     // index is built from, but it rode the real outbound request.
@@ -825,7 +831,7 @@ describe("Mode B tool-output capture (PostToolUse hook)", () => {
     // tool's RESULT, never in the prompt or the command.
     const hook = { session_id: "sess-x", tool_name: "Bash",
       tool_input: { command: "cat secrets.env" },
-      tool_response: "AWS_SECRET=AKIAZQ3DRSTUVWXY2345\n" };
+      tool_response: `TOKEN=${ALERT_SECRET}\n` };
     const r = await fetch(`http://127.0.0.1:${otlpPort}/v1/hook`, {
       method: "POST",
       headers: { "content-type": "application/json", "x-beagle-run": token },
@@ -834,7 +840,7 @@ describe("Mode B tool-output capture (PostToolUse hook)", () => {
     expect(r.status).toBe(200);
     await settled(daemon.socketPath);
     expect(alerts.length).toBe(1);
-    expect(alerts[0]!.secretType).toBe("aws-access-key-id");
+    expect(alerts[0]!.secretType).toBe("github-pat");
     // The COMMAND is searchable too. A hook payload's display message is built
     // from the response alone (`${toolName}: ${toolResponse}`), so while the
     // index came from the display messages the input — the most outbound thing
@@ -903,12 +909,12 @@ describe("Mode B tool-output capture (PostToolUse hook)", () => {
       body: JSON.stringify({
         session_id: "sess-linkfail", prompt_id: "prompt-x", hook_event_name: "PostToolUse",
         tool_name: "Bash", tool_input: { command: "cat .env" },
-        tool_response: "AWS_SECRET=AKIAZQ3DRSTUVWXY2345\n",
+        tool_response: `TOKEN=${ALERT_SECRET}\n`,
       }),
     });
     await settled(daemon.socketPath);
     expect(alerts.length).toBe(1); // the alert fired despite the link write throwing
-    expect(alerts[0]!.secretType).toBe("aws-access-key-id");
+    expect(alerts[0]!.secretType).toBe("github-pat");
     const store = Store.openReadOnly(stateDir);
     // The row landed; only the link is missing — it renders standalone.
     expect(store.searchLiteral("cat .env").length).toBe(1);
@@ -999,10 +1005,10 @@ describe("Codex Mode B end-to-end through the daemon", () => {
   });
 
   test("a secret in a codex PROMPT fires the leak alert", async () => {
-    await post(codexBody("codex.user_prompt", { prompt: "ship it with AKIAZQ3DRSTUVWXY2345" }));
+    await post(codexBody("codex.user_prompt", { prompt: `ship it with ${ALERT_SECRET}` }));
     await settled(daemon.socketPath);
     expect(alerts.length).toBe(1);
-    expect(alerts[0]!.secretType).toBe("aws-access-key-id");
+    expect(alerts[0]!.secretType).toBe("github-pat");
   });
 
   test("a secret in a codex TOOL OUTPUT (cat key.txt) fires the leak alert — no hook needed", async () => {
@@ -1011,11 +1017,11 @@ describe("Codex Mode B end-to-end through the daemon", () => {
     await post(codexBody("codex.tool_result", {
       tool_name: "exec_command",
       arguments: '{"cmd":"cat key.txt"}',
-      output: "token = AKIAZQ3DRSTUVWXY2345",
+      output: `token = ${ALERT_SECRET}`,
     }));
     await settled(daemon.socketPath);
     expect(alerts.length).toBe(1);
-    expect(alerts[0]!.secretType).toBe("aws-access-key-id");
+    expect(alerts[0]!.secretType).toBe("github-pat");
     const store = Store.openReadOnly(stateDir);
     expect(listLeakEvents(store).length).toBe(1);
     store.close();

@@ -1,7 +1,8 @@
 // Dedup + alert engine (design §6.5). Detection marks everything; alerting
 // dedups: upsert on (fingerprint, destination, session) — a fresh row fires
 // the loud alert, a conflict silently updates the event. Only the
-// structured tier is loud (R5/R6).
+// structured tier is loud (R5/R6), except rules explicitly marked as
+// non-alerting because they recognize identifiers rather than credentials.
 import type { Finding } from "../scanner/engine";
 import type { Store } from "../store/store";
 
@@ -43,6 +44,10 @@ export class AlertEngine {
     // switch is the same destination and must not re-alert. The model only
     // enriches the human-facing copy, built downstream.
     for (const f of findings) {
+      // Some structured values are identifiers, not credential material.
+      // The scanner keeps them for conservative capture redaction and overlap
+      // suppression, but they must not become a leak event at any surface.
+      if (f.alert === false) continue;
       const seenBefore = this.store.fingerprintKnown(f.fingerprint);
       const { fresh, eventId } = this.store.upsertLeakEvent({
         fingerprint: f.fingerprint,

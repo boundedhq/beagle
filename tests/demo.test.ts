@@ -1,13 +1,20 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
-  cmdDemo, generateDemoCanary, startDemoMock, type DemoMock,
+  cmdDemo, generateDemoCanary, startDemoMock, waitForDemoLeak, type DemoMock,
 } from "../src/cli/demo";
 import { compileRules, scan } from "../src/core/scanner/engine";
 import { loadRuleFile } from "../src/core/scanner/rules";
+import { Store, type CallRecord } from "../src/core/store/store";
+import { ulid } from "../src/core/store/ulid";
 import { buildDemoAlertMessage } from "../src/notifier/alert-copy";
 import rulesRaw from "../rules/beagle-rules.json" with { type: "text" };
 import type { AlertEvent } from "../src/core/alert/engine";
 import { BEAGLE_VERSION } from "../src/core/version";
+import { VIEWER_ASSET_ID } from "../src/viewer/server";
+import { DEMO_AGENT } from "../src/core/call";
 
 const rules = compileRules(
   loadRuleFile(rulesRaw as unknown as string),
@@ -15,32 +22,95 @@ const rules = compileRules(
 );
 
 describe("persisted local demo", () => {
-  test("the generated fake value is AWS-shaped and fires the production structured rule", () => {
-    const canary = generateDemoCanary(new Uint8Array(Array.from({ length: 16 }, (_, i) => i)));
-    expect(canary).toMatch(/^AKIA[A-Z0-9]{16}$/);
+  test("the generated fake value is AWS-secret-shaped and fires the production structured rule", () => {
+    const canary = generateDemoCanary(
+      new Uint8Array(Array.from({ length: 63 }, (_, i) => i)),
+    );
+    expect(canary).toMatch(/^[A-Za-z0-9/+]{40}$/);
+    expect(new Set(canary).size).toBe(40);
     expect(canary.toLowerCase()).not.toMatch(/example|sample|placeholder|dummy|xxxxxx|changeme/);
 
     const report = scan(
-      new TextEncoder().encode(`AWS_ACCESS_KEY_ID=${canary}`),
+      new TextEncoder().encode(`AWS_SECRET_ACCESS_KEY=${canary}`),
       {},
       rules,
     );
     expect(report.findings.some(
-      (finding) => finding.tier === "structured" && finding.secretType === "aws-access-key-id",
+      (finding) => finding.tier === "structured" && finding.secretType === "aws-secret-access-key",
     )).toBe(true);
   });
 
-  test("mock serves a canned Anthropic SSE response on IPv4 loopback", async () => {
+  test("mock serves a Read tool call followed by an answer on IPv4 loopback", async () => {
     const mock = await startDemoMock();
     try {
-      const response = await fetch(`http://127.0.0.1:${mock.port}/v1/messages`, { method: "POST" });
-      expect(response.headers.get("content-type")).toContain("text/event-stream");
-      const body = await response.text();
-      expect(body).toContain("event: message_start");
-      expect(body).toContain("Beagle demo complete");
+      const first = await fetch(`http://127.0.0.1:${mock.port}/v1/messages`, { method: "POST" });
+      expect(first.headers.get("content-type")).toContain("text/event-stream");
+      const toolCall = await first.text();
+      expect(toolCall).toContain('"type":"tool_use"');
+      expect(toolCall).toContain('"name":"Read"');
+      expect(toolCall).toContain('/tmp/beagle-canary/.env');
+      expect(toolCall).toContain('"stop_reason":"tool_use"');
+
+      const second = await fetch(`http://127.0.0.1:${mock.port}/v1/messages`, { method: "POST" });
+      const answer = await second.text();
+      expect(answer).toContain("I found an AWS secret access key in the project’s .env file");
+      expect(answer).toContain("Avoid pasting credentials into chats or logs");
     } finally {
       await mock.close();
     }
+  });
+
+  test("persistence waits for both demo turns, not only the leaking second call", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "beagle-demo-wait-"));
+    const runId = "demo-race";
+    const sessionId = "session-demo-race";
+    const now = Date.now();
+    const record = (id: string, tsRequest: number): CallRecord => ({
+      id,
+      sessionId,
+      runId,
+      source: "wire",
+      agent: DEMO_AGENT,
+      provider: "loopback-demo",
+      tsRequest,
+      scanState: "ok",
+      captureState: "ok",
+      sessionTier: "prefix",
+      requestBody: new TextEncoder().encode("{}"),
+      requestHeaders: [],
+      responseBody: new TextEncoder().encode("{}"),
+      responseHeaders: [],
+      sseRaw: null,
+      searchText: "demo",
+    });
+    const secondId = ulid(now);
+    let store = Store.open(stateDir);
+    store.insertCall(record(secondId, now));
+    store.upsertLeakEvent({
+      fingerprint: "demo-fingerprint",
+      sessionId,
+      detector: "aws-secret-access-key",
+      secretType: "aws-secret-access-key",
+      severity: "high",
+      confidenceTier: "structured",
+      destination: "loopback-demo",
+      callId: secondId,
+      ts: now,
+    });
+    store.close();
+
+    let finished = false;
+    const waiting = waitForDemoLeak(stateDir, runId).then((result) => {
+      finished = true;
+      return result;
+    });
+    await Bun.sleep(100);
+    expect(finished).toBe(false);
+
+    store = Store.open(stateDir);
+    store.insertCall(record(ulid(now - 1), now - 1));
+    store.close();
+    expect(await waiting).toEqual({ sessionId });
   });
 
   test("success uses daemon persistence, opens the session, and prints cleanup", async () => {
@@ -53,10 +123,11 @@ describe("persisted local demo", () => {
       proxyPort: 4321,
       socketPath: "/tmp/demo.sock",
       runningVersion: BEAGLE_VERSION,
+      runningViewerAssetId: VIEWER_ASSET_ID,
     };
 
     const exitCode = await cmdDemo("/tmp/beagle-demo-test", {
-      generateCanary: () => generateDemoCanary(new Uint8Array(16).fill(9)),
+      generateCanary: () => generateDemoCanary(new Uint8Array(63).fill(9)),
       startMock: async () => { calls.push("mock"); return mock; },
       ensureDaemon: async () => { calls.push("daemon"); return daemon; },
       exchange: async (_daemon, usedMock, _canary, runId) => {
@@ -78,6 +149,7 @@ describe("persisted local demo", () => {
     expect(stderr).toBe("");
     expect(calls).toEqual(["mock", "daemon", "exchange", "persist", "ui", "close"]);
     expect(stdout).toContain("normal daemon path");
+    expect(stdout).toContain("reading it from a local .env file");
     expect(stdout).toContain("[demo] badge");
     expect(stdout).toContain("dashboard: http://127.0.0.1/demo");
     expect(stdout).toContain("nothing left this machine");
@@ -128,8 +200,33 @@ describe("persisted local demo", () => {
     expect(stderr).toContain("restart it before the drill");
   });
 
+  test("a same-version daemon with older dashboard assets is refused before exchange", async () => {
+    let exchangeCalls = 0;
+    let stderr = "";
+    const mock: DemoMock = { port: 1234, close: async () => {} };
+
+    const exitCode = await cmdDemo("/tmp/beagle-demo-test", {
+      startMock: async () => mock,
+      ensureDaemon: async () => ({
+        pid: 42,
+        proxyPort: 4321,
+        socketPath: "/tmp/demo.sock",
+        runningVersion: BEAGLE_VERSION,
+        runningViewerAssetId: "older-viewer",
+      }),
+      exchange: async () => { exchangeCalls++; },
+      out: () => {},
+      err: (text) => { stderr += text; },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(exchangeCalls).toBe(0);
+    expect(stderr).toContain("older embedded dashboard");
+    expect(stderr).toContain("restart it before the drill");
+  });
+
   test("demo notification copy never implies a real provider leak", () => {
-    const message = buildDemoAlertMessage({ secretType: "aws-access-key-id" } as AlertEvent);
+    const message = buildDemoAlertMessage({ secretType: "aws-secret-access-key" } as AlertEvent);
     expect(message.title).toContain("Beagle [demo]");
     expect(message.body).toContain("Drill only");
     expect(message.body).toContain("loopback mock");

@@ -3,12 +3,12 @@
   "cases": [
     {
       "id": "aws_access_key_id",
-      "kind": "leak",
+      "kind": "decoy",
       "text": "deploy script:\n  export AWS_ACCESS_KEY_ID=AKIA2E0A8F3B9C1D7K4P\n",
       "detectors": [
         "aws-access-key-id"
       ],
-      "outcome": "caught"
+      "outcome": "suppressed"
     },
     {
       "id": "aws_secret_in_prose",
@@ -85,7 +85,7 @@
     {
       "id": "base64_wrapped_aws",
       "kind": "leak",
-      "text": "config_blob = 'QUtJQTJFMEE4RjNCOUMxRDdLNFA='  # looks like opaque config\n",
+      "text": "config_blob = 'QVdTX1NFQ1JFVF9BQ0NFU1NfS0VZPXdKYTFyWFV0bkYzTUk0SzdNREVOR2JQeFJmOUNZWjhxTG0yVnQwQm4='  # looks like opaque config\n",
       "detectors": [
         "base64-wrapped-secret"
       ],

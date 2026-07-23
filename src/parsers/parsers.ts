@@ -345,6 +345,14 @@ function toMessage(m: Record<string, unknown>): DisplayMessage {
     (m.content as Array<Record<string, unknown>>).some((b) => b?.type === "tool_result")
   ) {
     out.kind = "result";
+    const results = (m.content as Array<Record<string, unknown>>)
+      .filter((b) => b?.type === "tool_result");
+    // One DisplayMessage can carry several Anthropic results. Only attach an
+    // origin when it is unambiguous; claiming the first call would label the
+    // combined output with the wrong tool/path for every result after it.
+    if (results.length === 1 && typeof results[0]?.tool_use_id === "string") {
+      out.callId = results[0].tool_use_id;
+    }
   }
   return out;
 }

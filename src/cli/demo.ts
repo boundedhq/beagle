@@ -9,11 +9,17 @@ import { DEMO_AGENT } from "../core/call";
 import { Store } from "../core/store/store";
 import { BEAGLE_VERSION } from "../core/version";
 import { controlRequest } from "../daemon/control";
+import { VIEWER_ASSET_ID } from "../viewer/server";
 import { cmdUi, ensureDaemon, staleDaemonRemedy, type DaemonInfo } from "./commands";
 
-const CANARY_ALPHABET = "BCDFGHJKLMNPQRSTVWYZ23456789";
+const CANARY_ALPHABET = "BCDFGHJKLMNPQRSTVWYZbcdfghjklmnpqrstvwxyz0123456789+/";
 const DEMO_STEP_TIMEOUT_MS = 3_000;
 const DEMO_PERSIST_TIMEOUT_MS = 5_000;
+const DEMO_MODEL = "claude-sonnet-4-demo";
+const DEMO_FILE = "/tmp/beagle-canary/.env";
+const DEMO_TOOL_ID = "toolu_beagle_demo";
+const DEMO_PROMPT =
+  "Can you find the AWS secret access key configured for the project in /tmp/beagle-canary?";
 
 export interface DemoMock {
   port: number;
@@ -35,37 +41,59 @@ interface DemoDependencies {
   err: (text: string) => void;
 }
 
-/** Generate a detector-valid but unusable AWS-shaped value. The alphabet has
- *  no vowels or X, so scanner stopwords such as EXAMPLE and XXXXXX cannot
- *  occur by chance. It is only an access-key ID shape, with no secret half. */
-export function generateDemoCanary(bytes: Uint8Array = randomBytes(16)): string {
-  if (bytes.length < 16) throw new Error("demo canary generation needs 16 random bytes");
-  let suffix = "";
-  for (const byte of bytes.subarray(0, 16)) {
-    suffix += CANARY_ALPHABET[byte % CANARY_ALPHABET.length];
+/** Generate a detector-valid but unpaired AWS-secret-shaped value. A shuffled
+ *  alphabet makes all 40 characters distinct, guaranteeing the production
+ *  rule's entropy gate; excluding vowels prevents stopwords. */
+export function generateDemoCanary(
+  bytes: Uint8Array = randomBytes(CANARY_ALPHABET.length - 1),
+): string {
+  if (bytes.length < CANARY_ALPHABET.length - 1) {
+    throw new Error(`demo canary generation needs ${CANARY_ALPHABET.length - 1} random bytes`);
   }
-  return `AKIA${suffix}`;
+  const chars = [...CANARY_ALPHABET];
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = bytes[chars.length - 1 - i]! % (i + 1);
+    [chars[i], chars[j]] = [chars[j]!, chars[i]!];
+  }
+  return chars.slice(0, 40).join("");
 }
 
-const CANNED_SSE = [
-  'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_beagle_demo","type":"message","role":"assistant","model":"beagle-loopback-demo","content":[],"usage":{"input_tokens":20,"output_tokens":0}}}',
+const TOOL_CALL_SSE = [
+  'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_beagle_demo_read","type":"message","role":"assistant","model":"claude-sonnet-4-demo","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":42,"output_tokens":0}}}',
   'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
-  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Beagle demo complete. This response came from the local mock."}}',
+  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I’ll check the project’s environment configuration."}}',
   'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
-  'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":12}}',
+  `event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"${DEMO_TOOL_ID}","name":"Read","input":{"file_path":"${DEMO_FILE}"}}}`,
+  'event: content_block_stop\ndata: {"type":"content_block_stop","index":1}',
+  'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":24}}',
+  'event: message_stop\ndata: {"type":"message_stop"}',
+  "",
+].join("\n\n");
+
+const FINAL_ANSWER_SSE = [
+  'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_beagle_demo_answer","type":"message","role":"assistant","model":"claude-sonnet-4-demo","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":89,"output_tokens":0}}}',
+  'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I found an AWS secret access key in the project’s .env file. Confirm that it belongs to the intended staging account "}}',
+  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"and rotate it if it may have been exposed. "}}',
+  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Avoid pasting credentials into chats or logs."}}',
+  'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
+  'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":48}}',
   'event: message_stop\ndata: {"type":"message_stop"}',
   "",
 ].join("\n\n");
 
 export async function startDemoMock(): Promise<DemoMock> {
+  let requestCount = 0;
   const server = createServer((request, response) => {
     request.resume();
+    const body = requestCount++ === 0 ? TOOL_CALL_SSE : FINAL_ANSWER_SSE;
     response.writeHead(200, {
       "content-type": "text/event-stream",
-      "content-length": String(Buffer.byteLength(CANNED_SSE)),
+      "content-length": String(Buffer.byteLength(body)),
+      "request-id": "req_beagle_demo",
       connection: "close",
     });
-    response.end(CANNED_SSE);
+    response.end(body);
   });
 
   await listenReady(server, () => server.listen(0, "127.0.0.1"));
@@ -77,9 +105,9 @@ export async function startDemoMock(): Promise<DemoMock> {
   return { port: address.port, close: () => closeServer(server) };
 }
 
-/** Register the loopback upstream, then send one Anthropic-shaped request
- * through the daemon's real proxy. There is intentionally no provider URL or
- * environment fallback anywhere in this function. */
+/** Register the loopback upstream, then send an Anthropic-shaped Read tool
+ * turn and its result through the daemon's real proxy. There is intentionally
+ * no provider URL or environment fallback anywhere in this function. */
 export async function runDemoExchange(
   daemon: DaemonInfo,
   mock: DemoMock,
@@ -93,9 +121,26 @@ export async function runDemoExchange(
   });
   if (!registration.ok) throw new Error(`could not register demo run: ${registration.error}`);
 
-  const response = await fetch(
-    `http://127.0.0.1:${daemon.proxyPort}/run/${runId}/v1/messages`,
-    {
+  const userMessage = {
+    role: "user",
+    content: DEMO_PROMPT,
+  };
+  const toolUse = {
+    role: "assistant",
+    content: [
+      { type: "text", text: "I’ll check the project’s environment configuration." },
+      {
+        type: "tool_use",
+        id: DEMO_TOOL_ID,
+        name: "Read",
+        input: { file_path: DEMO_FILE },
+      },
+    ],
+  };
+  const send = async (messages: unknown[]): Promise<void> => {
+    const response = await fetch(
+      `http://127.0.0.1:${daemon.proxyPort}/run/${runId}/v1/messages`,
+      {
       method: "POST",
       redirect: "error",
       signal: AbortSignal.timeout(DEMO_STEP_TIMEOUT_MS),
@@ -104,14 +149,40 @@ export async function runDemoExchange(
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: "beagle-loopback-demo",
-        max_tokens: 32,
-        messages: [{ role: "user", content: `AWS_ACCESS_KEY_ID=${canary}` }],
+        model: DEMO_MODEL,
+        max_tokens: 128,
+        stream: true,
+        system: "You are a coding assistant helping inspect a local project.",
+        tools: [{
+          name: "Read",
+          description: "Read a file from the local filesystem.",
+          input_schema: {
+            type: "object",
+            properties: { file_path: { type: "string" } },
+            required: ["file_path"],
+          },
+        }],
+        messages,
       }),
+      },
+    );
+    await response.arrayBuffer();
+    if (!response.ok) throw new Error(`loopback mock returned HTTP ${response.status}`);
+  };
+
+  await send([userMessage]);
+  await send([
+    userMessage,
+    toolUse,
+    {
+      role: "user",
+      content: [{
+        type: "tool_result",
+        tool_use_id: DEMO_TOOL_ID,
+        content: `AWS_SECRET_ACCESS_KEY=${canary}`,
+      }],
     },
-  );
-  await response.arrayBuffer();
-  if (!response.ok) throw new Error(`loopback mock returned HTTP ${response.status}`);
+  ]);
 }
 
 export async function waitForDemoLeak(stateDir: string, runId: string): Promise<DemoResult> {
@@ -122,8 +193,12 @@ export async function waitForDemoLeak(stateDir: string, runId: string): Promise<
       store = Store.openReadOnly(stateDir);
       const row = store.queryAll<{ session_id: string }>(
         `SELECT e.session_id FROM exchanges e
+         JOIN leak_occurrences lo ON lo.exchange_id = e.id
          WHERE e.run_id = ? AND e.agent = ?
-           AND EXISTS(SELECT 1 FROM leak_occurrences lo WHERE lo.exchange_id = e.id)
+           AND (SELECT COUNT(*) FROM exchanges x
+                WHERE x.run_id = e.run_id
+                  AND x.agent = e.agent
+                  AND x.session_id = e.session_id) >= 2
          ORDER BY e.ts_request DESC LIMIT 1`,
         [runId, DEMO_AGENT],
       )[0];
@@ -136,7 +211,7 @@ export async function waitForDemoLeak(stateDir: string, runId: string): Promise<
     }
     await Bun.sleep(50);
   }
-  throw new Error("demo alert was not persisted by the daemon");
+  throw new Error("the complete demo exchange was not persisted by the daemon");
 }
 
 function productionDependencies(): DemoDependencies {
@@ -175,6 +250,12 @@ export async function cmdDemo(
         staleDaemonRemedy(stateDir, daemon.pid),
       );
     }
+    if (daemon.runningViewerAssetId !== VIEWER_ASSET_ID) {
+      throw new Error(
+        "the running daemon has an older embedded dashboard; restart it before the drill: " +
+        staleDaemonRemedy(stateDir, daemon.pid),
+      );
+    }
     const runId = `demo-${randomUUID()}`;
     await deps.exchange(daemon, mock, canary, runId);
     const result = await deps.waitForLeak(stateDir, runId);
@@ -182,7 +263,8 @@ export async function cmdDemo(
     if (!dashboard.startsWith("dashboard:")) throw new Error(dashboard);
     deps.out(
       "beagle demo complete\n\n" +
-      "  ✓ Generated a synthetic AWS-shaped canary\n" +
+      "  ✓ Generated a synthetic AWS-secret-shaped canary\n" +
+      "  ✓ Simulated an agent reading it from a local .env file\n" +
       "  ✓ Captured and detected it through Beagle's normal daemon path\n" +
       "  ✓ Sent it only to an in-process mock on 127.0.0.1\n" +
       "  ✓ Saved the result locally with a [demo] badge\n\n" +

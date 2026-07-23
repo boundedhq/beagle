@@ -651,7 +651,7 @@ function SessionTranscript({ sessionId, row, refresh, onBack, onPurged }) {
               ${i === turns.length - 1 && !view.truncated && (t.responseCalls ?? []).length > 0 &&
               html`<div class="turn-note">results not captured yet (session ended or still running)</div>`}
               ${leakNotVisible(t) &&
-              html`<div class="turn-note warn">a detected secret is not visible in the readable cards — open ▸ details → raw (for a reconstructed tool card, its own ▸ call detail)</div>`}
+              html`<div class="turn-note warn">Beagle detected a secret outside the readable text. Open ▸ details and choose raw; if a card shows ▸ call, open that card instead.</div>`}
               ${t.messages.length === 0 && !t.responseText && (t.responseCalls ?? []).length === 0 &&
               html`<div class="turn-empty">(no parsed content — open details for raw bytes)</div>`}
             </div>
@@ -738,7 +738,7 @@ function TMsg({ m, leaks, find }) {
   // The one unacceptable failure is a hidden secret: a leak-bearing message
   // never clamps and never renders collapsed.
   const hasLeak = (leaks ?? []).some((l) => l.value && content.includes(l.value));
-  if (m.role === "tool" || m.role === "request") {
+  if (m.role === "tool" || m.role === "request" || m.kind === "call" || m.kind === "result") {
     return html`<${ToolCard} role=${m.role} content=${content} leaks=${leaks} hasLeak=${hasLeak}
       tool=${m.tool} kind=${m.kind} detail=${m.detail} sourceId=${m.sourceId} find=${find} />`;
   }
@@ -994,10 +994,11 @@ function Detail({ id, refresh, onSession, find }) {
           : html`
               <div class="dir-label sent">⇢ request</div>
               <${RawBody} body=${detail.requestRaw} leaks=${leaks} find=${find} />
-              <div class="dir-label recv">⇠ response</div>
-              <${RawBody} body=${detail.responseRaw} leaks=${leaks} find=${find} />
-              ${detail.sseRaw &&
-              html`<h4>raw stream (as received)</h4><pre>${detail.sseRaw}</pre>`}
+              ${detail.sseRaw
+                ? html`<h4>raw stream (as received)</h4>
+                    <${RawBody} body=${detail.sseRaw} leaks=${respHighlights} find=${find} />`
+                : html`<div class="dir-label recv">⇠ response</div>
+                    <${RawBody} body=${detail.responseRaw} leaks=${respHighlights} find=${find} />`}
             `
         : html`
             ${system != null &&

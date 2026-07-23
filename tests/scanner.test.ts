@@ -19,15 +19,18 @@ function scanText(text: string, authValue?: string) {
   return scanReport(text, authValue).findings;
 }
 
-describe("structured detectors (loud tier)", () => {
-  test("AWS access key id", () => {
+describe("non-secret identifiers (non-alerting)", () => {
+  test("AWS access key ID is recognized but marked not to alert", () => {
     const f = scanText('config = { key: "AKIAZQ3DRSTUVWXY2345" }');
     expect(f.length).toBe(1);
     expect(f[0]?.secretType).toBe("aws-access-key-id");
     expect(f[0]?.tier).toBe("structured");
-    expect(f[0]?.severity).toBe("high");
+    expect(f[0]?.severity).toBe("low");
+    expect(f[0]?.alert).toBe(false);
   });
+});
 
+describe("structured detectors (loud tier)", () => {
   test("GitHub PAT", () => {
     const f = scanText("export GH_TOKEN=ghp_A7hK9mP2qR5tW8xZ1cV4bN6jL3gF0dSe2aYb");
     expect(f.some((x) => x.secretType === "github-pat")).toBe(true);
@@ -609,8 +612,10 @@ describe("JSON-escape-prefixed secrets (leading-boundary regression)", () => {
 
   test("escape-prefixed decoys stay silent at every tier", () => {
     // The FP side of the trade. Masking adds boundaries, which widens what the
-    // quiet entropy rules can see — every clean/out-of-scope corpus case must
-    // still produce nothing once it follows an escape.
+    // quiet entropy rules can see — every genuinely clean/out-of-scope corpus
+    // case must still produce nothing once it follows an escape. Suppressed
+    // identifiers are deliberately recognized for redaction, so they are not
+    // decoys for this assertion.
     //
     // Run at BOTH nesting depths. Depth 2 is not redundant: blanking `\"` is
     // what newly exposes these rules to the interior of a tool-call argument
@@ -618,7 +623,7 @@ describe("JSON-escape-prefixed secrets (leading-boundary regression)", () => {
     const corpus: { cases: Array<{ text: string; outcome: string }> } = JSON.parse(
       readFileSync("tests/fixtures/leakproof-corpus.json", "utf8"),
     );
-    const decoys = corpus.cases.filter((c) => c.outcome !== "caught");
+    const decoys = corpus.cases.filter((c) => c.outcome === "clean" || c.outcome === "out-of-scope");
     expect(decoys.length).toBeGreaterThan(0); // guard against a vacuous pass
     for (const c of decoys) {
       const depth1 = JSON.stringify({ role: "user", content: `see below:\n${c.text}` });
@@ -1027,7 +1032,9 @@ describe("scan caps (reported deadline backstops)", () => {
     // off-by-one in the check, or the budget quietly ceasing to decrement,
     // fails here and nowhere else.
     const benign = Buffer.from("fillerdata12").toString("base64"); // 16 chars, entropy 3.63: clears the 3.3 pre-gate, decodes to nothing any rule knows
-    const real = Buffer.from("AKIAZQ3DRSTUVWXY2345\n").toString("base64");
+    const real = Buffer.from(
+      "AWS_SECRET_ACCESS_KEY=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\n",
+    ).toString("base64");
     const result = (benignCount: number) =>
       scanReport([...Array.from({ length: benignCount }, () => benign), real].join("\n"));
     // Control: the wrapped key is exactly what the probe exists to report, and

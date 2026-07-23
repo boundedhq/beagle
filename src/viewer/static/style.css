@@ -368,15 +368,22 @@ button.linklike:hover { text-decoration: underline; }
 /* Raw payload / stream. Wrap at token boundaries, not mid-token: break-all
    turned indented JSON into a wall of characters. overflow-wrap only breaks a
    genuinely-unbreakable long token (e.g. a minified line) as a last resort. */
-/* The raw view's request/response blocks (.rawblock) and verbatim stream
-   (.detail pre). Same frame and the same 460px scroll cap so the section reads
-   as one thing; pre-wrap preserves the stored whitespace and indentation. */
+/* Raw payload/stream blocks share the same frame and 460px scroll cap so the
+   sections read as one thing; pre-wrap preserves stored whitespace in exact
+   text mode and in non-JSON fallback content. */
 .detail pre, .rawblock {
   background: var(--bg); padding: 11px 12px; border-radius: 7px;
   border: 1px solid var(--border); overflow-x: auto; overflow-y: auto;
-  white-space: pre-wrap; word-break: normal; overflow-wrap: anywhere;
+  word-break: normal; overflow-wrap: anywhere;
   max-height: 460px; line-height: 1.5; font-size: var(--content);
 }
+.detail pre, .raw-verbatim { white-space: pre-wrap; }
+.raw-tools { display: flex; justify-content: flex-end; margin-bottom: 6px; }
+.raw-tools button {
+  border: 0; background: transparent; color: var(--muted);
+  font-size: 11px; padding: 2px 4px;
+}
+.raw-tools button:hover { color: var(--accent); }
 /* Section labels above each raw block — same typography as the transcript's
    .mc-name labels, colored the same way (request accent, response ok). */
 /* Only the raw stream's label still uses an h4 — request/response sections
