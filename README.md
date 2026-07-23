@@ -21,7 +21,7 @@ npm install -g @boundedhq/beagle
 
 ## Quick start
 
-### 1. Try it safely
+### 1. [Try it safely](#without-an-agent)
 
 ```sh
 beagle demo
