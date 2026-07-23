@@ -28,8 +28,10 @@ beagle demo
 ```
 
 This runs a self-contained drill through Beagle's real capture and alert path,
-then opens the result in the dashboard. No agent, account, tokens, or outbound
-connection required — [more ways to test](#test-the-alert-safely).
+then opens the result in the dashboard — no agent, account, tokens, or outbound
+connection required. The drill is badged `[demo]` and kept out of real-leak
+totals; clear it with `beagle demo --clean`. Or [see the alert fire on a real
+agent](#test-the-alert-with-a-real-agent).
 
 ### 2. Capture a real session
 
@@ -307,27 +309,11 @@ bun install && bun run build     # → dist/beagle
 (A Homebrew formula lives in `packaging/beagle.rb` for a future tap; npm already
 covers macOS and Linux, so the tap isn't wired into releases yet.)
 
-## Test the alert safely
+## Test the alert with a real agent
 
-### Without an agent
-
-```sh
-beagle demo
-```
-
-The demo sends a synthetic AWS-secret-shaped canary through Beagle's real
-capture, scan, alert, and storage path using an in-process mock on `127.0.0.1`.
-It needs no agent, account, or API key and opens no external connection. If the
-mock cannot bind, the demo aborts.
-
-The normal OS notification fires and the dashboard opens the saved drill,
-clearly badged `[demo]`. Demo records stay out of real-leak totals. Run
-`beagle demo --clean` to remove them.
-
-### In a real agent session
-
-This synthetic value has the shape of an AWS secret access key but no paired
-access key ID, so it cannot authenticate
+Want to see Beagle fire on a live session before trusting it? Plant a
+synthetic canary and ask an agent to read it. This value has the shape of an
+AWS secret access key but no paired access key ID, so it cannot authenticate
 ([AWS access-key documentation](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html)):
 
 ```sh
