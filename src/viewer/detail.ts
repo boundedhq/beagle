@@ -3,6 +3,7 @@
 // (UI fix 1), structured request messages, and the exact secret strings to
 // highlight inline (UI fix 2, R7). Reuses the format parsers.
 import type { CallRecord, Store } from "../core/store/store";
+import { DEMO_AGENT } from "../core/call";
 import {
   detectFormat, extractActions, parseRequest, parseResponse, sanitizeTool,
   type DisplayMessage, type ToolAction,
@@ -91,6 +92,7 @@ export interface CallDetail {
   responseRaw: string;
   sseRaw: string | null;
   leaks: DetailLeak[];
+  demo: boolean;
 }
 
 const REDACTED_RE = /\[REDACTED:[^\]]+\]/g;
@@ -185,6 +187,7 @@ function buildDetailWithProjection(
     responseRaw,
     sseRaw,
     leaks: extractLeaks(requestRaw, spans, call.redacted ?? false, storedText(call.displayMessages)),
+    demo: call.agent === DEMO_AGENT,
   };
 }
 

@@ -9,7 +9,7 @@
 // (otel) rows are already per-turn — their messages are always all new.
 import type { Store } from "../core/store/store";
 import { buildDetail, leakSpansFor, type DetailLeak } from "./detail";
-import type { Message } from "../core/call";
+import { DEMO_AGENT, type Message } from "../core/call";
 import { sanitizeTool, type DisplayMessage, type ToolAction } from "../parsers/parsers";
 
 // Summaries that are placeholders, not content — skipped when picking a
@@ -30,6 +30,7 @@ export interface SessionRow {
   source: string; // 'wire' | 'otel' | 'mixed'
   title?: string; // earliest meaningful call summary — reads like a conversation title
   utility: boolean; // every call is a stateless one-shot (e.g. a title-generation turn)
+  demo: boolean;
 }
 
 // The browse tab: one row per session, newest activity first. Display query,
@@ -73,6 +74,7 @@ export function listSessions(store: Store, limit: number): SessionRow[] {
       source: (r.n_sources as number) > 1 ? "mixed" : ((r.one_source as string) ?? "wire"),
       title: (r.title as string) ?? undefined,
       utility: Boolean(r.utility),
+      demo: r.agent === DEMO_AGENT,
     }));
 }
 
@@ -140,6 +142,7 @@ export interface SessionView {
   // Served with the transcript so the badge doesn't depend on HOW the user
   // navigated here (sessions tab, feed row, call detail, deep link).
   utility: boolean; // every call is a stateless one-shot
+  demo: boolean;
 }
 
 // One session as a conversation. Reuses buildDetail per call so the transcript
@@ -281,7 +284,20 @@ export function buildSessionTurns(store: Store, sessionId: string, cap = 200): S
         [sessionId],
       )[0]?.u,
     );
-  return { sessionId, system, turns: sequenceModeBTurns(store, sessionId, turns, rowMeta), truncated, utility };
+  const demo = Boolean(
+    store.queryAll<{ demo: number }>(
+      `SELECT EXISTS(SELECT 1 FROM exchanges WHERE session_id = ? AND agent = ?) AS demo`,
+      [sessionId, DEMO_AGENT],
+    )[0]?.demo,
+  );
+  return {
+    sessionId,
+    system,
+    turns: sequenceModeBTurns(store, sessionId, turns, rowMeta),
+    truncated,
+    utility,
+    demo,
+  };
 }
 
 // ---- Subscription turn sequencing ----

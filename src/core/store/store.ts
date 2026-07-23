@@ -7,6 +7,7 @@ import { openDb, type Db } from "../../adapters/sqlite";
 import { SCHEMA_SQL, SCHEMA_VERSION } from "./schema";
 import { quarantineCorruptDb } from "./quarantine";
 import { ulid } from "./ulid";
+import { DEMO_AGENT } from "../call";
 
 export { SCHEMA_VERSION };
 
@@ -79,6 +80,7 @@ export interface SweepPolicy {
 
 export type PurgeSpec =
   | { kind: "all" }
+  | { kind: "demo" }
   | { kind: "session"; sessionId: string }
   | { kind: "before"; ts: number };
 
@@ -442,7 +444,17 @@ export class Store {
   }
 
   countCalls(): number { return this.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM exchanges`)?.n ?? 0; }
-  countLeakEvents(): number { return this.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM leak_events`)?.n ?? 0; }
+  /** Real leak total for trust-strip/headline counts. Demo events remain
+   *  queryable and visible, but never inflate an unbadged "N leaks" claim. */
+  countLeakEvents(): number {
+    return this.db.get<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM leak_events le
+       WHERE NOT EXISTS (
+         SELECT 1 FROM sessions s WHERE s.id = le.session_id AND s.agent = ?
+       )`,
+      [DEMO_AGENT],
+    )?.n ?? 0;
+  }
 
   updateCallScanState(id: string, state: "ok" | "incomplete"): void {
     this.db.run(`UPDATE exchanges SET scan_state=? WHERE id=?`, [state, id]);
@@ -585,6 +597,15 @@ export class Store {
     if (Number.isFinite(policy.payloadWindowMs)) {
       // sessions and runs follow the payload window (design §4)
       const cutoff = now - policy.payloadWindowMs;
+      // A demo event is identified through its reserved session. Delete it
+      // before that session ages out, or it would lose its demo identity and
+      // begin counting as a real leak during the longer event-retention window.
+      this.db.run(
+        `DELETE FROM leak_events WHERE session_id IN (
+           SELECT id FROM sessions WHERE agent = ? AND last_ts < ?
+         )`,
+        [DEMO_AGENT, cutoff],
+      );
       this.db.run(`DELETE FROM sessions WHERE last_ts < ?`, [cutoff]);
       this.db.run(`DELETE FROM runs WHERE created_ts < ?`, [cutoff]);
     }
@@ -606,6 +627,18 @@ export class Store {
     if (spec.kind === "all") {
       this.deleteCallsWhere("1=1", []);
       this.db.run(`DELETE FROM leak_events`);
+    } else if (spec.kind === "demo") {
+      this.inTx(() => {
+        this.deleteCallsWhereInner("agent = ?", [DEMO_AGENT]);
+        this.db.run(
+          `DELETE FROM leak_events WHERE session_id IN (
+             SELECT id FROM sessions WHERE agent = ?
+           )`,
+          [DEMO_AGENT],
+        );
+        this.db.run(`DELETE FROM sessions WHERE agent = ?`, [DEMO_AGENT]);
+        this.db.run(`DELETE FROM runs WHERE agent = ?`, [DEMO_AGENT]);
+      });
     } else if (spec.kind === "session") {
       this.deleteCallsWhere("session_id = ?", [spec.sessionId]);
       this.db.run(`DELETE FROM leak_events WHERE session_id = ?`, [spec.sessionId]);

@@ -194,6 +194,9 @@ function App() {
   const callCount = stats?.calls ?? calls.length;
   const sessionCount = stats?.sessions ?? new Set(calls.map((x) => x.sessionId)).size;
   const agentCount = stats?.agents ?? new Set(calls.map((x) => x.agent).filter(Boolean)).size;
+  // Demo events stay visible in every list, but an unbadged headline must
+  // never present a drill as a real leak count.
+  const realLeaks = leaks.filter((x) => !x.demo);
   // ONE derived view mode — the four main-area screens are mutually exclusive
   // by construction (a future view is one added case here, not a gate to
   // remember on every sibling). Search sits on top of whatever was open;
@@ -233,15 +236,15 @@ function App() {
       </div>
       <div class="stats">
         <button aria-live="polite"
-          class=${(leaks.length ? "stat leak" : "stat leak zero") + " clickable"}
-          title=${leaks.length
+          class=${(realLeaks.length ? "stat leak" : "stat leak zero") + " clickable"}
+          title=${realLeaks.length
             ? "filter the feed to calls that leaked a secret"
-            : "no secrets detected in anything captured so far"}
+            : "no real secrets detected (badged demo drills are excluded)"}
           onClick=${() => { setSearch(null); setOpenSession(null); setTab("calls"); setLeaksOnly(true); }}>
           <span class="leak-dot" aria-hidden="true"></span>
           <div class="stat-col">
-            <span class="num">${leaks.length}</span>
-            <span class="label">leak${leaks.length === 1 ? "" : "s"}</span>
+            <span class="num">${realLeaks.length}</span>
+            <span class="label">leak${realLeaks.length === 1 ? "" : "s"}</span>
           </div>
         </button>
         <button class="stat clickable" title="show every captured call"
@@ -380,6 +383,7 @@ function Row({ x, onToggle, onSession }) {
         : x.status >= 400 ? `error ${x.status}` : "ok"}</span></span>
       <span class="time">${t}</span>
       <span class="agent">${x.agent ?? "?"}</span>
+      ${x.demo && html`<span class="chip">[demo]</span>`}
       <span class="model${x.model ? "" : " none"}">${x.model || "none"}</span>
       <span class="summary">${summaryParts(x.summary).map(([text, muted], i) =>
         muted ? html`<span key=${i} class="sum-suffix">${text}</span>` : text)}</span>
@@ -430,6 +434,7 @@ function Sessions({ onOpen, leaksOnly }) {
           <div class="stitle-line">
             <span class=${title ? "stitle" : "stitle untitled"}
               title=${title || "no opening prompt captured"}>${title || "untitled session"}</span>
+            ${s.demo && html`<span class="chip">[demo]</span>`}
             ${s.utility && s.calls === 1 &&
             html`<span class="chip"
               title=${"a single stateless one-shot request (opencode fires these to name a " +
@@ -567,6 +572,7 @@ function SessionTranscript({ sessionId, row, refresh, onBack, onPurged }) {
       <div class="transcript-head">
         <button onClick=${onBack} title="back to the list (Esc)">← sessions</button>
         <span class="agent-name">${agent}</span>
+        ${view.demo && html`<span class="chip">[demo]</span>`}
         <${CopyChip} value=${sessionId} />
         <div class="th-actions">
           ${!confirmDel
@@ -928,6 +934,7 @@ function Detail({ id, refresh, onSession, find }) {
       <div class="meta">
         <div class="meta-primary">
           <span class="agent-name">${detail.agent ?? "?"}</span>
+          ${detail.demo && html`<span class="chip">[demo]</span>`}
           <span class="arrow" aria-hidden="true">→</span>
           <span class="to">${detail.provider ?? "?"}${detail.model ? " · " + detail.model : " · no model"}</span>
           ${detail.source === "wire"
@@ -1078,6 +1085,7 @@ function SearchHit({ h, term, open, onToggle, onSession }) {
           title=${"the term occurs " + h.matchCount + " times in this call's sent text — " +
             "the snippets window the first few; open the call to see every occurrence marked"}>${h.matchCount} matches</span>`}
         ${h.hasLeak && html`<span class="chip leak">leak</span>`}
+        ${h.demo && html`<span class="chip">[demo]</span>`}
         <button class="linklike sv-toggle"
           onClick=${(e) => { e.stopPropagation(); onToggle(); }}>
           ${open ? "▾ hide call" : "▸ show call"}</button>
@@ -1120,7 +1128,7 @@ function SearchView({ search, leaksOnly, onClear, onSession }) {
     for (const h of kept) {
       let g = bySession.get(h.sessionId);
       if (!g) {
-        g = { sessionId: h.sessionId, agent: h.agent, hits: [] };
+        g = { sessionId: h.sessionId, agent: h.agent, demo: h.demo, hits: [] };
         bySession.set(h.sessionId, g);
       }
       g.hits.push(h);
@@ -1171,6 +1179,7 @@ function SearchView({ search, leaksOnly, onClear, onSession }) {
           <div class="sv-group" key=${g.sessionId}>
             <div class="sv-ghead">
               <span class="s-agent">${g.agent ?? "?"}</span>
+              ${g.demo && html`<span class="chip">[demo]</span>`}
               <span aria-hidden="true">·</span>
               <span>session</span>
               <${CopyChip} value=${g.sessionId} />

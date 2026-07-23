@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store, type CallRecord } from "../src/core/store/store";
 import { buildSessionTurns, listSessions } from "../src/viewer/session-view";
-import { listCalls } from "../src/viewer/feed-query";
+import { listCalls, searchCalls } from "../src/viewer/feed-query";
 import { ulid } from "../src/core/store/ulid";
+import { DEMO_AGENT } from "../src/core/call";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 
@@ -46,6 +47,16 @@ beforeEach(() => {
 });
 
 describe("listSessions", () => {
+  test("demo identity reaches call, session-list, and transcript projections", () => {
+    const store = Store.open(dir);
+    store.insertCall(call({ sessionId: "demo-s", agent: DEMO_AGENT, searchText: "demo canary" }));
+    expect(listCalls(store, 10)[0]?.demo).toBe(true);
+    expect(searchCalls(store, "canary").hits[0]?.demo).toBe(true);
+    expect(listSessions(store, 10)[0]?.demo).toBe(true);
+    expect(buildSessionTurns(store, "demo-s").demo).toBe(true);
+    store.close();
+  });
+
   test("aggregates one row per session, newest activity first", () => {
     const store = Store.open(dir);
     store.insertCall(call({ sessionId: "a", tsRequest: 1000 }));

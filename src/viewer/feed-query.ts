@@ -2,6 +2,7 @@
 // out of the core Store so display queries don't count against the R9
 // security-path budget — reads a read-only handle via Store.queryAll.
 import { escapeLike, type Store } from "../core/store/store";
+import { DEMO_AGENT } from "../core/call";
 import { leakValuesFor, type DetailLeak } from "./detail";
 
 export interface LeakEvent {
@@ -17,6 +18,7 @@ export interface LeakEvent {
   firstTs: number;
   lastTs: number;
   firstCall: string | null;
+  demo: boolean;
 }
 
 // The leak log (CLI `leaks` + viewer /api/leaks). Display query, non-core.
@@ -24,8 +26,11 @@ export function listLeakEvents(store: Store): LeakEvent[] {
   return store
     .queryAll<Record<string, unknown>>(
       `SELECT id, fingerprint, session_id, detector, secret_type, severity,
-              confidence_tier, destination, occurrences, first_ts, last_ts, first_exchange
+              confidence_tier, destination, occurrences, first_ts, last_ts, first_exchange,
+              EXISTS(SELECT 1 FROM sessions s
+                     WHERE s.id = leak_events.session_id AND s.agent = ?) AS demo
        FROM leak_events ORDER BY first_ts`,
+      [DEMO_AGENT],
     )
     .map((r) => ({
       id: r.id as string,
@@ -40,6 +45,7 @@ export function listLeakEvents(store: Store): LeakEvent[] {
       firstTs: r.first_ts as number,
       lastTs: r.last_ts as number,
       firstCall: (r.first_exchange as string) ?? null,
+      demo: Boolean(r.demo),
     }));
 }
 
@@ -57,6 +63,7 @@ export interface FeedRow {
   sessionTier: string;
   source: string;
   hasLeak: boolean;
+  demo: boolean;
 }
 
 export function listCalls(store: Store, limit: number): FeedRow[] {
@@ -88,6 +95,7 @@ export function listCalls(store: Store, limit: number): FeedRow[] {
       sessionTier: r.session_tier as string,
       source: r.source as string,
       hasLeak: Boolean(r.has_leak),
+      demo: r.agent === DEMO_AGENT,
     }));
 }
 
@@ -115,6 +123,7 @@ export interface SearchCall {
   source: string;
   summary?: string;
   hasLeak: boolean;
+  demo: boolean;
   matchCount: number;
   snippets: SearchSnippet[];
   /** Detected secret values on this call (empty when clean), so snippets can
@@ -224,6 +233,7 @@ export function searchCalls(
       source: r.source as string,
       summary: (r.summary as string) ?? undefined,
       hasLeak: Boolean(r.has_leak),
+      demo: r.agent === DEMO_AGENT,
       matchCount,
       snippets,
       leaks,

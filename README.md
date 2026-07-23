@@ -59,11 +59,39 @@ Want to see Beagle fire before trusting it with an agent? Run:
 beagle demo
 ```
 
-The demo generates a fake AWS-shaped canary, sends it through Beagle's real
-local proxy and production scanner to a mock bound to `127.0.0.1`, and triggers
-the normal OS notification. It needs no agent, account, or API key; opens no
-external connection; and stores nothing. Its terminal result closes the loop
-even when OS notifications are unavailable.
+The demo generates a synthetic AWS-shaped canary and sends one Anthropic-shaped
+request through Beagle's normal daemon, proxy, capture, scanner, alert, and
+storage path. Its provider is an in-process mock bound to `127.0.0.1`; if that
+mock cannot bind, the demo aborts before contacting the daemon. It needs no
+agent, account, or API key and opens no external connection.
+
+The normal OS notification fires, the captured drill is saved with a `[demo]`
+badge, and the dashboard opens directly to its session. Demo drills stay out of
+the dashboard's real-leak total. Run `beagle demo` again to test notification
+delivery again, `beagle demo --clean` to remove every demo session, or the
+normal `beagle purge` to erase all captured data including drills.
+
+Want to see the same alert during a real agent session? This paste-ready canary
+is only an access-key-ID shape; it has no paired secret access key and is not a
+credential ([AWS access-key documentation](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html)):
+
+```sh
+mkdir -p /tmp/beagle-canary
+CANARY="AKIA$(LC_ALL=C tr -dc 'BCDFGHJKLMNPQRSTVWYZ23456789' </dev/urandom | head -c 16)"
+printf 'AWS_ACCESS_KEY_ID=%s\n' "$CANARY" > /tmp/beagle-canary/.env
+beagle run claude        # or codex / opencode / pi
+# then ask: "read /tmp/beagle-canary/.env and tell me what's in it"
+```
+
+The moment the agent sends that file's contents upstream, Beagle notifies you;
+`beagle leaks` records the event and the dashboard highlights where it left.
+For telemetry-captured agents the alert can lag a few seconds because Beagle
+scans the agent's report, including captured tool output. Never test with real
+keys. Clean up the file afterward with `rm -r /tmp/beagle-canary`.
+
+AWS's familiar documentation example ends in `EXAMPLE`; Beagle intentionally
+suppresses obvious example/placeholder values, so the generated canary above
+is what exercises the detector.
 
 `beagle run` wraps **one** session. It touches none of *your* files or
 config — captures land in Beagle's own store (`~/.local/state/beagle`), and
@@ -226,7 +254,8 @@ What Beagle is **not**:
 
 ```sh
 beagle detect              # find supported agents and recognized coverage gaps
-beagle demo                # prove local proxy + scanner + alert; stores nothing
+beagle demo                # run a local drill, save it as [demo], open dashboard
+beagle demo --clean        # remove saved demo sessions
 beagle run <agent>         # capture one session; nothing changed on your system
 beagle watch <agent>       # make that agent always-on (guided; asks before each change)
 beagle unwatch [<agent>]   # stop watching; restores your setup
@@ -270,7 +299,7 @@ capture-to-alert trust path is declared explicitly in
 [`TRUST_PATH_SCOPE`](scripts/loc-report.ts): core interception, scanning,
 alerting, and persistence plus daemon ingestion, telemetry/format parsers,
 redact-on-capture, scanner hosting, rollout capture, SQLite adaptation, and
-alert delivery, plus the demo's loopback-only/no-persistence orchestration.
+alert delivery, plus the demo's loopback-only/fail-closed orchestration.
 `bun run loc` labels both `CORE` and non-core `TRUST` files;
 the core is counted once inside the trust-path total (the two budgets are
 nested, not additive). This is a legibility gate, not a claim that code

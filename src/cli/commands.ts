@@ -53,7 +53,7 @@ function isStoreError(s: Store | null | { error: string }): s is { error: string
   return s !== null && "error" in s;
 }
 
-interface DaemonInfo {
+export interface DaemonInfo {
   pid: number;
   proxyPort: number;
   socketPath: string;
@@ -104,8 +104,8 @@ export function staleDaemonRemedy(stateDir: string, pid: number): string {
     : `beagle stop   (the next 'beagle run' starts a fresh one on the new binary)`;
 }
 
-// Ensure a daemon is up, spawning one if needed. Shared by run and ui.
-async function ensureDaemon(stateDir: string): Promise<DaemonInfo | null> {
+// Ensure a daemon is up, spawning one if needed. Shared by run, demo, and ui.
+export async function ensureDaemon(stateDir: string): Promise<DaemonInfo | null> {
   let daemon = await pingDaemon(stateDir);
   if (daemon) {
     // A daemon left running from an OLD binary (persistent / service unit)
@@ -438,9 +438,14 @@ export function cmdLeaks(stateDir: string): string {
   // One query for every group's headline, not one per session.
   const headlines = sessionHeadlines(store, groups.map(([sid]) => sid));
 
+  const realCount = events.filter((e) => !e.demo).length;
+  const demoCount = events.length - realCount;
+  const counts = [
+    ...(realCount > 0 ? [`${realCount} leak event${realCount === 1 ? "" : "s"}`] : []),
+    ...(demoCount > 0 ? [`${demoCount} [demo] drill event${demoCount === 1 ? "" : "s"}`] : []),
+  ].join(" · ");
   const lines = [
-    `${events.length} leak event${events.length === 1 ? "" : "s"} across ` +
-      `${groups.length} session${groups.length === 1 ? "" : "s"} — newest first:`,
+    `${counts} across ${groups.length} session${groups.length === 1 ? "" : "s"} — newest first:`,
   ];
   for (const [sessionId, group] of groups) {
     const head = headlines.get(sessionId) ?? {};
@@ -452,13 +457,14 @@ export function cmdLeaks(stateDir: string): string {
     const capped = full.length > 64 ? clampRedacted(full, 63) : full;
     const title = (capped.length < full.length ? capped + "…" : full) || "(untitled session)";
     const agent = head.agent ? clean(head.agent) : "unknown agent";
-    lines.push("", `  ${title} — ${agent} · session ${clean(sessionId)}`);
+    const demo = group.every((e) => e.demo);
+    lines.push("", `  ${demo ? "[demo] " : ""}${title} — ${agent} · session ${clean(sessionId)}`);
     for (const e of group) {
       const tier = e.confidenceTier === "structured" ? "" : " (possible)";
       // Full call id: ULIDs minted in the same millisecond share their first
       // 8 chars, so a short prefix can be ambiguous to `beagle show`.
       lines.push(
-        `      ${fmtWhen(e.firstTs)}   ${secretName(clean(e.secretType))}${tier} → ${clean(e.destination)}` +
+        `      ${e.demo ? "[demo] " : ""}${fmtWhen(e.firstTs)}   ${secretName(clean(e.secretType))}${tier} → ${clean(e.destination)}` +
           `   ×${e.occurrences}${e.firstCall ? `   call ${clean(e.firstCall)}` : ""}`,
       );
     }
@@ -554,7 +560,7 @@ export function cmdShow(stateDir: string, idPrefix: string, opts: ShowOptions = 
     ? ` · ${call.tokensIn ?? "?"} → ${call.tokensOut ?? "?"} tokens`
     : "";
   const lines = [
-    `call ${call.id}   ${prov}${err}`,
+    `call ${call.id}${d.demo ? "   [demo]" : ""}   ${prov}${err}`,
     `  ${clean(call.agent ?? "?")} → ${clean(call.provider ?? "?")}${call.model ? ` · ${clean(call.model)}` : " · no model"}`,
     `  ${fmtWhen(call.tsRequest)}${toks}`,
     `  session ${clean(call.sessionId)} · grouped by ${groupedByPhrase(clean(call.sessionTier))}`,
@@ -630,6 +636,9 @@ export function cmdShow(stateDir: string, idPrefix: string, opts: ShowOptions = 
 }
 
 export async function cmdPurge(stateDir: string, kind: string): Promise<string> {
+  if (kind !== "all" && kind !== "panic" && kind !== "demo") {
+    return "usage: beagle purge [all|panic]";
+  }
   const daemon = await pingDaemon(stateDir);
   if (daemon) {
     // Panic purge VACUUMs the whole file — allow it time.
@@ -639,6 +648,7 @@ export async function cmdPurge(stateDir: string, kind: string): Promise<string> 
   if (!existsSync(join(stateDir, "beagle.db"))) return "nothing to purge.";
   const store = Store.open(stateDir);
   if (kind === "panic") store.panicPurge();
+  else if (kind === "demo") store.purge({ kind: "demo" });
   else store.purge({ kind: "all" });
   store.close();
   return `purged (${kind}).`;

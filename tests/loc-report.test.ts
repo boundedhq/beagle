@@ -60,7 +60,7 @@ describe("locReport", () => {
       "src/transform/redact.ts", // directory-covered (src/transform/)
       "src/notifier/notifier.ts", // directory-covered (src/notifier/)
       "src/daemon/daemon.ts", // explicit file entry
-      "src/cli/demo.ts", // explicit file entry (loopback/no-persistence drill)
+      "src/cli/demo.ts", // explicit file entry (loopback/fail-closed drill)
     ]) {
       mkdirSync(join(root, rel, ".."), { recursive: true });
       writeFileSync(join(root, rel), "const a = 1;\n");
