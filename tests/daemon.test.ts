@@ -198,11 +198,13 @@ describe("Daemon end-to-end", () => {
     lease.end();
   });
 
-  test("ping reports the daemon's version so an upgraded CLI can detect a stale daemon", async () => {
+  test("ping reports release and viewer builds so the CLI can detect a stale daemon", async () => {
     const { BEAGLE_VERSION } = await import("../src/core/version");
+    const { VIEWER_ASSET_ID } = await import("../src/viewer/server");
     const r = await controlRequest(daemon.socketPath, { cmd: "ping" });
     expect(r.ok).toBe(true);
     expect((r.data as { version?: string }).version).toBe(BEAGLE_VERSION);
+    expect((r.data as { viewerAssetId?: string }).viewerAssetId).toBe(VIEWER_ASSET_ID);
   });
 
   const requestBody = (content: string) =>

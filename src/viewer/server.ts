@@ -51,6 +51,20 @@ const STATIC_FILES: Record<string, { body: string; type: string }> = {
   "/vendor/htm.module.js": { body: htmJs, type: "text/javascript" },
 };
 
+// A same-version daemon can outlive a development rebuild and keep serving
+// viewer JavaScript embedded in the old process. The CLI compares this digest
+// before opening the dashboard so that stale UI is refused instead of silently
+// making a just-built fix look absent.
+export const VIEWER_ASSET_ID = createHash("sha256")
+  .update(
+    Object.entries(STATIC_FILES)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([path, file]) => `${path}\0${file.body}`)
+      .join("\0"),
+  )
+  .digest("hex")
+  .slice(0, 16);
+
 // script-src allows exactly two things: same-origin module files and the
 // inline import map, pinned by its content hash — still nothing external,
 // still no other inline script.
@@ -147,6 +161,9 @@ export class ViewerServer {
     if (staticFile && req.method === "GET") {
       res.writeHead(200, {
         "content-type": staticFile.type,
+        // The viewer is local, short-lived, and may be restarted from a newer
+        // binary on the same machine. Never let a reload reuse an older module.
+        "cache-control": "no-store",
         "content-security-policy": CSP,
         "x-content-type-options": "nosniff",
         "referrer-policy": "no-referrer",

@@ -186,6 +186,14 @@ describe("ViewerServer hardening (design §6.8)", () => {
     expect(csp).not.toContain("unsafe-inline");
   });
 
+  test("static viewer assets are never reused across daemon rebuilds", async () => {
+    for (const path of ["/", "/app.js", "/render-json.module.js", "/style.css"]) {
+      const r = await fetch(origin() + path);
+      expect(r.status).toBe(200);
+      expect(r.headers.get("cache-control")).toBe("no-store");
+    }
+  });
+
   test("CSP script-src whitelists the inline import map by its content hash", async () => {
     const r = await fetch(`${origin()}/`);
     const html = await r.text();

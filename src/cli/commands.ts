@@ -21,6 +21,7 @@ import { secretName } from "../notifier/alert-copy";
 import { clampRedacted } from "../transform/redact";
 import { buildCodexOtelArgs, buildCodexOtelEnv, buildHookSettings, buildOtelEnv, mergeHookIntoSettings } from "../parsers/otlp-map";
 import { codexSessionsRoot } from "../adapters/codex-rollout-tailer";
+import { VIEWER_ASSET_ID } from "../viewer/server";
 import { buildExtensionRedirect, buildRedirectConfig, readFirstConfig, writeRedirectConfig, writeRedirectExtension } from "../install/config-redirect";
 import { AGENT_REQUEST_URL, AGENTS, UNSUPPORTED_AGENTS, buildRunEnv, runBaseUrl } from "./agents";
 import { BEAGLE_VERSION } from "../core/version";
@@ -58,6 +59,7 @@ export interface DaemonInfo {
   proxyPort: number;
   socketPath: string;
   runningVersion?: string; // from the ping handshake, not daemon.json
+  runningViewerAssetId?: string; // embedded dashboard build from the ping handshake
   // Why the daemon is up, from the control status call (status command only).
   leases?: number;
   viewerOpen?: boolean;
@@ -78,8 +80,12 @@ async function pingDaemon(stateDir: string): Promise<DaemonInfo | null> {
   try {
     const r = await controlRequest(info.socketPath, { cmd: "ping" }, 800);
     if (!r.ok) return null;
-    const version = (r.data as { version?: string } | undefined)?.version;
-    return { ...info, runningVersion: version };
+    const data = r.data as { version?: string; viewerAssetId?: string } | undefined;
+    return {
+      ...info,
+      runningVersion: data?.version,
+      runningViewerAssetId: data?.viewerAssetId,
+    };
   } catch {
     return null;
   }
@@ -1279,6 +1285,12 @@ export async function cmdConfig(stateDir: string, args: string[]): Promise<strin
 export async function cmdUi(stateDir: string, sessionId?: string): Promise<string> {
   const daemon = await ensureDaemon(stateDir); // R1: the dashboard is always one command away
   if (!daemon) return "could not start the beagle daemon — check `beagle status`.";
+  if (daemon.runningViewerAssetId !== VIEWER_ASSET_ID) {
+    return (
+      "could not open the dashboard — the running daemon has an older embedded UI.\n" +
+      `Restart it first: ${staleDaemonRemedy(stateDir, daemon.pid)}`
+    );
+  }
   const r = await controlRequest(daemon.socketPath, { cmd: "ui" });
   if (!r.ok) return `could not start the viewer: ${r.error}`;
   let url = (r.data as { url: string }).url;

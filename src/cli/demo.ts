@@ -9,6 +9,7 @@ import { DEMO_AGENT } from "../core/call";
 import { Store } from "../core/store/store";
 import { BEAGLE_VERSION } from "../core/version";
 import { controlRequest } from "../daemon/control";
+import { VIEWER_ASSET_ID } from "../viewer/server";
 import { cmdUi, ensureDaemon, staleDaemonRemedy, type DaemonInfo } from "./commands";
 
 const CANARY_ALPHABET = "BCDFGHJKLMNPQRSTVWYZbcdfghjklmnpqrstvwxyz0123456789+/";
@@ -242,6 +243,12 @@ export async function cmdDemo(
       const running = daemon.runningVersion ? `v${daemon.runningVersion}` : "an unknown version";
       throw new Error(
         `the running daemon is ${running}; restart it before the drill: ` +
+        staleDaemonRemedy(stateDir, daemon.pid),
+      );
+    }
+    if (daemon.runningViewerAssetId !== VIEWER_ASSET_ID) {
+      throw new Error(
+        "the running daemon has an older embedded dashboard; restart it before the drill: " +
         staleDaemonRemedy(stateDir, daemon.pid),
       );
     }

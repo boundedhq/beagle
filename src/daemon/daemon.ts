@@ -21,7 +21,7 @@ import { Notifier, type AlertMessage } from "../notifier/notifier";
 import { buildAlertMessage, buildDemoAlertMessage } from "../notifier/alert-copy";
 import { detectFormat, extractActions, parseRequest, parseResponse, DISPLAY_RESULT_CAP, type DisplayMessage, type Format, type ParsedRequest, type ToolAction } from "../parsers/parsers";
 import { startControlServer, type ControlRequest, type ControlResponse } from "./control";
-import { ViewerServer } from "../viewer/server";
+import { ViewerServer, VIEWER_ASSET_ID } from "../viewer/server";
 import { OtlpReceiver } from "../core/otlp/receiver";
 import { BEAGLE_VERSION } from "../core/version";
 import type { OtelCall } from "../parsers/otlp-map";
@@ -1461,9 +1461,18 @@ export class Daemon {
   private async handleControl(req: ControlRequest, socket: Socket): Promise<ControlResponse> {
     switch (req.cmd) {
       case "ping":
-        // Report the running daemon's version so an upgraded CLI can detect a
-        // stale daemon (old binary still serving after an upgrade) and warn.
-        return { ok: true, data: { pid: process.pid, proxyPort: this.proxyPort, version: BEAGLE_VERSION } };
+        // Report both release and embedded-viewer identity. A development
+        // rebuild can change the dashboard without changing 0.1.0, while the
+        // previous daemon process keeps serving its older embedded assets.
+        return {
+          ok: true,
+          data: {
+            pid: process.pid,
+            proxyPort: this.proxyPort,
+            version: BEAGLE_VERSION,
+            viewerAssetId: VIEWER_ASSET_ID,
+          },
+        };
       case "lease": {
         // The caller holds this connection for a watched agent's lifetime;
         // count it as a live run so the daemon doesn't idle-exit. Closing the

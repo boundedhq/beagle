@@ -8,6 +8,7 @@ import { buildDemoAlertMessage } from "../src/notifier/alert-copy";
 import rulesRaw from "../rules/beagle-rules.json" with { type: "text" };
 import type { AlertEvent } from "../src/core/alert/engine";
 import { BEAGLE_VERSION } from "../src/core/version";
+import { VIEWER_ASSET_ID } from "../src/viewer/server";
 
 const rules = compileRules(
   loadRuleFile(rulesRaw as unknown as string),
@@ -63,6 +64,7 @@ describe("persisted local demo", () => {
       proxyPort: 4321,
       socketPath: "/tmp/demo.sock",
       runningVersion: BEAGLE_VERSION,
+      runningViewerAssetId: VIEWER_ASSET_ID,
     };
 
     const exitCode = await cmdDemo("/tmp/beagle-demo-test", {
@@ -136,6 +138,31 @@ describe("persisted local demo", () => {
     expect(exitCode).toBe(1);
     expect(exchangeCalls).toBe(0);
     expect(stderr).toContain("running daemon is v0.0.1");
+    expect(stderr).toContain("restart it before the drill");
+  });
+
+  test("a same-version daemon with older dashboard assets is refused before exchange", async () => {
+    let exchangeCalls = 0;
+    let stderr = "";
+    const mock: DemoMock = { port: 1234, close: async () => {} };
+
+    const exitCode = await cmdDemo("/tmp/beagle-demo-test", {
+      startMock: async () => mock,
+      ensureDaemon: async () => ({
+        pid: 42,
+        proxyPort: 4321,
+        socketPath: "/tmp/demo.sock",
+        runningVersion: BEAGLE_VERSION,
+        runningViewerAssetId: "older-viewer",
+      }),
+      exchange: async () => { exchangeCalls++; },
+      out: () => {},
+      err: (text) => { stderr += text; },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(exchangeCalls).toBe(0);
+    expect(stderr).toContain("older embedded dashboard");
     expect(stderr).toContain("restart it before the drill");
   });
 
