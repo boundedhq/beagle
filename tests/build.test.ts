@@ -33,11 +33,18 @@ describe("compiled binary", () => {
       expect(demo.stdout.toString()).toContain("[demo] badge");
       expect(demo.stdout.toString()).toContain("dashboard:");
       expect(existsSync(join(demoStateDir, "beagle.db"))).toBe(true);
+      // A second run is a fresh drill: it traverses the path again and mints
+      // another event instead of disappearing into ordinary alert dedup.
+      const demoAgain = Bun.spawnSync([out, "demo"], {
+        cwd: dir,
+        env: { ...process.env, BEAGLE_STATE_DIR: demoStateDir, PATH: "/nonexistent" },
+      });
+      expect(demoAgain.exitCode).toBe(0);
       const demoLeaks = Bun.spawnSync([out, "leaks"], {
         cwd: dir,
         env: { ...process.env, BEAGLE_STATE_DIR: demoStateDir },
       }).stdout.toString();
-      expect(demoLeaks).toContain("[demo] drill event");
+      expect(demoLeaks).toContain("2 [demo] drill events");
       const cleanDemo = Bun.spawnSync([out, "demo", "--clean"], {
         cwd: dir,
         env: { ...process.env, BEAGLE_STATE_DIR: demoStateDir },

@@ -383,11 +383,11 @@ function Row({ x, onToggle, onSession }) {
         : x.status >= 400 ? `error ${x.status}` : "ok"}</span></span>
       <span class="time">${t}</span>
       <span class="agent">${x.agent ?? "?"}</span>
-      ${x.demo && html`<span class="chip">[demo]</span>`}
       <span class="model${x.model ? "" : " none"}">${x.model || "none"}</span>
       <span class="summary">${summaryParts(x.summary).map(([text, muted], i) =>
         muted ? html`<span key=${i} class="sum-suffix">${text}</span>` : text)}</span>
       ${x.hasLeak && html`<span class="chip leak">leak</span>`}
+      ${x.demo && html`<span class="chip">[demo]</span>`}
       ${x.source === "wire"
         ? html`<span class="chip wire"
             title="Beagle's proxy saw these exact bytes go to the provider">✓ observed</span>`

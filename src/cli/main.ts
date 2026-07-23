@@ -110,8 +110,9 @@ export async function run(argv: string[]): Promise<number> {
     case "demo":
       if (rest.length === 0) return (await import("./demo")).cmdDemo(stateDir);
       if (rest.length === 1 && rest[0] === "--clean") {
-        console.log(await cmdPurge(stateDir, "demo"));
-        return 0;
+        const result = await cmdPurge(stateDir, "demo");
+        console.log(result);
+        return result.startsWith("purge failed:") ? 1 : 0;
       }
       console.error("usage: beagle demo [--clean]");
       return 2;

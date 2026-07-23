@@ -627,6 +627,11 @@ export class Store {
     if (spec.kind === "all") {
       this.deleteCallsWhere("1=1", []);
       this.db.run(`DELETE FROM leak_events`);
+      // `purge all` historically keeps real run/session identity so an active
+      // capture is not disrupted. Demo identity has no live agent behind it:
+      // remove those records too, matching `beagle demo --clean`.
+      this.db.run(`DELETE FROM sessions WHERE agent = ?`, [DEMO_AGENT]);
+      this.db.run(`DELETE FROM runs WHERE agent = ?`, [DEMO_AGENT]);
     } else if (spec.kind === "demo") {
       this.inTx(() => {
         this.deleteCallsWhereInner("agent = ?", [DEMO_AGENT]);

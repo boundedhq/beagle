@@ -7,6 +7,7 @@ import { loadRuleFile } from "../src/core/scanner/rules";
 import { buildDemoAlertMessage } from "../src/notifier/alert-copy";
 import rulesRaw from "../rules/beagle-rules.json" with { type: "text" };
 import type { AlertEvent } from "../src/core/alert/engine";
+import { BEAGLE_VERSION } from "../src/core/version";
 
 const rules = compileRules(
   loadRuleFile(rulesRaw as unknown as string),
@@ -47,7 +48,12 @@ describe("persisted local demo", () => {
     let stdout = "";
     let stderr = "";
     const mock: DemoMock = { port: 1234, close: async () => { calls.push("close"); } };
-    const daemon = { pid: 1, proxyPort: 4321, socketPath: "/tmp/demo.sock" };
+    const daemon = {
+      pid: 1,
+      proxyPort: 4321,
+      socketPath: "/tmp/demo.sock",
+      runningVersion: BEAGLE_VERSION,
+    };
 
     const exitCode = await cmdDemo("/tmp/beagle-demo-test", {
       generateCanary: () => generateDemoCanary(new Uint8Array(16).fill(9)),
@@ -96,6 +102,30 @@ describe("persisted local demo", () => {
     expect(exchangeCalls).toBe(0);
     expect(stderr).toContain("failed safely");
     expect(stderr).toContain("No request was sent to a model provider");
+  });
+
+  test("an older running daemon is refused because it cannot render an honest drill", async () => {
+    let exchangeCalls = 0;
+    let stderr = "";
+    const mock: DemoMock = { port: 1234, close: async () => {} };
+
+    const exitCode = await cmdDemo("/tmp/beagle-demo-test", {
+      startMock: async () => mock,
+      ensureDaemon: async () => ({
+        pid: 42,
+        proxyPort: 4321,
+        socketPath: "/tmp/demo.sock",
+        runningVersion: "0.0.1",
+      }),
+      exchange: async () => { exchangeCalls++; },
+      out: () => {},
+      err: (text) => { stderr += text; },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(exchangeCalls).toBe(0);
+    expect(stderr).toContain("running daemon is v0.0.1");
+    expect(stderr).toContain("restart it before the drill");
   });
 
   test("demo notification copy never implies a real provider leak", () => {

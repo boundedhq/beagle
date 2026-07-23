@@ -7,8 +7,9 @@ import type { AddressInfo } from "node:net";
 import { listenReady } from "../core/net/listen";
 import { DEMO_AGENT } from "../core/call";
 import { Store } from "../core/store/store";
+import { BEAGLE_VERSION } from "../core/version";
 import { controlRequest } from "../daemon/control";
-import { cmdUi, ensureDaemon, type DaemonInfo } from "./commands";
+import { cmdUi, ensureDaemon, staleDaemonRemedy, type DaemonInfo } from "./commands";
 
 const CANARY_ALPHABET = "BCDFGHJKLMNPQRSTVWYZ23456789";
 const DEMO_STEP_TIMEOUT_MS = 3_000;
@@ -164,6 +165,16 @@ export async function cmdDemo(
     mock = await deps.startMock();
     const daemon = await deps.ensureDaemon(stateDir);
     if (!daemon) throw new Error("could not start the beagle daemon");
+    // Unlike an ordinary capture, the drill promises this build's exact UI,
+    // copy, count exclusion, and cleanup behavior. An older live daemon owns
+    // all four surfaces, so proceeding would produce a misleading demo.
+    if (daemon.runningVersion !== BEAGLE_VERSION) {
+      const running = daemon.runningVersion ? `v${daemon.runningVersion}` : "an unknown version";
+      throw new Error(
+        `the running daemon is ${running}; restart it before the drill: ` +
+        staleDaemonRemedy(stateDir, daemon.pid),
+      );
+    }
     const runId = `demo-${randomUUID()}`;
     await deps.exchange(daemon, mock, canary, runId);
     const result = await deps.waitForLeak(stateDir, runId);

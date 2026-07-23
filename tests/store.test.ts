@@ -861,6 +861,19 @@ describe("Retention & purge", () => {
     store.close();
   });
 
+  test("purge all includes demo session and run metadata without dropping real identity", () => {
+    const store = Store.open(dir);
+    store.insertSession({ id: "demo-s", agent: DEMO_AGENT, firstTs: 1, lastTs: 2 });
+    store.insertSession({ id: "real-s", agent: "claude-code", firstTs: 1, lastTs: 2 });
+    store.insertRun({ id: "demo-r", agent: DEMO_AGENT, provider: "loopback-demo", upstream: "http://127.0.0.1:1", authLocation: null, extraHeaders: null, createdTs: 1 });
+    store.insertRun({ id: "real-r", agent: "claude-code", provider: "anthropic", upstream: "http://127.0.0.1:2", authLocation: null, extraHeaders: null, createdTs: 1 });
+
+    store.purge({ kind: "all" });
+    expect(store.queryAll<{ id: string }>(`SELECT id FROM sessions ORDER BY id`)).toEqual([{ id: "real-s" }]);
+    expect(store.listRuns().map((r) => r.id)).toEqual(["real-r"]);
+    store.close();
+  });
+
   test("demo events age out before their identity session is removed", () => {
     const store = Store.open(dir);
     const old = Date.now() - 10_000;
