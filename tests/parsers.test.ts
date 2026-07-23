@@ -236,12 +236,17 @@ describe("display labels (turn clarity)", () => {
       messages: [
         { role: "user", content: "run it" },
         { role: "assistant", content: [{ type: "text", text: "ok" }] },
-        { role: "user", content: [{ type: "tool_result", content: "452 pass" }] },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "452 pass" }],
+        },
       ],
     });
     const parsed = parseRequest("anthropic-messages", enc(body))!;
     expect(parsed.messages[0]!.kind).toBeUndefined();
-    expect(parsed.messages[2]).toMatchObject({ role: "user", content: "452 pass", kind: "result" });
+    expect(parsed.messages[2]).toMatchObject({
+      role: "user", content: "452 pass", kind: "result", callId: "toolu_1",
+    });
   });
 
   test("openai-chat role:'tool' messages stamp kind:'result'", () => {

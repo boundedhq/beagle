@@ -345,6 +345,9 @@ function toMessage(m: Record<string, unknown>): DisplayMessage {
     (m.content as Array<Record<string, unknown>>).some((b) => b?.type === "tool_result")
   ) {
     out.kind = "result";
+    const result = (m.content as Array<Record<string, unknown>>)
+      .find((b) => b?.type === "tool_result");
+    if (typeof result?.tool_use_id === "string") out.callId = result.tool_use_id;
   }
   return out;
 }

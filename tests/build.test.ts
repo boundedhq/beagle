@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Store } from "../src/core/store/store";
+import { buildSessionTurns } from "../src/viewer/session-view";
 
 describe("compiled binary", () => {
   test(
@@ -47,12 +49,41 @@ describe("compiled binary", () => {
       expect(demoLeaks).toContain("2 [demo] drill events");
       const demoCallId = demoLeaks.match(/call ([0-9A-Z]{26})/)?.[1];
       expect(demoCallId).toBeDefined();
-      const demoShow = Bun.spawnSync([out, "show", demoCallId!], {
+      const demoShow = Bun.spawnSync([out, "show", demoCallId!, "--full"], {
         cwd: dir,
         env: { ...process.env, BEAGLE_STATE_DIR: demoStateDir },
       }).stdout.toString();
-      expect(demoShow).toContain("staging deploy cannot authenticate");
-      expect(demoShow).toContain("matching secret access key is configured for staging");
+      expect(demoShow).toContain("Read /tmp/beagle-canary/.env");
+      expect(demoShow).toContain("[REDACTED:aws-access-key-id:");
+      expect(demoShow).toContain("The file contains an AWS access key ID");
+
+      // The dashboard must tell the same story as the synthetic agent loop:
+      // user asks for a file, model requests Read, tool returns the canary,
+      // model answers. This catches a realistic wire exchange that stores as
+      // two disconnected or misordered cards.
+      const demoStore = Store.openReadOnly(demoStateDir);
+      try {
+        const demoCall = demoStore.getCall(demoCallId!);
+        expect(demoCall).not.toBeNull();
+        const session = buildSessionTurns(demoStore, demoCall!.sessionId);
+        expect(session.turns).toHaveLength(2);
+        expect(session.turns[0]!.messages[0]!.content).toContain(
+          "Read /tmp/beagle-canary/.env",
+        );
+        expect(session.turns[0]!.responseCalls[0]).toMatchObject({
+          tool: "Read",
+          detail: "/tmp/beagle-canary/.env",
+        });
+        expect(session.turns[1]!.messages[0]).toMatchObject({
+          kind: "result",
+          content: expect.stringContaining("[REDACTED:aws-access-key-id:"),
+        });
+        expect(session.turns[1]!.responseText).toContain(
+          "The file contains an AWS access key ID",
+        );
+      } finally {
+        demoStore.close();
+      }
       const cleanDemo = Bun.spawnSync([out, "demo", "--clean"], {
         cwd: dir,
         env: { ...process.env, BEAGLE_STATE_DIR: demoStateDir },

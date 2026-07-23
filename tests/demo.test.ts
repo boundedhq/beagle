@@ -30,15 +30,21 @@ describe("persisted local demo", () => {
     )).toBe(true);
   });
 
-  test("mock serves a canned Anthropic SSE response on IPv4 loopback", async () => {
+  test("mock serves a Read tool call followed by an answer on IPv4 loopback", async () => {
     const mock = await startDemoMock();
     try {
-      const response = await fetch(`http://127.0.0.1:${mock.port}/v1/messages`, { method: "POST" });
-      expect(response.headers.get("content-type")).toContain("text/event-stream");
-      const body = await response.text();
-      expect(body).toContain("event: message_start");
-      expect(body).toContain("matching secret access key is configured for staging");
-      expect(body).toContain("Avoid pasting credentials into chats or logs");
+      const first = await fetch(`http://127.0.0.1:${mock.port}/v1/messages`, { method: "POST" });
+      expect(first.headers.get("content-type")).toContain("text/event-stream");
+      const toolCall = await first.text();
+      expect(toolCall).toContain('"type":"tool_use"');
+      expect(toolCall).toContain('"name":"Read"');
+      expect(toolCall).toContain('/tmp/beagle-canary/.env');
+      expect(toolCall).toContain('"stop_reason":"tool_use"');
+
+      const second = await fetch(`http://127.0.0.1:${mock.port}/v1/messages`, { method: "POST" });
+      const answer = await second.text();
+      expect(answer).toContain("The file contains an AWS access key ID");
+      expect(answer).toContain("Avoid pasting credentials into chats or logs");
     } finally {
       await mock.close();
     }
@@ -79,6 +85,7 @@ describe("persisted local demo", () => {
     expect(stderr).toBe("");
     expect(calls).toEqual(["mock", "daemon", "exchange", "persist", "ui", "close"]);
     expect(stdout).toContain("normal daemon path");
+    expect(stdout).toContain("reading it from a local .env file");
     expect(stdout).toContain("[demo] badge");
     expect(stdout).toContain("dashboard: http://127.0.0.1/demo");
     expect(stdout).toContain("nothing left this machine");

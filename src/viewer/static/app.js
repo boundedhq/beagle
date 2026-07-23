@@ -738,7 +738,7 @@ function TMsg({ m, leaks, find }) {
   // The one unacceptable failure is a hidden secret: a leak-bearing message
   // never clamps and never renders collapsed.
   const hasLeak = (leaks ?? []).some((l) => l.value && content.includes(l.value));
-  if (m.role === "tool" || m.role === "request") {
+  if (m.role === "tool" || m.role === "request" || m.kind === "call" || m.kind === "result") {
     return html`<${ToolCard} role=${m.role} content=${content} leaks=${leaks} hasLeak=${hasLeak}
       tool=${m.tool} kind=${m.kind} detail=${m.detail} sourceId=${m.sourceId} find=${find} />`;
   }
