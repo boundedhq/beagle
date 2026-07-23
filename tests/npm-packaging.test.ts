@@ -35,6 +35,7 @@ describe("npm packaging", () => {
     expect(main.repository?.url).toContain("github.com/boundedhq/beagle");
     // README ships so the primary channel's npm page isn't blank
     expect(existsSync(join(npmOut, "beagle", "README.md"))).toBe(true);
+    expect(existsSync(join(npmOut, "beagle", "LICENSE"))).toBe(true);
 
     const expected = Object.fromEntries(TARGETS.map((t) => [`@boundedhq/beagle-${t}`, BEAGLE_VERSION]));
     expect(main.optionalDependencies).toEqual(expected);
@@ -46,9 +47,10 @@ describe("npm packaging", () => {
       expect(p.version).toBe(BEAGLE_VERSION);
       expect(p.os).toEqual([os]);
       expect(p.cpu).toEqual([cpu]);
-      expect(p.files).toEqual(["beagle"]);
+      expect(p.files).toEqual(["beagle", "LICENSE"]);
       // the binary rides the tarball — no post-install fetch
       expect(existsSync(join(npmOut, `beagle-${t}`, "beagle"))).toBe(true);
+      expect(existsSync(join(npmOut, `beagle-${t}`, "LICENSE"))).toBe(true);
     }
     expect(existsSync(join(npmOut, "beagle", "bin", "beagle.cjs"))).toBe(true);
   });

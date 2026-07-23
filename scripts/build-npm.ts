@@ -37,6 +37,7 @@ for (const { os, cpu } of TARGETS) {
   mkdirSync(dir, { recursive: true });
   const binSrc = join(releaseDir, `beagle-${os}-${cpu}`);
   copyFileSync(binSrc, join(dir, "beagle")); // throws if build-release didn't run
+  copyFileSync(join(process.cwd(), "LICENSE"), join(dir, "LICENSE"));
   writeFileSync(
     join(dir, "package.json"),
     JSON.stringify(
@@ -48,7 +49,7 @@ for (const { os, cpu } of TARGETS) {
         repository,
         os: [os],
         cpu: [cpu],
-        files: ["beagle"],
+        files: ["beagle", "LICENSE"],
       },
       null,
       2,
@@ -63,6 +64,7 @@ cpSync(join(process.cwd(), "packaging", "npm", "launcher.cjs"), join(mainDir, "b
 // Ship the project README so the primary channel's npm page isn't blank
 // (npm always includes README.md regardless of the `files` allowlist).
 copyFileSync(join(process.cwd(), "README.md"), join(mainDir, "README.md"));
+copyFileSync(join(process.cwd(), "LICENSE"), join(mainDir, "LICENSE"));
 writeFileSync(
   join(mainDir, "package.json"),
   JSON.stringify(
@@ -74,7 +76,7 @@ writeFileSync(
       repository,
       homepage: "https://github.com/boundedhq/beagle",
       bin: { beagle: "bin/beagle.cjs" },
-      files: ["bin/beagle.cjs"],
+      files: ["bin/beagle.cjs", "LICENSE"],
       // The binary rides these; npm installs only the matching os/cpu.
       optionalDependencies,
       engines: { node: ">=18" },
