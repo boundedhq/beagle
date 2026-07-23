@@ -378,8 +378,24 @@ export function cmdSearch(stateDir: string, term: string): string {
   const lines = [
     `found in ${hits.length} call${hits.length === 1 ? "" : "s"} across ${sessions.size} session${sessions.size === 1 ? "" : "s"}:`,
   ];
+  const bySession = new Map<string, typeof hits>();
   for (const h of hits) {
-    lines.push(`  ${h.callId.slice(0, 8)}  ${new Date(h.tsRequest).toISOString()}  session ${clean(h.sessionId).slice(0, 8)}`);
+    const group = bySession.get(h.sessionId) ?? [];
+    group.push(h);
+    bySession.set(h.sessionId, group);
+  }
+  for (const [sessionId, group] of bySession) {
+    lines.push("", `  session id: ${clean(sessionId)}`);
+    for (const h of group) {
+      lines.push(`    ${new Date(h.tsRequest).toISOString()}  call ${clean(h.callId)}`);
+    }
+  }
+  lines.push(
+    "",
+    sessions.size === 1 ? "open this session in the dashboard:" : "open a session in the dashboard:",
+  );
+  for (const sessionId of sessions) {
+    lines.push(`  beagle ui --session ${clean(sessionId)}`);
   }
   return lines.join("\n");
 }

@@ -45,7 +45,28 @@ describe("CLI commands (headless loop, R12)", () => {
   test("search: definitive found-in-N answer", () => {
     const out = cmdSearch(stateDir, "hunter2");
     expect(out).toContain("found in 1 call");
-    expect(out).toContain("s1");
+    expect(out).toContain("session id: s1");
+    expect(out).toContain(`call ${callId}`);
+    expect(out).toContain("beagle ui --session s1");
+  });
+
+  test("search: prints the complete session id in results and the dashboard command", () => {
+    const store = Store.open(stateDir);
+    const sessionId = "session-0123456789abcdef";
+    store.insertCall({
+      id: ulid(), sessionId, runId: "search-run", source: "wire",
+      agent: "claude-code", provider: "anthropic", endpoint: "/v1/messages",
+      tsRequest: Date.now(), scanState: "ok", captureState: "ok",
+      sessionTier: "run", requestBody: null, requestHeaders: null,
+      responseBody: null, responseHeaders: null, sseRaw: null,
+      searchText: "unique-dashboard-needle",
+    });
+    store.close();
+
+    const out = cmdSearch(stateDir, "unique-dashboard-needle");
+    expect(out).toContain(`session id: ${sessionId}`);
+    expect(out).toContain(`beagle ui --session ${sessionId}`);
+    expect(out).not.toContain(`beagle ui --session ${sessionId.slice(0, 8)}\n`);
   });
 
   test("search: a miss is bounded, not a categorical 'never sent'", () => {
